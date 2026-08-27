@@ -19,6 +19,11 @@ jobs:
         python-version: ["3.11", "3.12"]
 
     steps:
+      # Node.js 20 deprecation notice:
+      # setup-uv@v6 and upload-artifact@v5 still declare `using: node20` in
+      # their action.yml. GitHub runs them on Node 24 automatically and warns
+      # about it. Not fixable from our side — bump the tags once Astral and
+      # GitHub publish Node-24-declared releases. CI is green either way.
       - name: Checkout
         uses: actions/checkout@v5
 

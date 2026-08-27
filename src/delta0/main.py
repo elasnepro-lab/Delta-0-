@@ -1,10 +1,12 @@
 """CLI entry point for the bot.
 
-Commands (M0):
-    delta0 config-check [--config PATH]     validate YAML, no network calls
-    delta0 status       [--config PATH]     connect read-only to Aave + HL, print snapshot
+Commands:
+    delta0 config-check     validate YAML, no network calls              (M0)
+    delta0 status           snapshot both venues, read-only               (M0)
+    delta0 tracer           M1 marche à blanc — journal des tirs à blanc  (M1)
+    delta0 report           report on shadow intents + latencies          (M1)
 
-Later milestones will add: run, deflate, unwind, status --json.
+Later milestones will add: run, deflate, unwind.
 """
 
 from __future__ import annotations
@@ -26,8 +28,12 @@ from delta0.config import Config, load_config
 from delta0.decision import target_state
 from delta0.logging import configure_logging, get_logger, new_run_id
 from delta0.settings import Settings, load_settings
+from delta0.state import StateStore
+from delta0.tracer import LATENCY_PATH_DECISION, LATENCY_PATH_SNAPSHOT, TracerLoop
 from delta0.venues.aave import AaveReader
 from delta0.venues.hyperliquid import HyperliquidReader
+from delta0.watchdog import Watchdog
+from delta0.watcher import LiveWatcher
 
 app = typer.Typer(
     add_completion=False,
@@ -37,6 +43,30 @@ app = typer.Typer(
 console = Console()
 
 _DEFAULT_CONFIG = Path("config.yaml")
+_DEFAULT_DB = Path("data/delta0.db")
+
+
+def _parse_duration(spec: str) -> float:
+    """Parse durations like '30s', '10m', '2h', '7d' into seconds."""
+    spec = spec.strip().lower()
+    if not spec:
+        raise typer.BadParameter("empty duration")
+    unit = spec[-1]
+    try:
+        value = float(spec[:-1]) if unit in "smhd" else float(spec)
+    except ValueError as e:
+        raise typer.BadParameter(f"invalid duration {spec!r}") from e
+    match unit:
+        case "s":
+            return value
+        case "m":
+            return value * 60
+        case "h":
+            return value * 3600
+        case "d":
+            return value * 86400
+        case _:
+            return value
 
 
 @app.command()
@@ -228,6 +258,110 @@ def _json_default(obj: object) -> object:
     if obj == float("inf"):
         return "inf"
     raise TypeError(f"unserializable: {type(obj).__name__}")
+
+
+# --- M1 commands --------------------------------------------------------------
+
+
+@app.command()
+def tracer(
+    config: Annotated[Path, typer.Option("--config", "-c")] = _DEFAULT_CONFIG,
+    db: Annotated[Path, typer.Option("--db")] = _DEFAULT_DB,
+    duration: Annotated[
+        str,
+        typer.Option("--duration", "-d", help="ex: 30s, 10m, 2h, 7d — vide = infini"),
+    ] = "",
+    cadence: Annotated[float, typer.Option("--cadence", help="secondes entre snapshots")] = 5.0,
+) -> None:
+    """M1 marche à blanc — observe, décide, journalise (aucune exécution)."""
+    cfg = load_config(config)
+    settings = load_settings()
+    configure_logging(cfg.mode)
+    log = get_logger("tracer")
+    run_id = new_run_id()
+    duration_s = _parse_duration(duration) if duration else None
+    log.info(
+        "tracer_boot",
+        message=f"démarrage TRACER (cadence {cadence}s, durée {duration or 'infinie'})",
+        run_id=run_id,
+    )
+    asyncio.run(_run_tracer(cfg, settings, db, duration_s, cadence))
+
+
+async def _run_tracer(
+    cfg: Config,
+    settings: Settings,
+    db_path: Path,
+    duration_s: float | None,
+    cadence: float,
+) -> None:
+    store = StateStore(db_path)
+    await store.open()
+
+    w3 = AsyncWeb3(AsyncHTTPProvider(settings.arbitrum_rpc_primary))
+    aave = AaveReader(
+        web3=w3,
+        pool_address=cfg.venues.aave_pool,
+        user_address=settings.bot_master_address,
+    )
+    hl = HyperliquidReader(cfg.venues.hl_api, user_address=settings.bot_master_address)
+    watchdog = Watchdog(config=cfg.watchdog, project_root=Path.cwd())
+    watcher = LiveWatcher(config=cfg, aave=aave, hl=hl, watchdog=watchdog)
+    loop = TracerLoop(
+        watcher=watcher,
+        watchdog=watchdog,
+        store=store,
+        config=cfg,
+        cadence_s=cadence,
+    )
+    try:
+        n = await loop.run(duration_s=duration_s)
+    finally:
+        await store.close()
+    console.print(f"[bold green]TRACER terminé[/bold green] — {n} tirs à blanc journalisés.")
+
+
+@app.command()
+def report(
+    db: Annotated[Path, typer.Option("--db")] = _DEFAULT_DB,
+) -> None:
+    """Rapport TRACER : histogramme des priorités déclenchées + latences p50/p95."""
+    asyncio.run(_run_report(db))
+
+
+async def _run_report(db_path: Path) -> None:
+    store = StateStore(db_path)
+    await store.open()
+    try:
+        total = await store.count_shadow_intents()
+        by_prio = await store.shadow_intents_by_priority()
+        snap_stats = await store.latency_stats(LATENCY_PATH_SNAPSHOT)
+        dec_stats = await store.latency_stats(LATENCY_PATH_DECISION)
+    finally:
+        await store.close()
+
+    prio_table = Table(title=f"Tirs à blanc par priorité (total: {total})")
+    prio_table.add_column("Priorité")
+    prio_table.add_column("Compte", justify="right")
+    for prio_val in sorted(by_prio):
+        prio_table.add_row(f"P{prio_val}", str(by_prio[prio_val]))
+    console.print(prio_table)
+
+    lat_table = Table(title="Latences observées (ms)")
+    lat_table.add_column("Chemin")
+    lat_table.add_column("Compte", justify="right")
+    lat_table.add_column("p50", justify="right")
+    lat_table.add_column("p95", justify="right")
+    lat_table.add_column("max", justify="right")
+    for name, stats in [("snapshot", snap_stats), ("decision", dec_stats)]:
+        lat_table.add_row(
+            name,
+            f"{int(stats['count'])}",
+            f"{stats['p50']:.2f}",
+            f"{stats['p95']:.2f}",
+            f"{stats['max']:.2f}",
+        )
+    console.print(lat_table)
 
 
 if __name__ == "__main__":

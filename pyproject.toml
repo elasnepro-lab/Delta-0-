@@ -128,7 +128,6 @@ omit = [
     "src/delta0/watcher.py",
     "src/delta0/executor.py",
     "src/delta0/watchdog.py",
-    "src/delta0/state.py",
     "src/delta0/venues/aave.py",
     "src/delta0/venues/hyperliquid.py",
     "src/delta0/venues/bridge.py",
