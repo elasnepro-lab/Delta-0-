@@ -19,12 +19,16 @@ repos:
         args: ["--fix"]
       - id: ruff-format
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.13.0
+  # Mypy runs against the project's venv (managed by uv) so it can see all
+  # runtime deps (pydantic, structlog, aiosqlite, typer, etc.). The upstream
+  # mirrors-mypy hook creates an isolated env and would need every runtime
+  # dep re-declared in additional_dependencies — brittle and duplicative.
+  - repo: local
     hooks:
       - id: mypy
-        additional_dependencies:
-          - pydantic>=2.9.0
-          - types-pyyaml
-        args: ["--strict"]
-        files: ^src/
+        name: mypy (uv run, project venv)
+        entry: uv run mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+        args: ["src", "tests"]
