@@ -210,7 +210,8 @@ class StateStore:
     async def kv_get(self, key: str) -> str | None:
         assert self._conn is not None, "StateStore not opened"
         async with self._conn.execute(
-            "SELECT value FROM state_kv WHERE key = ?", (key,),
+            "SELECT value FROM state_kv WHERE key = ?",
+            (key,),
         ) as cur:
             row = await cur.fetchone()
             return str(row[0]) if row else None

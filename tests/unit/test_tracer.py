@@ -70,7 +70,11 @@ async def test_tracer_journals_shadow_intent_when_action_fires(
     watcher = _FakeWatcher(snapshots=[snap])
     wd = Watchdog(config=config.watchdog, project_root=tmp_path)
     loop = TracerLoop(
-        watcher=watcher, watchdog=wd, store=store, config=config, cadence_s=0.0,
+        watcher=watcher,
+        watchdog=wd,
+        store=store,
+        config=config,
+        cadence_s=0.0,
     )
     n = await loop.run(duration_s=0.01)
     assert n >= 1
@@ -88,7 +92,11 @@ async def test_tracer_stops_on_kill_file(
     wd = Watchdog(config=config.watchdog, project_root=tmp_path)
     (tmp_path / "KILL").write_text("")
     loop = TracerLoop(
-        watcher=watcher, watchdog=wd, store=store, config=config, cadence_s=0.0,
+        watcher=watcher,
+        watchdog=wd,
+        store=store,
+        config=config,
+        cadence_s=0.0,
     )
     n = await loop.run(duration_s=10.0)
     assert n == 0
@@ -105,7 +113,11 @@ async def test_tracer_records_latency_samples(
     watcher = _FakeWatcher(snapshots=[_base_snap()])
     wd = Watchdog(config=config.watchdog, project_root=tmp_path)
     loop = TracerLoop(
-        watcher=watcher, watchdog=wd, store=store, config=config, cadence_s=0.0,
+        watcher=watcher,
+        watchdog=wd,
+        store=store,
+        config=config,
+        cadence_s=0.0,
     )
     await loop.run(duration_s=0.01)
     snap_stats = await store.latency_stats(LATENCY_PATH_SNAPSHOT)
@@ -125,7 +137,11 @@ async def test_tracer_does_not_journal_on_noop(
     watcher = _FakeWatcher(snapshots=[_base_snap()])
     wd = Watchdog(config=config.watchdog, project_root=tmp_path)
     loop = TracerLoop(
-        watcher=watcher, watchdog=wd, store=store, config=config, cadence_s=0.0,
+        watcher=watcher,
+        watchdog=wd,
+        store=store,
+        config=config,
+        cadence_s=0.0,
     )
     n = await loop.run(duration_s=0.005)
     assert n == 0

@@ -120,5 +120,3 @@ class TracerLoop:
             desired_exposure_mult=None,
             current_exposure_mult=None,
         )
-
-
