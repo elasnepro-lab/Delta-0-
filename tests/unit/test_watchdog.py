@@ -15,7 +15,11 @@ def _make(config: Config, tmp_path: Path) -> Watchdog:
 
 def test_starts_nominal(config: Config, tmp_path: Path) -> None:
     wd = _make(config, tmp_path)
-    assert wd.blind_state(now=100.0) == BlindState.NOMINAL
+    # No `now` override: query with the real monotonic clock so the elapsed
+    # time since construction is essentially zero. Passing a hardcoded `now`
+    # here is fragile (`time.monotonic()` at boot differs by orders of
+    # magnitude across OSes and CI runners).
+    assert wd.blind_state() == BlindState.NOMINAL
 
 
 def test_ws_staleness_marks_hl_blind(config: Config, tmp_path: Path) -> None:
