@@ -10,6 +10,7 @@ The watcher does NOT decide. It just observes. See README §3.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -56,25 +57,29 @@ class LiveWatcher:
         now_utc = datetime.now(UTC)
         now_mono = time.monotonic()
 
-        # --- Aave leg ---------------------------------------------------------
+        # --- Aave leg (5 reads in parallel) -----------------------------------
         try:
-            account = await self.aave.read_account_data()
-            wsteth = await self.aave.read_token_balances(self.config.venues.wsteth_address)
-            usdc = await self.aave.read_token_balances(self.config.venues.usdc_address)
-            usdc_rates = await self.aave.read_reserve_rates(self.config.venues.usdc_address)
-            gas = await self.aave.read_gas_balance_eth()
+            account, wsteth, usdc, usdc_rates, gas = await asyncio.gather(
+                self.aave.read_account_data(),
+                self.aave.read_token_balances(self.config.venues.wsteth_address),
+                self.aave.read_token_balances(self.config.venues.usdc_address),
+                self.aave.read_reserve_rates(self.config.venues.usdc_address),
+                self.aave.read_gas_balance_eth(),
+            )
             self.watchdog.mark_aave_ok(now=now_mono)
         except Exception:
             self.watchdog.mark_aave_failure()
             log.exception("aave_read_failed", message="lecture Aave en échec")
             raise
 
-        # --- HL leg -----------------------------------------------------------
+        # --- HL leg (4 reads in parallel) -------------------------------------
         try:
-            meta = await self.hl.read_market_meta(self.coin)
-            position = await self.hl.read_position(self.coin)
-            funding_30d = await self.hl.read_funding_avg_30d(self.coin)
-            funding_1h = await self.hl.read_last_hour_funding(self.coin)
+            meta, position, funding_30d, funding_1h = await asyncio.gather(
+                self.hl.read_market_meta(self.coin),
+                self.hl.read_position(self.coin),
+                self.hl.read_funding_avg_30d(self.coin),
+                self.hl.read_last_hour_funding(self.coin),
+            )
             self.watchdog.mark_hl_ok(now=now_mono)
             # WS ticks (if any) refresh the freshness signal. Without a stream,
             # a successful REST poll still counts as "fresh".
