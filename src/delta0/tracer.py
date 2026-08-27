@@ -20,6 +20,7 @@ from delta0.decision import BlindState, OperationalContext, decide
 from delta0.logging import get_logger, set_cycle_id
 from delta0.state import StateStore
 from delta0.types import Snapshot
+from delta0.venues.hl_stream import HyperliquidStream
 from delta0.watchdog import KillSignal, Watchdog
 from delta0.watcher import WatcherProtocol
 
@@ -37,6 +38,7 @@ class TracerLoop:
     store: StateStore
     config: Config
     cadence_s: float = 5.0
+    stream: HyperliquidStream | None = None
 
     async def run(self, duration_s: float | None = None) -> int:
         """Run the TRACER loop for `duration_s` (or forever if None).
@@ -104,6 +106,7 @@ class TracerLoop:
         last_skim_str = await self.store.kv_get("last_skim_at")
         last_skim = datetime.fromisoformat(last_skim_str) if last_skim_str else None
         blind = self.watchdog.blind_state()
+        liquidation = self._check_liquidation_events()
 
         # Regime-gate inputs are left as None in M1: P10 requires a 30-day
         # funding average with 7-day hysteresis (README §8.9). The regime
@@ -114,9 +117,36 @@ class TracerLoop:
         return OperationalContext(
             now_utc=datetime.now(UTC),
             blind_state=blind if isinstance(blind, BlindState) else BlindState.NOMINAL,
-            liquidation_event=False,  # M1-B: hook to LiquidationCall event stream
+            liquidation_event=liquidation,
             anchor_price=anchor,
             last_skim_at=last_skim,
             desired_exposure_mult=None,
             current_exposure_mult=None,
         )
+
+    def _check_liquidation_events(self) -> bool:
+        """Drain the HL user-event queue and return True if a liquidation is
+        pending. Also logs any fill/funding event for the digest.
+
+        Aave-side LiquidationCall detection is a M2 concern (event filter on
+        the Pool address); M1 wires the HL side.
+        """
+        if self.stream is None:
+            return False
+        events = self.stream.drain_user_events()
+        seen_liquidation = False
+        for evt in events:
+            if evt.kind == "liquidation":
+                seen_liquidation = True
+                log.critical(
+                    "hl_liquidation",
+                    message="liquidation Hyperliquid détectée sur notre compte",
+                    raw=evt.raw,
+                )
+            elif evt.kind == "fill":
+                log.info(
+                    "hl_fill",
+                    message="fill Hyperliquid observé",
+                    raw=evt.raw,
+                )
+        return seen_liquidation

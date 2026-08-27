@@ -96,6 +96,8 @@ _ERC20_BALANCE_ABI: list[dict[str, Any]] = [
 _BASE_DECIMALS = 10**8
 # HF is returned in wad (1e18); infinity when there is no debt.
 _HF_WAD = 10**18
+# Interest rates are in RAY (1e27) and expressed as annualized values.
+_RAY = 10**27
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +115,14 @@ class AaveAccountData:
 class AaveTokenBalances:
     atoken_balance: float  # native units (float, tight to Decimal in M1)
     variable_debt_balance: float
+
+
+@dataclass(frozen=True, slots=True)
+class AaveReserveRates:
+    """Interest rates for one reserve (already converted from RAY to APR)."""
+
+    liquidity_apr: float  # supply-side APR
+    variable_borrow_apr: float  # variable borrow APR — the one used by the bot
 
 
 class AaveReader:
@@ -172,6 +182,23 @@ class AaveReader:
         return AaveTokenBalances(
             atoken_balance=atoken_bal / 10**atoken_dec,
             variable_debt_balance=vdebt_bal / 10**vdebt_dec,
+        )
+
+    async def read_reserve_rates(self, asset: str) -> AaveReserveRates:
+        """Return liquidity + variable-borrow APRs for `asset`.
+
+        Aave stores rates in RAY (1e27) as annualized values, so APR is simply
+        `rate / 1e27`. Do NOT re-scale by seconds/year — that is a common bug.
+        """
+        reserve_data = await self._pool.functions.getReserveData(
+            AsyncWeb3.to_checksum_address(asset),
+        ).call()
+        # Positions 2 and 4 per the ABI: currentLiquidityRate, currentVariableBorrowRate.
+        liquidity_rate_ray: int = reserve_data[2]
+        variable_borrow_rate_ray: int = reserve_data[4]
+        return AaveReserveRates(
+            liquidity_apr=liquidity_rate_ray / _RAY,
+            variable_borrow_apr=variable_borrow_rate_ray / _RAY,
         )
 
     async def read_gas_balance_eth(self) -> float:
