@@ -94,6 +94,40 @@ class WatchdogConfig(BaseModel):
     latency_budget_factor: Annotated[float, Field(gt=1.0)]
 
 
+class TracerConfig(BaseModel):
+    """Safeties for M1 TRACER micro-operations (README §14).
+
+    These caps exist to make sure a bug in the tracer executor cannot drain
+    the operational float (~100 $) that funds the latency-measurement traffic.
+    Every micro-op is checked against ALL of these before any network call.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    max_op_usd: _PositiveFloat = Field(
+        default=15.0,
+        description="Hard cap on the notional of any single micro-operation.",
+    )
+    max_ops_per_hour: _PositiveInt = Field(
+        default=20,
+        description="Rolling rate limit — refuses further ops beyond this per hour.",
+    )
+    require_first_use_confirmation: bool = Field(
+        default=True,
+        description=(
+            "First execution of each op kind is blocked until the operator "
+            "explicitly confirms via CLI flag or env var."
+        ),
+    )
+    dry_run: bool = Field(
+        default=True,
+        description=(
+            "When true, the executor prepares every step but never sends a tx. "
+            "M1-B2 defaults to True — flip to False only in a supervised run."
+        ),
+    )
+
+
 class VenuesConfig(BaseModel):
     """External venue endpoints and on-chain addresses."""
 
@@ -173,6 +207,9 @@ class Config(BaseModel):
     # Emergency and watchdog.
     emergency: EmergencyConfig
     watchdog: WatchdogConfig
+
+    # M1 TRACER safeties. Defaults are safe: dry_run=True, small cap, low rate.
+    tracer: TracerConfig = Field(default_factory=TracerConfig)
 
     # Venues and alerts.
     venues: VenuesConfig

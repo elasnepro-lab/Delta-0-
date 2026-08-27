@@ -10,6 +10,7 @@ from delta0.config.schema import (
     RegimeConfig,
     RuntimeMode,
     SkimPolicy,
+    TracerConfig,
     VenuesConfig,
     WatchdogConfig,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "RegimeConfig",
     "RuntimeMode",
     "SkimPolicy",
+    "TracerConfig",
     "VenuesConfig",
     "WatchdogConfig",
     "load_config",

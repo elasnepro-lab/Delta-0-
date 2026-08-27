@@ -42,6 +42,16 @@ watchdog:
   tx_fail_max: 3
   latency_budget_factor: 1.5
 
+# M1 TRACER micro-operation safeties (README §14).
+# Defaults are conservative: dry_run True, small caps, first-use confirmation.
+# Flip `dry_run` to False only in a supervised session, once the wallet has
+# the ~100$ operational float and .env keys are set.
+tracer:
+  max_op_usd: 15.0                # hard cap per single micro-op
+  max_ops_per_hour: 20             # rolling rate limit
+  require_first_use_confirmation: true
+  dry_run: true
+
 venues:
   # Aave v3 Arbitrum official addresses (verify against Aave docs at boot).
   usdc_address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"     # native USDC, NEVER USDC.e
