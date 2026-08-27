@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Build
+build/
+dist/
+*.egg-info/
+*.egg
+
+# uv
+.uv_cache/
+
+# Test / coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# SQLite state
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# Secrets & local config
+.env
+.env.*
+!.env.example
+config.yaml
+config.local.yaml
+secrets/
+
+# Kill files (runtime signals — never versioned)
+KILL
+KILL_DEFLATE
+
+# Logs
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# OS
+Thumbs.db
+desktop.ini
+
+# Incidents (per operator, not versioned)
+incidents/

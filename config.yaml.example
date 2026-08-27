@@ -1,0 +1,54 @@
+# Delta-0- config — bot Montage C.
+# Values sourced from the classeur `montage_C_delta_neutre.xlsx` sheet "Model C",
+# validated by the operator on 2026-08-25. See README section 4.
+#
+# Copy to `config.yaml` and adjust locally. Never commit `config.yaml`.
+
+capital_usd: 20000
+short_leverage: 10
+target_ltv: 0.70
+target_margin_ratio: 0.10
+exposure_mult: 2.5           # = 1 / (1 - target_ltv + 1 / short_leverage), verified at boot
+exposure_mult_half: 1.5
+maintenance_margin: 0.02     # HL estimate; read via API at boot, alert on divergence
+cushion_pct: 0.05            # 5% of capital held as USDC supply on Aave = 1000$
+cushion_floor_pct: 0.025     # below this: cushion refill is top priority at skim
+recenter_up: 0.045           # +8% band is narrow; recenter earlier
+recenter_down: 0.06          # -15.7% band is wide; recenter later
+delta_tolerance: 0.02        # |delta| / spot max before short retrue
+skim_cron: "SUN 12:00 UTC"
+skim_min_usd: 200
+skim_policy: recompose       # recompose | deleverage | dividend (v1 = recompose)
+
+regime:
+  spread_full_bps: 500       # funding30d >= borrow + 5pts -> full exposure
+  hysteresis_days: 7
+
+slippage_max_bps: 30
+order_style: maker_then_cross
+gas_min_eth: 0.003
+
+emergency:
+  margin_ratio_pump: 0.05    # ~+5% price move: pump up
+  margin_ratio_reduce: 0.035 # ~+6.5% price move: emergency reduce (2s)
+  reduce_fraction: 0.30
+  ltv_pump: 0.75             # ~-6.7% price move: pump down
+  ltv_cushion: 0.79          # ~-11.4% price move: repay from cushion
+  ltv_deleverage: 0.81       # ~-13.6% price move: stepwise deleverage
+
+watchdog:
+  ws_stale_s: 10
+  rpc_fail_s: 30
+  tx_fail_max: 3
+  latency_budget_factor: 1.5
+
+venues:
+  # Aave v3 Arbitrum official addresses (verify against Aave docs at boot).
+  usdc_address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"     # native USDC, NEVER USDC.e
+  wsteth_address: "0x5979D7b546E38E414F7E9822514be443A4800529"
+  aave_pool: "0x794a61358D6845594F94dc1DB02A252b5b4814aD"
+  aave_data_provider: "0x7F23D86Ee20D869112572136221e173428DD740B"
+  hl_api: "https://api.hyperliquid.xyz"
+  hl_ws: "wss://api.hyperliquid.xyz/ws"
+
+live_small_cap_pct: 0.10
