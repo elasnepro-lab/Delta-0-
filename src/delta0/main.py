@@ -209,7 +209,7 @@ def _render_status(cfg: Config, data: dict[str, object]) -> None:
     aave_table.add_row("LT (on-chain)", f"{aave['lt']:.4f}")
     aave_table.add_row(
         "HF",
-        "∞" if aave["hf"] == float("inf") else f"{aave['hf']:.4f}",
+        "inf" if aave["hf"] == float("inf") else f"{aave['hf']:.4f}",
     )
     aave_table.add_row("e-mode", str(aave["emode"]))
     aave_table.add_row("wstETH aToken", f"{aave['wsteth_balance']:.6f}")
