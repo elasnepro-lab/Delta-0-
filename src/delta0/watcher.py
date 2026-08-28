@@ -57,43 +57,62 @@ class LiveWatcher:
         now_utc = datetime.now(UTC)
         now_mono = time.monotonic()
 
-        # --- Aave leg (5 reads in parallel) -----------------------------------
-        try:
-            account, wsteth, usdc, usdc_rates, gas = await asyncio.gather(
-                self.aave.read_account_data(),
-                self.aave.read_token_balances(self.config.venues.wsteth_address),
-                self.aave.read_token_balances(self.config.venues.usdc_address),
-                self.aave.read_reserve_rates(self.config.venues.usdc_address),
-                self.aave.read_gas_balance_eth(),
-            )
-            self.watchdog.mark_aave_ok(now=now_mono)
-        except Exception:
-            self.watchdog.mark_aave_failure()
-            log.exception("aave_read_failed", message="lecture Aave en échec")
-            raise
+        # Both venues fetched in parallel at the TOP level so the slowest of
+        # the two dictates wall time instead of their sum. `return_exceptions`
+        # lets us record per-venue outcomes distinctly (README §11 needs
+        # BLIND state per venue, not a single global fail flag).
+        aave_task = asyncio.gather(
+            self.aave.read_account_data(),
+            self.aave.read_token_balances(self.config.venues.wsteth_address),
+            self.aave.read_token_balances(self.config.venues.usdc_address),
+            self.aave.read_reserve_rates(self.config.venues.usdc_address),
+            self.aave.read_gas_balance_eth(),
+        )
+        hl_task = asyncio.gather(
+            self.hl.read_market_meta(self.coin),
+            self.hl.read_position(self.coin),
+            self.hl.read_funding_avg_30d(self.coin),
+            self.hl.read_last_hour_funding(self.coin),
+        )
+        aave_result, hl_result = await asyncio.gather(
+            aave_task,
+            hl_task,
+            return_exceptions=True,
+        )
 
-        # --- HL leg (4 reads in parallel) -------------------------------------
-        try:
-            meta, position, funding_30d, funding_1h = await asyncio.gather(
-                self.hl.read_market_meta(self.coin),
-                self.hl.read_position(self.coin),
-                self.hl.read_funding_avg_30d(self.coin),
-                self.hl.read_last_hour_funding(self.coin),
+        # --- Aave outcome -----------------------------------------------------
+        if isinstance(aave_result, BaseException):
+            self.watchdog.mark_aave_failure()
+            log.error(
+                "aave_read_failed",
+                message="lecture Aave en échec",
+                error=repr(aave_result),
             )
-            self.watchdog.mark_hl_ok(now=now_mono)
-            # WS ticks (if any) refresh the freshness signal. Without a stream,
-            # a successful REST poll still counts as "fresh".
-            latest_tick = self.stream.try_latest_mark() if self.stream is not None else None
-            if latest_tick is not None:
-                self.watchdog.mark_ws_tick(now=latest_tick.ts_monotonic)
-                mark_price = latest_tick.mark_price
-            else:
-                self.watchdog.mark_ws_tick(now=now_mono)
-                mark_price = meta.mark_price
-        except Exception:
+            raise aave_result
+        account, wsteth, usdc, usdc_rates, gas = aave_result
+        self.watchdog.mark_aave_ok(now=now_mono)
+
+        # --- HL outcome -------------------------------------------------------
+        if isinstance(hl_result, BaseException):
             self.watchdog.mark_hl_failure()
-            log.exception("hl_read_failed", message="lecture Hyperliquid en échec")
-            raise
+            log.error(
+                "hl_read_failed",
+                message="lecture Hyperliquid en échec",
+                error=repr(hl_result),
+            )
+            raise hl_result
+        meta, position, funding_30d, funding_1h = hl_result
+        self.watchdog.mark_hl_ok(now=now_mono)
+
+        # WS ticks (if any) refresh the freshness signal. Without a stream,
+        # a successful REST poll still counts as "fresh".
+        latest_tick = self.stream.try_latest_mark() if self.stream is not None else None
+        if latest_tick is not None:
+            self.watchdog.mark_ws_tick(now=latest_tick.ts_monotonic)
+            mark_price = latest_tick.mark_price
+        else:
+            self.watchdog.mark_ws_tick(now=now_mono)
+            mark_price = meta.mark_price
 
         # Short size in ETH: for HL, a short position has a negative szi;
         # we normalize to a positive magnitude — the sign is implicit in the
