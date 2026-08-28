@@ -164,6 +164,7 @@ class AaveTraceExecutor:
         guard: MicroOpsGuard,
         master_address: str,
         chain_id: int,
+        private_key: str | None = None,
     ) -> None:
         self._w3 = web3
         self._config = config
@@ -175,6 +176,9 @@ class AaveTraceExecutor:
             config.venues.aave_pool,
         )
         self._pool = web3.eth.contract(address=self._pool_address, abi=_POOL_MUT_ABI)
+        # Held only when the CLI explicitly wired --live-micro-ops. Never
+        # logged (structlog + our own code never format `_private_key`).
+        self._private_key = private_key
 
     # --- Public micro-op API --------------------------------------------------
 
@@ -417,11 +421,14 @@ class AaveTraceExecutor:
         )
 
     def _pkey(self) -> str:
-        # Placeholder: real load in the CLI wiring. Kept as a method so tests
-        # can override without touching the send path.
-        raise NotImplementedError(
-            "private key must be provided by the caller — hook this in the tracer CLI",
-        )
+        # The private key is opt-in — a wiring error must fail LOUDLY rather
+        # than silently attempt to sign with an empty string.
+        if not self._private_key:
+            raise NotImplementedError(
+                "private key not provided — pass private_key= to constructor "
+                "(the CLI wires it from .env via --live-micro-ops)",
+            )
+        return self._private_key
 
     def _estimate_notional(self, asset: str, amount_native: float) -> float:
         # Stables assumed at 1 $. Volatile tokens (wstETH) at a conservative 3 000 $.

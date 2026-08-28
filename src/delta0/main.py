@@ -26,14 +26,20 @@ from web3 import AsyncHTTPProvider, AsyncWeb3
 from delta0 import __version__
 from delta0.config import Config, load_config
 from delta0.decision import target_state
+from delta0.executor import AaveTraceExecutor
+from delta0.hl_executor import HLTraceExecutor
 from delta0.logging import configure_logging, get_logger, new_run_id
+from delta0.safety import ALLOWED_OP_KINDS, MicroOpsGuard
 from delta0.settings import Settings, load_settings
 from delta0.state import StateStore
 from delta0.tracer import LATENCY_PATH_DECISION, LATENCY_PATH_SNAPSHOT, TracerLoop
 from delta0.venues.aave import AaveReader
+from delta0.venues.bridge import BridgeExecutor
 from delta0.venues.hyperliquid import HyperliquidReader
 from delta0.watchdog import Watchdog
 from delta0.watcher import LiveWatcher
+
+ARBITRUM_CHAIN_ID = 42161
 
 app = typer.Typer(
     add_completion=False,
@@ -272,20 +278,54 @@ def tracer(
         typer.Option("--duration", "-d", help="ex: 30s, 10m, 2h, 7d — vide = infini"),
     ] = "",
     cadence: Annotated[float, typer.Option("--cadence", help="secondes entre snapshots")] = 5.0,
+    live_micro_ops: Annotated[
+        bool,
+        typer.Option(
+            "--live-micro-ops",
+            help=(
+                "Active les micro-ops réelles (Aave / HL / bridge). "
+                "Requiert config.tracer.dry_run=false ET .env avec la clé privée."
+            ),
+        ),
+    ] = False,
+    confirm: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--confirm",
+            help=(
+                "Autorise la première exécution d'un op_kind (ex: aave_supply). "
+                f"Valeurs valides: {', '.join(sorted(ALLOWED_OP_KINDS))}"
+            ),
+        ),
+    ] = None,
 ) -> None:
-    """M1 marche à blanc — observe, décide, journalise (aucune exécution)."""
+    """M1 marche à blanc — observe, décide, journalise (aucune exécution par défaut)."""
     cfg = load_config(config)
     settings = load_settings()
     configure_logging(cfg.mode)
     log = get_logger("tracer")
     run_id = new_run_id()
     duration_s = _parse_duration(duration) if duration else None
+    confirmed_kinds = list(confirm or [])
     log.info(
         "tracer_boot",
-        message=f"démarrage TRACER (cadence {cadence}s, durée {duration or 'infinie'})",
+        message=(
+            f"démarrage TRACER (cadence {cadence}s, durée {duration or 'infinie'}, "
+            f"live_micro_ops={live_micro_ops})"
+        ),
         run_id=run_id,
+        live_micro_ops=live_micro_ops,
+        confirmed_kinds=confirmed_kinds,
     )
-    asyncio.run(_run_tracer(cfg, settings, db, duration_s, cadence))
+    if live_micro_ops and cfg.tracer.dry_run:
+        console.print(
+            "[bold red]REFUS[/bold red]: --live-micro-ops passé mais "
+            "config.tracer.dry_run=true. Bascule dry_run à false d'abord.",
+        )
+        raise typer.Exit(code=2)
+    asyncio.run(
+        _run_tracer(cfg, settings, db, duration_s, cadence, live_micro_ops, confirmed_kinds),
+    )
 
 
 async def _run_tracer(
@@ -294,6 +334,8 @@ async def _run_tracer(
     db_path: Path,
     duration_s: float | None,
     cadence: float,
+    live_micro_ops: bool,
+    confirmed_kinds: list[str],
 ) -> None:
     store = StateStore(db_path)
     await store.open()
@@ -307,18 +349,107 @@ async def _run_tracer(
     hl = HyperliquidReader(cfg.venues.hl_api, user_address=settings.bot_master_address)
     watchdog = Watchdog(config=cfg.watchdog, project_root=Path.cwd())
     watcher = LiveWatcher(config=cfg, aave=aave, hl=hl, watchdog=watchdog)
+
+    aave_exec = None
+    hl_exec = None
+    bridge_exec = None
+    if live_micro_ops:
+        aave_exec, hl_exec, bridge_exec = _wire_live_executors(
+            cfg=cfg,
+            settings=settings,
+            store=store,
+            w3=w3,
+            confirmed_kinds=confirmed_kinds,
+        )
+
     loop = TracerLoop(
         watcher=watcher,
         watchdog=watchdog,
         store=store,
         config=cfg,
         cadence_s=cadence,
+        aave_executor=aave_exec,
+        hl_executor=hl_exec,
+        bridge_executor=bridge_exec,
     )
     try:
         n = await loop.run(duration_s=duration_s)
     finally:
         await store.close()
     console.print(f"[bold green]TRACER terminé[/bold green] — {n} tirs à blanc journalisés.")
+
+
+def _wire_live_executors(
+    *,
+    cfg: Config,
+    settings: Settings,
+    store: StateStore,
+    w3: AsyncWeb3,  # type: ignore[type-arg]
+    confirmed_kinds: list[str],
+) -> tuple[AaveTraceExecutor, HLTraceExecutor, BridgeExecutor]:
+    """Instantiate the three micro-op executors with the .env private key.
+
+    Called only when --live-micro-ops is set and config.tracer.dry_run=false.
+    The private key stays in memory as a plain string only inside the
+    executors; it is never logged and never journaled.
+    """
+    from eth_account import Account
+    from hyperliquid.exchange import Exchange
+    from hyperliquid.info import Info as HLInfo
+
+    pkey = settings.bot_master_private_key.get_secret_value()
+    if not pkey or pkey.startswith("REPLACE"):
+        console.print(
+            "[bold red]REFUS[/bold red]: BOT_MASTER_PRIVATE_KEY manquant ou placeholder dans .env.",
+        )
+        raise typer.Exit(code=3)
+
+    guard = MicroOpsGuard(config=cfg.tracer, project_root=Path.cwd())
+    for kind in confirmed_kinds:
+        if kind not in ALLOWED_OP_KINDS:
+            console.print(f"[bold red]REFUS[/bold red]: op_kind inconnu: {kind!r}")
+            raise typer.Exit(code=4)
+        guard.confirm_kind(kind)
+
+    aave = AaveTraceExecutor(
+        web3=w3,
+        config=cfg,
+        store=store,
+        guard=guard,
+        master_address=settings.bot_master_address,
+        chain_id=ARBITRUM_CHAIN_ID,
+        private_key=pkey,
+    )
+
+    hl_wallet = Account.from_key(pkey)
+    hl_info = HLInfo(cfg.venues.hl_api, skip_ws=True)
+
+    async def _mark_price(coin: str) -> float:
+        mids = hl_info.all_mids()
+        raw = mids.get(coin)
+        return float(raw) if raw is not None else 0.0
+
+    hl_exec = HLTraceExecutor(
+        config=cfg,
+        store=store,
+        guard=guard,
+        exchange_factory=lambda: Exchange(hl_wallet, cfg.venues.hl_api),
+        get_mark_price=_mark_price,
+    )
+
+    bridge = BridgeExecutor(
+        web3=w3,
+        config=cfg,
+        store=store,
+        guard=guard,
+        master_address=settings.bot_master_address,
+        chain_id=ARBITRUM_CHAIN_ID,
+        hl_exchange_factory=lambda: Exchange(hl_wallet, cfg.venues.hl_api),
+        hl_info=hl_info,
+        private_key=pkey,
+    )
+
+    return aave, hl_exec, bridge
 
 
 @app.command()

@@ -110,6 +110,7 @@ class BridgeExecutor:
         chain_id: int,
         hl_exchange_factory: Any,
         hl_info: Any,
+        private_key: str | None = None,
     ) -> None:
         self._w3 = web3
         self._config = config
@@ -119,6 +120,7 @@ class BridgeExecutor:
         self._chain_id = chain_id
         self._make_hl_exchange = hl_exchange_factory
         self._hl_info = hl_info
+        self._private_key = private_key
         self._usdc: ChecksumAddress = AsyncWeb3.to_checksum_address(
             config.venues.usdc_address,
         )
@@ -417,9 +419,12 @@ class BridgeExecutor:
             return 0.0
 
     def _pkey(self) -> str:
-        raise NotImplementedError(
-            "private key must be provided by the caller — hook this in the CLI wiring",
-        )
+        if not self._private_key:
+            raise NotImplementedError(
+                "private key not provided — pass private_key= to constructor "
+                "(the CLI wires it from .env via --live-micro-ops)",
+            )
+        return self._private_key
 
     async def _insert_pending_intent(
         self,
