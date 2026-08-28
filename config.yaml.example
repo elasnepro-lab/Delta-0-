@@ -60,5 +60,6 @@ venues:
   aave_data_provider: "0x7F23D86Ee20D869112572136221e173428DD740B"
   hl_api: "https://api.hyperliquid.xyz"
   hl_ws: "wss://api.hyperliquid.xyz/ws"
+  hl_bridge2: "0x2Df1c51E09aECF9cacB7bc98cB1742757f163dF7"
 
 live_small_cap_pct: 0.10

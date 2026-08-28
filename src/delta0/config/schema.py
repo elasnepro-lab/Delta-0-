@@ -139,8 +139,17 @@ class VenuesConfig(BaseModel):
     aave_data_provider: str
     hl_api: str
     hl_ws: str
+    # Hyperliquid Bridge2 contract on Arbitrum — recipient of USDC transfers
+    # for HL account funding. See README §9.3.
+    hl_bridge2: str = "0x2Df1c51E09aECF9cacB7bc98cB1742757f163dF7"
 
-    @field_validator("usdc_address", "wsteth_address", "aave_pool", "aave_data_provider")
+    @field_validator(
+        "usdc_address",
+        "wsteth_address",
+        "aave_pool",
+        "aave_data_provider",
+        "hl_bridge2",
+    )
     @classmethod
     def _check_eth_address(cls, v: str) -> str:
         if not v.startswith("0x") or len(v) != _EVM_ADDRESS_LEN:

@@ -20,6 +20,8 @@ Wallet:
 
 from __future__ import annotations
 
+import asyncio
+import json
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -204,8 +206,6 @@ class HLTraceExecutor:
         limit_price: float,
     ) -> dict[str, Any]:
         """Place a post-only ALO order via the HL SDK (sync -> await via thread)."""
-        import asyncio
-
         order_type = {"limit": {"tif": "Alo"}}
         return await asyncio.to_thread(
             exchange.order,
@@ -222,8 +222,6 @@ class HLTraceExecutor:
         coin: str,
         order_id: int,
     ) -> dict[str, Any]:
-        import asyncio
-
         return await asyncio.to_thread(exchange.cancel, coin, order_id)
 
     @staticmethod
@@ -265,8 +263,6 @@ class HLTraceExecutor:
         intent_id: str,
         params: dict[str, object],
     ) -> None:
-        import json
-
         assert self._store._conn is not None
         now = datetime.now(UTC).isoformat()
         await self._store._conn.execute(
@@ -285,8 +281,6 @@ class HLTraceExecutor:
         status: Literal["sent", "confirmed", "failed"],
         tx_hashes: list[str] | None,
     ) -> None:
-        import json
-
         assert self._store._conn is not None
         await self._store._conn.execute(
             """
