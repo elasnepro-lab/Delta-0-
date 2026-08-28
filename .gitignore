@@ -63,3 +63,7 @@ desktop.ini
 
 # Incidents (per operator, not versioned)
 incidents/
+
+# Temporary commit message files
+.commit_msg.tmp
+*.commit_msg.tmp
