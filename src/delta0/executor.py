@@ -230,6 +230,32 @@ class AaveTraceExecutor:
             ),
         )
 
+    async def repay_all(self, asset: str) -> OpResult:
+        """Repay the FULL outstanding debt via MAX_UINT256 sentinel.
+
+        Required to end a round trip cleanly — a partial repay leaves accrued
+        interest and blocks a subsequent full withdraw (see memory/aave_findings.md).
+        The safety guard is fed the *approve headroom* as a notional (a couple
+        of USD above the borrow amount), which is what actually leaves the
+        wallet in the worst case.
+        """
+        max_uint = 2**256 - 1
+        op_kind: AaveOpKind = "aave_repay"
+        self._guard.check(op_kind, notional_usd=self._estimate_notional(asset, 2.0))
+
+        call = self._pool.functions.repay(
+            AsyncWeb3.to_checksum_address(asset),
+            max_uint,
+            _VARIABLE_RATE_MODE,
+            self._master,
+        )
+        return await self._journal_and_send(
+            op_kind=op_kind,
+            asset=asset,
+            amount_native=0.0,  # dummy for journal params — real amount is MAX
+            call=call,
+        )
+
     async def withdraw(self, asset: str, amount_native: float) -> OpResult:
         return await self._pool_write(
             op_kind="aave_withdraw",

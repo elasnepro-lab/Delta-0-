@@ -160,23 +160,39 @@ class TracerLoop:
             await self._fire_bridge_round_trip()
 
     async def _fire_aave_cycle(self) -> None:
-        """Approve + supply + repay + withdraw of `aave_cycle_amount_usdc`.
+        """Full round trip: approve, supply, borrow, repay-all, withdraw-all.
 
-        Each of the four ops records its own latency via the executor. If any
-        step raises SafetyRefused the cycle is aborted but the loop lives.
+        Sequence chosen after fork validation (see memory/aave_findings.md):
+        - approve gives the Pool permission to pull collateral.
+        - supply deposits `amount` USDC as collateral.
+        - borrow a fraction (~20 %) so we have debt to close later.
+        - approve again a small buffer for the repay (borrow + accrued interest).
+        - repay_all closes the entire position via MAX_UINT256 (a partial repay
+          would leave dust interest that blocks the withdraw).
+        - withdraw pulls back the full `amount` supplied.
+
+        Each of the six ops records its own latency via the executor.
+        SafetyRefused or any other exception aborts the cycle without killing
+        the loop.
         """
         assert self.aave_executor is not None
         amount = self.config.tracer.aave_cycle_amount_usdc
         usdc = self.config.venues.usdc_address or _USDC_ARB_MAINNET
+        # Borrow ~20 % of the supplied amount to keep well below the LTV limit.
+        borrow_amount = round(amount * 0.20, 6)
+        repay_headroom = round(borrow_amount + 1.0, 6)
         try:
             await self.aave_executor.approve(usdc, amount)
             await self.aave_executor.supply(usdc, amount)
-            await self.aave_executor.repay(usdc, amount)
+            await self.aave_executor.borrow(usdc, borrow_amount)
+            await self.aave_executor.approve(usdc, repay_headroom)
+            await self.aave_executor.repay_all(usdc)
             await self.aave_executor.withdraw(usdc, amount)
             log.info(
                 "aave_cycle_ok",
                 message=f"cycle Aave complet ({amount} USDC) OK",
                 amount=amount,
+                borrow_amount=borrow_amount,
             )
         except SafetyRefused as e:
             log.warning(
