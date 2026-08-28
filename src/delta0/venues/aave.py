@@ -12,6 +12,7 @@ No writes. No approvals. No mutations. That is the point of M0.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -125,6 +126,16 @@ class AaveReserveRates:
     variable_borrow_apr: float  # variable borrow APR — the one used by the bot
 
 
+@dataclass(frozen=True, slots=True)
+class _TokenMeta:
+    """Immutable per-asset metadata cached forever after first fetch."""
+
+    atoken_address: ChecksumAddress
+    var_debt_address: ChecksumAddress
+    atoken_decimals: int
+    var_debt_decimals: int
+
+
 class AaveReader:
     """Read-only Aave v3 client. Bound to one user address."""
 
@@ -140,18 +151,19 @@ class AaveReader:
             address=AsyncWeb3.to_checksum_address(pool_address),
             abi=_POOL_ABI,
         )
+        # Cache for per-asset immutable metadata (aToken/varDebt addresses and
+        # decimals). These don't change over the lifetime of the market — Aave
+        # would need a governance upgrade to alter them. Caching cuts 4 RPC
+        # calls per snapshot per asset after the first fetch.
+        self._token_meta: dict[str, _TokenMeta] = {}
 
     async def read_account_data(self) -> AaveAccountData:
-        (
-            total_collateral,
-            total_debt,
-            available_borrows,
-            lt,
-            ltv_max,
-            hf,
-        ) = await self._pool.functions.getUserAccountData(self._user).call()
-        emode: int = await self._pool.functions.getUserEMode(self._user).call()
-
+        # Parallel: getUserAccountData + getUserEMode.
+        (account_tuple, emode) = await asyncio.gather(
+            self._pool.functions.getUserAccountData(self._user).call(),
+            self._pool.functions.getUserEMode(self._user).call(),
+        )
+        (total_collateral, total_debt, available_borrows, lt, ltv_max, hf) = account_tuple
         return AaveAccountData(
             total_collateral_usd=total_collateral / _BASE_DECIMALS,
             total_debt_usd=total_debt / _BASE_DECIMALS,
@@ -162,26 +174,46 @@ class AaveReader:
             emode=emode,
         )
 
-    async def read_token_balances(self, asset: str) -> AaveTokenBalances:
-        """Read aToken and variableDebtToken balances for a given underlying."""
+    async def _get_token_meta(self, asset: str) -> _TokenMeta:
+        """Return cached `_TokenMeta` for `asset`, fetching once on cache miss."""
+        key = asset.lower()
+        cached = self._token_meta.get(key)
+        if cached is not None:
+            return cached
+
         reserve_data = await self._pool.functions.getReserveData(
             AsyncWeb3.to_checksum_address(asset),
         ).call()
-        # Positions 8 and 10 per the ABI above.
         atoken_addr: ChecksumAddress = AsyncWeb3.to_checksum_address(reserve_data[8])
         var_debt_addr: ChecksumAddress = AsyncWeb3.to_checksum_address(reserve_data[10])
-
         atoken = self._w3.eth.contract(address=atoken_addr, abi=_ERC20_BALANCE_ABI)
         var_debt = self._w3.eth.contract(address=var_debt_addr, abi=_ERC20_BALANCE_ABI)
+        atoken_dec, var_debt_dec = await asyncio.gather(
+            atoken.functions.decimals().call(),
+            var_debt.functions.decimals().call(),
+        )
+        meta = _TokenMeta(
+            atoken_address=atoken_addr,
+            var_debt_address=var_debt_addr,
+            atoken_decimals=atoken_dec,
+            var_debt_decimals=var_debt_dec,
+        )
+        self._token_meta[key] = meta
+        return meta
 
-        atoken_bal: int = await atoken.functions.balanceOf(self._user).call()
-        atoken_dec: int = await atoken.functions.decimals().call()
-        vdebt_bal: int = await var_debt.functions.balanceOf(self._user).call()
-        vdebt_dec: int = await var_debt.functions.decimals().call()
-
+    async def read_token_balances(self, asset: str) -> AaveTokenBalances:
+        """Read aToken and variableDebtToken balances for a given underlying."""
+        meta = await self._get_token_meta(asset)
+        atoken = self._w3.eth.contract(address=meta.atoken_address, abi=_ERC20_BALANCE_ABI)
+        var_debt = self._w3.eth.contract(address=meta.var_debt_address, abi=_ERC20_BALANCE_ABI)
+        # Parallel balance reads.
+        atoken_bal, vdebt_bal = await asyncio.gather(
+            atoken.functions.balanceOf(self._user).call(),
+            var_debt.functions.balanceOf(self._user).call(),
+        )
         return AaveTokenBalances(
-            atoken_balance=atoken_bal / 10**atoken_dec,
-            variable_debt_balance=vdebt_bal / 10**vdebt_dec,
+            atoken_balance=atoken_bal / 10**meta.atoken_decimals,
+            variable_debt_balance=vdebt_bal / 10**meta.var_debt_decimals,
         )
 
     async def read_reserve_rates(self, asset: str) -> AaveReserveRates:
