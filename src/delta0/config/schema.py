@@ -127,6 +127,24 @@ class TracerConfig(BaseModel):
         ),
     )
 
+    # M1-B2 scheduler: how often each micro-op cycle fires during LIVE TRACER.
+    # Chosen to hit reasonable sample sizes over 7 days without overwhelming
+    # the wallet or rate limits.
+    aave_cycle_every_s: _PositiveInt = Field(
+        default=1800,  # 30 min -> ~336 samples over 7 days
+        description="Interval between Aave 4-op cycles (approve+supply+repay+withdraw).",
+    )
+    hl_cancel_every_s: _PositiveInt = Field(
+        default=600,  # 10 min -> ~1000 samples over 7 days
+        description="Interval between HL post-only + cancel round-trips.",
+    )
+    bridge_every_s: _PositiveInt = Field(
+        default=43200,  # 12h -> ~14 samples over 7 days
+        description="Interval between bridge full round-trips (~$1 fee each).",
+    )
+    aave_cycle_amount_usdc: _PositiveFloat = Field(default=5.0)
+    bridge_amount_usdc: _PositiveFloat = Field(default=5.0)
+
 
 class VenuesConfig(BaseModel):
     """External venue endpoints and on-chain addresses."""

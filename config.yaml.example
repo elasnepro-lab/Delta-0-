@@ -51,6 +51,12 @@ tracer:
   max_ops_per_hour: 20             # rolling rate limit
   require_first_use_confirmation: true
   dry_run: true
+  # Scheduler for periodic micro-ops during LIVE TRACER (README §14).
+  aave_cycle_every_s: 1800         # 30 min -> ~336 samples / 7 j
+  hl_cancel_every_s: 600           # 10 min -> ~1000 samples / 7 j
+  bridge_every_s: 43200            # 12 h -> ~14 samples / 7 j
+  aave_cycle_amount_usdc: 5.0
+  bridge_amount_usdc: 5.0
 
 venues:
   # Aave v3 Arbitrum official addresses (verify against Aave docs at boot).
