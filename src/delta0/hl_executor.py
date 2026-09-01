@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from delta0.config import Config
-from delta0.latency import elapsed_ms, now_perf
+from delta0.latency import elapsed_ms, measurement_path, now_perf
 from delta0.logging import get_logger
 from delta0.safety import MicroOpsGuard
 from delta0.state import StateStore, deterministic_id
@@ -133,7 +133,10 @@ class HLTraceExecutor:
                 limit_price=limit_price,
             )
             duration_ms = elapsed_ms(start)
-            await self._store.record_latency("path.p1_p2_hl_local", duration_ms)
+            await self._store.record_latency(
+                measurement_path("path.p1_p2_hl_local", dry_run=True),
+                duration_ms,
+            )
             await self._mark_intent_status(intent_id, "confirmed", None)
             return HLOpResult(
                 intent_id=intent_id,

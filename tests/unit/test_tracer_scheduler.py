@@ -189,3 +189,38 @@ async def test_scheduler_no_ops_when_executors_none(
     )
     n = await loop.run(duration_s=0.02)
     assert n == 0  # stable snap -> NOOP -> no shadow intents
+
+
+@pytest.mark.asyncio
+async def test_first_cycle_fires_regardless_of_machine_uptime(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+) -> None:
+    """The first tick of each micro-op must fire on any machine.
+
+    The interval test is `now_mono - last >= every_s`, and `time.monotonic()`
+    counts from boot on Windows. A 0.0 default made the 12 h bridge cycle fire
+    at once on a long-running machine and stay silent for 12 h on one booted
+    minutes ago — so the documented "first cycle within the first seconds"
+    smoke test was not reproducible.
+    """
+    bridge = AsyncMock()
+    cfg = config.model_copy(
+        update={
+            "tracer": config.tracer.model_copy(
+                update={"bridge_every_s": 43_200, "aave_cycle_every_s": 43_200},
+            ),
+        },
+    )
+    loop = TracerLoop(
+        watcher=_FakeWatcher(),
+        watchdog=Watchdog(config=cfg.watchdog, project_root=tmp_path),
+        store=store,
+        config=cfg,
+        cadence_s=0.0,
+        bridge_executor=bridge,
+    )
+    assert loop._last_bridge_cycle == float("-inf")
+    await loop.run(duration_s=0.02)
+    bridge.round_trip.assert_awaited()

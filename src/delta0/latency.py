@@ -45,6 +45,19 @@ def elapsed_ms(start: float) -> float:
     return (time.perf_counter() - start) * 1000.0
 
 
+# Dry-run samples are recorded under their own namespace. A rehearsal skips
+# the network, so its samples are microseconds — mixing them into `path.*`
+# would drag a real p95 down and could make a slow path read as OK. The
+# critical-path registry below only ever names un-prefixed paths, so a
+# rehearsal can share a database with a live run without corrupting it.
+DRY_PREFIX = "dry."
+
+
+def measurement_path(name: str, *, dry_run: bool) -> str:
+    """Namespace a latency path so rehearsal samples never enter the stats."""
+    return f"{DRY_PREFIX}{name}" if dry_run else name
+
+
 # Verdicts, per README §12 (dimension "Vitesse": p95 <= budget) and §11
 # (p95 > budget x latency_budget_factor => mode prudent).
 Verdict = Literal["OK", "DEPASSE", "PRUDENT", "INCOMPLET", "AUCUN"]

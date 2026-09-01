@@ -110,7 +110,7 @@ async def test_bridge_out_dry_run(
     result = await bridge.bridge_out(amount_usdc=10.0)
     assert result.status == "dry_run"
     assert result.tx_hash is None
-    stats = await store.latency_stats("path.bridge_out_submit")
+    stats = await store.latency_stats("dry.path.bridge_out_submit")
     assert stats["count"] == 1
 
 
@@ -123,7 +123,7 @@ async def test_bridge_in_dry_run(
     bridge = _make_bridge(tmp_path, store, config, dry_run=True)
     result = await bridge.bridge_in(amount_usdc=10.0)
     assert result.status == "dry_run"
-    stats = await store.latency_stats("path.bridge_in_submit")
+    stats = await store.latency_stats("dry.path.bridge_in_submit")
     assert stats["count"] == 1
 
 

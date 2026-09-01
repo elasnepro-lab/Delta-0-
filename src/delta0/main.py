@@ -301,6 +301,17 @@ def tracer(
             ),
         ),
     ] = None,
+    rehearse: Annotated[
+        bool,
+        typer.Option(
+            "--rehearse",
+            help=(
+                "Répétition à blanc : câble les 3 executors en gardant "
+                "config.tracer.dry_run=true. Aucune transaction, aucune clé "
+                "privée. Exerce guard, journal d'intentions et mesure de latence."
+            ),
+        ),
+    ] = False,
     no_ws: Annotated[
         bool,
         typer.Option(
@@ -331,12 +342,32 @@ def tracer(
         confirmed_kinds=confirmed_kinds,
         ws_enabled=not no_ws,
     )
+    if live_micro_ops and rehearse:
+        console.print(
+            "[bold red]REFUS[/bold red]: --live-micro-ops et --rehearse "
+            "s'excluent. La répétition ne doit jamais pouvoir devenir un tir réel.",
+        )
+        raise typer.Exit(code=6)
     if live_micro_ops and cfg.tracer.dry_run:
         console.print(
             "[bold red]REFUS[/bold red]: --live-micro-ops passé mais "
             "config.tracer.dry_run=true. Bascule dry_run à false d'abord.",
         )
         raise typer.Exit(code=2)
+    if rehearse and not cfg.tracer.dry_run:
+        console.print(
+            "[bold red]REFUS[/bold red]: --rehearse passé mais "
+            "config.tracer.dry_run=false. Une répétition qui envoie des "
+            "transactions n'est pas une répétition.",
+        )
+        raise typer.Exit(code=6)
+    if rehearse:
+        console.print(
+            "[bold yellow]RÉPÉTITION[/bold yellow] : executors câblés, "
+            "dry_run actif, aucune clé privée chargée. Les latences sont "
+            "enregistrées sous [bold]dry.path.*[/bold] et n'entrent pas "
+            "dans le rapport des chemins critiques.",
+        )
     asyncio.run(
         _run_tracer(
             cfg,
@@ -347,6 +378,7 @@ def tracer(
             live_micro_ops,
             confirmed_kinds,
             use_ws=not no_ws,
+            rehearse=rehearse,
         ),
     )
 
@@ -360,6 +392,7 @@ async def _run_tracer(
     live_micro_ops: bool,
     confirmed_kinds: list[str],
     use_ws: bool,
+    rehearse: bool = False,
 ) -> None:
     store = StateStore(db_path)
     await store.open()
@@ -391,13 +424,14 @@ async def _run_tracer(
         aave_exec = None
         hl_exec = None
         bridge_exec = None
-        if live_micro_ops:
-            aave_exec, hl_exec, bridge_exec = _wire_live_executors(
+        if live_micro_ops or rehearse:
+            aave_exec, hl_exec, bridge_exec = _wire_micro_op_executors(
                 cfg=cfg,
                 settings=settings,
                 store=store,
                 w3=w3,
                 confirmed_kinds=confirmed_kinds,
+                rehearse=rehearse,
             )
 
         loop = TracerLoop(
@@ -496,31 +530,44 @@ def _render_reconcile(report: ReconcileReport) -> None:
     )
 
 
-def _wire_live_executors(
+def _wire_micro_op_executors(
     *,
     cfg: Config,
     settings: Settings,
     store: StateStore,
     w3: AsyncWeb3,  # type: ignore[type-arg]
     confirmed_kinds: list[str],
+    rehearse: bool,
 ) -> tuple[AaveTraceExecutor, HLTraceExecutor, BridgeExecutor]:
-    """Instantiate the three micro-op executors with the .env private key.
+    """Instantiate the three micro-op executors.
 
-    Called only when --live-micro-ops is set and config.tracer.dry_run=false.
-    The private key stays in memory as a plain string only inside the
-    executors; it is never logged and never journaled.
+    Live (`--live-micro-ops`, dry_run=false): loads the .env private key. It
+    stays in memory as a plain string only inside the executors; it is never
+    logged and never journaled.
+
+    Rehearsal (`--rehearse`, dry_run=true): wires the SAME objects with no
+    key at all, and a signing path that raises. Every read runs for real
+    (mark price, balances); every write short-circuits in the executor's
+    dry-run branch. If that short-circuit ever failed, the rehearsal would
+    crash rather than sign — which is the whole point of handing it nothing
+    to sign with.
     """
     # Lazy on purpose: a DRY_RUN run must never import the signing libraries.
     from eth_account import Account  # noqa: PLC0415
     from hyperliquid.exchange import Exchange  # noqa: PLC0415
     from hyperliquid.info import Info as HLInfo  # noqa: PLC0415
 
-    pkey = settings.bot_master_private_key.get_secret_value()
-    if not pkey or pkey.startswith("REPLACE"):
-        console.print(
-            "[bold red]REFUS[/bold red]: BOT_MASTER_PRIVATE_KEY manquant ou placeholder dans .env.",
-        )
-        raise typer.Exit(code=3)
+    pkey: str | None
+    if rehearse:
+        pkey = None
+    else:
+        pkey = settings.bot_master_private_key.get_secret_value()
+        if not pkey or pkey.startswith("REPLACE"):
+            console.print(
+                "[bold red]REFUS[/bold red]: BOT_MASTER_PRIVATE_KEY manquant "
+                "ou placeholder dans .env.",
+            )
+            raise typer.Exit(code=3)
 
     guard = MicroOpsGuard(config=cfg.tracer, project_root=Path.cwd())
     for kind in confirmed_kinds:
@@ -539,7 +586,6 @@ def _wire_live_executors(
         private_key=pkey,
     )
 
-    hl_wallet = Account.from_key(pkey)
     hl_info = HLInfo(cfg.venues.hl_api, skip_ws=True)
 
     async def _mark_price(coin: str) -> float:
@@ -547,11 +593,19 @@ def _wire_live_executors(
         raw = mids.get(coin)
         return float(raw) if raw is not None else 0.0
 
+    def _make_exchange() -> object:
+        if pkey is None:
+            raise NotImplementedError(
+                "répétition (--rehearse) : aucun ordre Hyperliquid ne doit être construit. "
+                "Le court-circuit dry-run de l'executor a été franchi — c'est un bug.",
+            )
+        return Exchange(Account.from_key(pkey), cfg.venues.hl_api)
+
     hl_exec = HLTraceExecutor(
         config=cfg,
         store=store,
         guard=guard,
-        exchange_factory=lambda: Exchange(hl_wallet, cfg.venues.hl_api),
+        exchange_factory=_make_exchange,
         get_mark_price=_mark_price,
     )
 
@@ -562,7 +616,7 @@ def _wire_live_executors(
         guard=guard,
         master_address=settings.bot_master_address,
         chain_id=ARBITRUM_CHAIN_ID,
-        hl_exchange_factory=lambda: Exchange(hl_wallet, cfg.venues.hl_api),
+        hl_exchange_factory=_make_exchange,
         hl_info=hl_info,
         private_key=pkey,
     )

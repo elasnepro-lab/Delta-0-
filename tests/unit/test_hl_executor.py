@@ -81,7 +81,7 @@ async def test_dry_run_post_and_cancel_records_latency(
     # No SDK call in dry-run.
     exchange.order.assert_not_called()
     exchange.cancel.assert_not_called()
-    stats = await store.latency_stats("path.p1_p2_hl_local")
+    stats = await store.latency_stats("dry.path.p1_p2_hl_local")
     assert stats["count"] == 1
 
 

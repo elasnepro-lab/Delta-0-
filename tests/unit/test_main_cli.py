@@ -102,3 +102,36 @@ def test_report_flags_prudent_mode_when_p95_blows_the_budget(tmp_path: Path) -> 
     assert result.exit_code == 0
     assert "PRUDENT" in result.stdout
     assert "Mode prudent" in result.stdout
+
+
+def _config_with_dry_run(tmp_path: Path, *, dry_run: bool) -> Path:
+    raw = Path("config.yaml.example").read_text(encoding="utf-8")
+    flipped = raw.replace("  dry_run: true", f"  dry_run: {str(dry_run).lower()}")
+    out = tmp_path / "config.yaml"
+    out.write_text(flipped, encoding="utf-8")
+    return out
+
+
+def test_live_micro_ops_refused_while_dry_run_is_on() -> None:
+    result = runner.invoke(
+        app,
+        ["tracer", "-c", "config.yaml.example", "--live-micro-ops", "-d", "1s"],
+    )
+    assert result.exit_code == 2
+    assert "REFUS" in result.stdout
+
+
+def test_rehearse_and_live_micro_ops_are_mutually_exclusive() -> None:
+    result = runner.invoke(
+        app,
+        ["tracer", "-c", "config.yaml.example", "--rehearse", "--live-micro-ops", "-d", "1s"],
+    )
+    assert result.exit_code == 6
+    assert "s'excluent" in result.stdout
+
+
+def test_rehearse_refused_when_dry_run_is_off(tmp_path: Path) -> None:
+    cfg = _config_with_dry_run(tmp_path, dry_run=False)
+    result = runner.invoke(app, ["tracer", "-c", str(cfg), "--rehearse", "-d", "1s"])
+    assert result.exit_code == 6
+    assert "REFUS" in result.stdout

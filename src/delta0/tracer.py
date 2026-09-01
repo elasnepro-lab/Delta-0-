@@ -63,9 +63,15 @@ class TracerLoop:
     bridge_executor: BridgeExecutor | None = None
 
     # Scheduler state (last-fired monotonic timestamps per micro-op kind).
-    _last_aave_cycle: float = field(default=0.0)
-    _last_hl_cancel: float = field(default=0.0)
-    _last_bridge_cycle: float = field(default=0.0)
+    # -inf, not 0.0: the interval test is `now_mono - last >= every_s`, and
+    # `time.monotonic()` on Windows counts from boot. With 0.0 the first
+    # bridge round-trip only fires if the machine happens to have been up
+    # longer than its 12 h interval — so "the first cycle fires within the
+    # first seconds" would be true on one machine and false on another.
+    # -inf makes the first tick of every kind fire immediately, everywhere.
+    _last_aave_cycle: float = field(default=float("-inf"))
+    _last_hl_cancel: float = field(default=float("-inf"))
+    _last_bridge_cycle: float = field(default=float("-inf"))
 
     async def run(self, duration_s: float | None = None) -> int:
         """Run the TRACER loop for `duration_s` (or forever if None).

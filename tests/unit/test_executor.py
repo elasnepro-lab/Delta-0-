@@ -131,8 +131,9 @@ async def test_dry_run_supply_journals_pending_then_confirmed(
     assert result.tx_hash is None
     assert result.duration_ms >= 0
 
-    # Latency was recorded on the dedicated path.
-    stats = await store.latency_stats("path.aave_supply")
+    # Latency lands in the dry-run namespace so a rehearsal can never
+    # contaminate the live critical-path statistics.
+    stats = await store.latency_stats("dry.path.aave_supply")
     assert stats["count"] == 1
 
 
@@ -151,11 +152,11 @@ async def test_dry_run_all_verbs(
     r5 = await executor.withdraw(USDC, 10.0)
     for r in (r1, r2, r3, r4, r5):
         assert r.status == "dry_run"
-    stats_ap = await store.latency_stats("path.aave_approve")
-    stats_su = await store.latency_stats("path.aave_supply")
-    stats_bo = await store.latency_stats("path.aave_borrow")
-    stats_re = await store.latency_stats("path.aave_repay")
-    stats_wd = await store.latency_stats("path.aave_withdraw")
+    stats_ap = await store.latency_stats("dry.path.aave_approve")
+    stats_su = await store.latency_stats("dry.path.aave_supply")
+    stats_bo = await store.latency_stats("dry.path.aave_borrow")
+    stats_re = await store.latency_stats("dry.path.aave_repay")
+    stats_wd = await store.latency_stats("dry.path.aave_withdraw")
     for s in (stats_ap, stats_su, stats_bo, stats_re, stats_wd):
         assert s["count"] == 1
 
@@ -230,3 +231,23 @@ def test_live_send_path_requires_pkey_override(
     executor, _ = _make_executor(tmp_path, store, config, dry_run=False)
     with pytest.raises(NotImplementedError, match="private key"):
         executor._pkey()
+
+
+@pytest.mark.asyncio
+async def test_dry_run_samples_never_enter_the_critical_path_stats(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+) -> None:
+    """A rehearsal must not be able to flatter a live latency report.
+
+    Dry-run ops take microseconds because they skip the network. If they
+    landed on `path.*`, rehearsing before a live run would drag p50/p95 down
+    and could turn a DEPASSE verdict into a false OK.
+    """
+    executor, _ = _make_executor(tmp_path, store, config, dry_run=True)
+    await executor.supply(USDC, 10.0)
+
+    assert await store.latency_paths() == ["dry.path.aave_supply"]
+    live_stats = await store.latency_stats("path.aave_supply")
+    assert live_stats["count"] == 0

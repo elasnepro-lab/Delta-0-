@@ -31,7 +31,7 @@ from eth_typing import ChecksumAddress
 from web3 import AsyncWeb3
 
 from delta0.config import Config
-from delta0.latency import elapsed_ms, now_perf
+from delta0.latency import elapsed_ms, measurement_path, now_perf
 from delta0.logging import get_logger
 from delta0.safety import MicroOpsGuard
 from delta0.state import StateStore, deterministic_id
@@ -353,7 +353,10 @@ class AaveTraceExecutor:
                 amount=amount_native,
             )
             duration_ms = elapsed_ms(start)
-            await self._store.record_latency(f"path.{op_kind}", duration_ms)
+            await self._store.record_latency(
+                measurement_path(f"path.{op_kind}", dry_run=True),
+                duration_ms,
+            )
             await self._mark_intent_status(intent_id, "confirmed", None)
             return OpResult(
                 intent_id=intent_id,
