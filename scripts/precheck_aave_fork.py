@@ -9,13 +9,18 @@ Usage:
 
 The script impersonates the operator's wallet on the fork (the account holds
 187 USDC + 0.005 ETH copied from Arbitrum mainnet state at fork time). It
-then runs the real approve → supply → repay → withdraw sequence against the
-mainnet Aave Pool contract, using the SAME ABI as `delta0.venues.aave` and
-`delta0.executor`. Any ABI mismatch, wrong parameter order, or contract
-address error will surface here — with zero real money at risk.
+then runs the real six-transaction sequence against the mainnet Aave Pool
+contract — approve, supply, borrow, approve buffer, repay MAX_UINT256,
+withdraw — using the SAME ABI as `delta0.venues.aave` and `delta0.executor`.
+Any ABI mismatch, wrong parameter order, or contract address error will
+surface here — with zero real money at risk.
 
-Success criterion: all 4 transactions confirm with status=1. Prints per-op
-gas cost.
+The borrow is not decoration: Aave reverts a repay with no debt, and a
+partial repay leaves accrued interest that blocks the full withdraw. See
+`memory/aave_findings.md`.
+
+Success criterion: all 6 transactions confirm with status=1 and the ending
+USDC balance equals the starting one. Prints per-op gas cost.
 """
 
 from __future__ import annotations
@@ -202,10 +207,9 @@ async def main() -> None:
         [USDC_ADDR, RAW_AMOUNT, USER_ADDR, REFERRAL],
     )
 
-    # 3) Repay any dust dust (we haven't borrowed here, so this is expected to
-    #    no-op if there is no debt — Aave's repay reverts with NO_DEBT_OF_SELECTED_TYPE
-    #    when debt is 0. So we SKIP repay unless we borrow first. To exercise
-    #    the repay ABI, borrow 1 USDC first.
+    # 3) Borrow 1 USDC so there IS debt to repay. Aave's repay reverts with
+    #    NO_DEBT_OF_SELECTED_TYPE when the debt is zero, so the repay ABI
+    #    cannot be exercised without borrowing first.
     await send_impersonated(
         w3,
         "borrow(USDC, 1, variable=2, 0, self)",

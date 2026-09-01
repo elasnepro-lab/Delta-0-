@@ -245,3 +245,19 @@ class StateStore:
         p50 = values[max(0, int(0.50 * n) - 1)]
         p95 = values[max(0, int(0.95 * n) - 1)]
         return {"count": float(n), "p50": p50, "p95": p95, "max": values[-1]}
+
+    async def latency_paths(self) -> list[str]:
+        """Every path name with at least one recorded sample, sorted.
+
+        The report uses this instead of a hardcoded list: an executor that
+        starts recording a new path shows up in the report on its own.
+        """
+        assert self._conn is not None, "StateStore not opened"
+        async with self._conn.execute(
+            "SELECT DISTINCT path FROM latencies ORDER BY path",
+        ) as cur:
+            return [str(row[0]) async for row in cur]
+
+    async def latency_stats_all(self) -> dict[str, dict[str, float]]:
+        """`latency_stats` for every recorded path, keyed by path name."""
+        return {path: await self.latency_stats(path) for path in await self.latency_paths()}

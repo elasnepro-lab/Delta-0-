@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -38,6 +37,7 @@ from eth_typing import ChecksumAddress
 from web3 import AsyncWeb3
 
 from delta0.config import Config
+from delta0.latency import elapsed_ms, now_perf
 from delta0.logging import get_logger
 from delta0.safety import MicroOpsGuard
 from delta0.state import StateStore, deterministic_id
@@ -166,7 +166,7 @@ class BridgeExecutor:
             "bridge_in",
             {"amount_usdc": amount_usdc, "destination": self._master},
         )
-        start = time.monotonic()
+        start = now_perf()
 
         if self._config.tracer.dry_run:
             log.info(
@@ -174,7 +174,7 @@ class BridgeExecutor:
                 message=f"bridge_in: dry-run {amount_usdc} USDC",
                 amount=amount_usdc,
             )
-            duration_ms = (time.monotonic() - start) * 1000.0
+            duration_ms = elapsed_ms(start)
             await self._store.record_latency("path.bridge_in_submit", duration_ms)
             await self._mark_intent_status(intent_id, "confirmed", None)
             return BridgeLegResult(
@@ -200,7 +200,7 @@ class BridgeExecutor:
             )
             raise
 
-        duration_ms = (time.monotonic() - start) * 1000.0
+        duration_ms = elapsed_ms(start)
         await self._store.record_latency("path.bridge_in_submit", duration_ms)
         await self._mark_intent_status(intent_id, "confirmed", None)
         log.info(
@@ -228,12 +228,12 @@ class BridgeExecutor:
         """
         start_balance = await self._get_hl_usdc_balance()
         target = start_balance + amount_usdc * 0.99  # tolerate a small rounding
-        start = time.monotonic()
+        start = now_perf()
         deadline = start + timeout_s
-        while time.monotonic() < deadline:
+        while now_perf() < deadline:
             current = await self._get_hl_usdc_balance()
             if current >= target:
-                waited_ms = (time.monotonic() - start) * 1000.0
+                waited_ms = elapsed_ms(start)
                 await self._store.record_latency("path.p5_bridge_up", waited_ms)
                 log.info(
                     "bridge_up_credited",
@@ -258,12 +258,12 @@ class BridgeExecutor:
         start_balance = await self._get_arb_usdc_balance()
         # HL charges ~1 USDC on withdrawal (README §9.1).
         target = start_balance + max(0.0, amount_usdc - 1.5)
-        start = time.monotonic()
+        start = now_perf()
         deadline = start + timeout_s
-        while time.monotonic() < deadline:
+        while now_perf() < deadline:
             current = await self._get_arb_usdc_balance()
             if current >= target:
-                waited_ms = (time.monotonic() - start) * 1000.0
+                waited_ms = elapsed_ms(start)
                 await self._store.record_latency("path.p6_bridge_down", waited_ms)
                 log.info(
                     "bridge_down_credited",
@@ -330,7 +330,7 @@ class BridgeExecutor:
                 "raw_amount": raw_amount,
             },
         )
-        start = time.monotonic()
+        start = now_perf()
 
         if self._config.tracer.dry_run:
             log.info(
@@ -338,7 +338,7 @@ class BridgeExecutor:
                 message=f"{op_kind}: dry-run {amount_usdc} USDC vers {destination}",
                 amount=amount_usdc,
             )
-            duration_ms = (time.monotonic() - start) * 1000.0
+            duration_ms = elapsed_ms(start)
             await self._store.record_latency(f"path.{op_kind}_submit", duration_ms)
             await self._mark_intent_status(intent_id, "confirmed", None)
             return BridgeLegResult(
@@ -369,7 +369,7 @@ class BridgeExecutor:
             )
             raise
 
-        duration_ms = (time.monotonic() - start) * 1000.0
+        duration_ms = elapsed_ms(start)
         await self._store.record_latency(f"path.{op_kind}_submit", duration_ms)
         status_int = int(receipt.get("status", 0))
         if status_int != 1:

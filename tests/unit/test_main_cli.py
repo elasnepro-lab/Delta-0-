@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+
 import pytest
 from typer.testing import CliRunner
 
 from delta0.main import _parse_duration, app
+from delta0.state import StateStore
 
 runner = CliRunner()
 
@@ -55,3 +59,46 @@ def test_parse_duration_invalid() -> None:
 def test_parse_duration_empty() -> None:
     with pytest.raises(Exception):  # noqa: PT011, B017
         _parse_duration("")
+
+
+async def _seed(db: Path, samples: dict[str, list[float]]) -> None:
+    store = StateStore(db)
+    await store.open()
+    try:
+        for path, values in samples.items():
+            for v in values:
+                await store.record_latency(path, v)
+    finally:
+        await store.close()
+
+
+def test_report_on_empty_db_reports_aucun(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["report", "--db", str(tmp_path / "empty.db"), "-c", "config.yaml.example"],
+    )
+    assert result.exit_code == 0
+    assert "Chemins critiques" in result.stdout
+    assert "P1/P2" in result.stdout
+    # No measurement must never render as a fast path.
+    assert "AUCUN" in result.stdout
+    assert "NON satisfait" in result.stdout
+
+
+def test_report_renders_a_measured_path_within_budget(tmp_path: Path) -> None:
+    db = tmp_path / "seeded.db"
+    asyncio.run(_seed(db, {"path.p1_p2_hl_local": [300.0, 420.0, 510.0]}))
+    result = runner.invoke(app, ["report", "--db", str(db), "-c", "config.yaml.example"])
+    assert result.exit_code == 0
+    assert "OK" in result.stdout
+    assert "p1_p2_hl_local" in result.stdout
+
+
+def test_report_flags_prudent_mode_when_p95_blows_the_budget(tmp_path: Path) -> None:
+    db = tmp_path / "slow.db"
+    # P1/P2 budget is 2 s; 5 s is past 2 s x 1.5.
+    asyncio.run(_seed(db, {"path.p1_p2_hl_local": [5_000.0, 5_200.0, 5_400.0]}))
+    result = runner.invoke(app, ["report", "--db", str(db), "-c", "config.yaml.example"])
+    assert result.exit_code == 0
+    assert "PRUDENT" in result.stdout
+    assert "Mode prudent" in result.stdout

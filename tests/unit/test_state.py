@@ -99,3 +99,26 @@ def test_deterministic_id_stable() -> None:
     assert a == b
     assert a != c
     assert len(a) == 16
+
+
+@pytest.mark.asyncio
+async def test_latency_paths_lists_distinct_recorded_paths(store: StateStore) -> None:
+    await store.record_latency("path.aave_supply", 10.0)
+    await store.record_latency("path.aave_supply", 12.0)
+    await store.record_latency("snapshot", 3.0)
+    assert await store.latency_paths() == ["path.aave_supply", "snapshot"]
+
+
+@pytest.mark.asyncio
+async def test_latency_paths_is_empty_before_any_sample(store: StateStore) -> None:
+    assert await store.latency_paths() == []
+
+
+@pytest.mark.asyncio
+async def test_latency_stats_all_keys_every_path(store: StateStore) -> None:
+    await store.record_latency("path.aave_supply", 10.0)
+    await store.record_latency("path.p1_p2_hl_local", 400.0)
+    stats = await store.latency_stats_all()
+    assert set(stats) == {"path.aave_supply", "path.p1_p2_hl_local"}
+    assert stats["path.aave_supply"]["count"] == 1.0
+    assert stats["path.p1_p2_hl_local"]["p95"] == 400.0

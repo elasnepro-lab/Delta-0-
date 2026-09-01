@@ -67,6 +67,7 @@ select = [
 ]
 ignore = [
     "PLR0913",  # too many arguments — config objects are wide
+    "PLR0917",  # ditto for positional count — CLI commands carry many options
     "TRY003",   # long messages inside exception class
     "S101",     # asserts allowed in tests (per-file-ignores below)
 ]

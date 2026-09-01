@@ -23,7 +23,6 @@ inside the executor.
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -32,6 +31,7 @@ from eth_typing import ChecksumAddress
 from web3 import AsyncWeb3
 
 from delta0.config import Config
+from delta0.latency import elapsed_ms, now_perf
 from delta0.logging import get_logger
 from delta0.safety import MicroOpsGuard
 from delta0.state import StateStore, deterministic_id
@@ -342,7 +342,7 @@ class AaveTraceExecutor:
         params = {"asset": asset, "amount_native": amount_native, "op_kind": op_kind}
         await self._insert_pending_intent(intent_id, op_kind, params)
 
-        start = time.monotonic()
+        start = now_perf()
 
         if self._config.tracer.dry_run:
             log.info(
@@ -352,7 +352,7 @@ class AaveTraceExecutor:
                 asset=asset,
                 amount=amount_native,
             )
-            duration_ms = (time.monotonic() - start) * 1000.0
+            duration_ms = elapsed_ms(start)
             await self._store.record_latency(f"path.{op_kind}", duration_ms)
             await self._mark_intent_status(intent_id, "confirmed", None)
             return OpResult(
@@ -383,7 +383,7 @@ class AaveTraceExecutor:
             )
             raise
 
-        duration_ms = (time.monotonic() - start) * 1000.0
+        duration_ms = elapsed_ms(start)
         await self._store.record_latency(f"path.{op_kind}", duration_ms)
         gas_used = int(receipt.get("gasUsed", 0))
         status = int(receipt.get("status", 0))

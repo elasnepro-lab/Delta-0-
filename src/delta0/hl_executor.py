@@ -22,12 +22,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 from delta0.config import Config
+from delta0.latency import elapsed_ms, now_perf
 from delta0.logging import get_logger
 from delta0.safety import MicroOpsGuard
 from delta0.state import StateStore, deterministic_id
@@ -85,7 +85,7 @@ class HLTraceExecutor:
     async def post_and_cancel(self, side: Literal["buy", "sell"] = "sell") -> HLOpResult:
         """Place a post-only ALO order 10 % from mark, then cancel it.
 
-        Returns the total round-trip duration measured with `time.monotonic`.
+        Returns the total round-trip duration measured with `latency.now_perf`.
         The whole sequence goes through the safety guard as a single
         `hl_post_only_cancel` op — one guard check, one journaled intent.
         """
@@ -121,7 +121,7 @@ class HLTraceExecutor:
             },
         )
 
-        start = time.monotonic()
+        start = now_perf()
 
         if self._config.tracer.dry_run:
             log.info(
@@ -132,7 +132,7 @@ class HLTraceExecutor:
                 size=size,
                 limit_price=limit_price,
             )
-            duration_ms = (time.monotonic() - start) * 1000.0
+            duration_ms = elapsed_ms(start)
             await self._store.record_latency("path.p1_p2_hl_local", duration_ms)
             await self._mark_intent_status(intent_id, "confirmed", None)
             return HLOpResult(
@@ -177,7 +177,7 @@ class HLTraceExecutor:
             )
             raise
 
-        duration_ms = (time.monotonic() - start) * 1000.0
+        duration_ms = elapsed_ms(start)
         await self._store.record_latency("path.p1_p2_hl_local", duration_ms)
         await self._mark_intent_status(intent_id, "confirmed", None)
         log.info(

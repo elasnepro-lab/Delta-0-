@@ -4,7 +4,7 @@ Commands:
     delta0 config-check     validate YAML, no network calls              (M0)
     delta0 status           snapshot both venues, read-only               (M0)
     delta0 tracer           M1 marche à blanc — journal des tirs à blanc  (M1)
-    delta0 report           report on shadow intents + latencies          (M1)
+    delta0 report           tirs à blanc + p95 des 5 chemins vs budget    (M1)
 
 Later milestones will add: run, deflate, unwind.
 """
@@ -28,13 +28,16 @@ from delta0.config import Config, load_config
 from delta0.decision import target_state
 from delta0.executor import AaveTraceExecutor
 from delta0.hl_executor import HLTraceExecutor
+from delta0.latency import PathVerdict, evaluate_all, m1_acceptance_met, needs_prudent_mode
 from delta0.logging import configure_logging, get_logger, new_run_id
+from delta0.reconcile import ReconcileReport, reconcile_at_boot
 from delta0.safety import ALLOWED_OP_KINDS, MicroOpsGuard
 from delta0.settings import Settings, load_settings
 from delta0.state import StateStore
-from delta0.tracer import LATENCY_PATH_DECISION, LATENCY_PATH_SNAPSHOT, TracerLoop
+from delta0.tracer import TracerLoop
 from delta0.venues.aave import AaveReader
 from delta0.venues.bridge import BridgeExecutor
+from delta0.venues.hl_stream import HyperliquidStream
 from delta0.venues.hyperliquid import HyperliquidReader
 from delta0.watchdog import Watchdog
 from delta0.watcher import LiveWatcher
@@ -298,6 +301,16 @@ def tracer(
             ),
         ),
     ] = None,
+    no_ws: Annotated[
+        bool,
+        typer.Option(
+            "--no-ws",
+            help=(
+                "Désactive le flux WS Hyperliquid (mark price REST seulement, "
+                "aucune détection de liquidation P1). Dépannage uniquement."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """M1 marche à blanc — observe, décide, journalise (aucune exécution par défaut)."""
     cfg = load_config(config)
@@ -311,11 +324,12 @@ def tracer(
         "tracer_boot",
         message=(
             f"démarrage TRACER (cadence {cadence}s, durée {duration or 'infinie'}, "
-            f"live_micro_ops={live_micro_ops})"
+            f"live_micro_ops={live_micro_ops}, ws={not no_ws})"
         ),
         run_id=run_id,
         live_micro_ops=live_micro_ops,
         confirmed_kinds=confirmed_kinds,
+        ws_enabled=not no_ws,
     )
     if live_micro_ops and cfg.tracer.dry_run:
         console.print(
@@ -324,7 +338,16 @@ def tracer(
         )
         raise typer.Exit(code=2)
     asyncio.run(
-        _run_tracer(cfg, settings, db, duration_s, cadence, live_micro_ops, confirmed_kinds),
+        _run_tracer(
+            cfg,
+            settings,
+            db,
+            duration_s,
+            cadence,
+            live_micro_ops,
+            confirmed_kinds,
+            use_ws=not no_ws,
+        ),
     )
 
 
@@ -336,6 +359,7 @@ async def _run_tracer(
     cadence: float,
     live_micro_ops: bool,
     confirmed_kinds: list[str],
+    use_ws: bool,
 ) -> None:
     store = StateStore(db_path)
     await store.open()
@@ -348,35 +372,128 @@ async def _run_tracer(
     )
     hl = HyperliquidReader(cfg.venues.hl_api, user_address=settings.bot_master_address)
     watchdog = Watchdog(config=cfg.watchdog, project_root=Path.cwd())
-    watcher = LiveWatcher(config=cfg, aave=aave, hl=hl, watchdog=watchdog)
 
-    aave_exec = None
-    hl_exec = None
-    bridge_exec = None
-    if live_micro_ops:
-        aave_exec, hl_exec, bridge_exec = _wire_live_executors(
-            cfg=cfg,
-            settings=settings,
-            store=store,
-            w3=w3,
-            confirmed_kinds=confirmed_kinds,
-        )
+    # WS feed: fresher mark price than REST polling, and the only source of
+    # HL liquidation events (P1). A WS that refuses to start degrades the
+    # tracer to REST-only rather than aborting the run — the watchdog will
+    # see the staleness and say so.
+    stream = _start_hl_stream(cfg, settings) if use_ws else None
+    watcher = LiveWatcher(config=cfg, aave=aave, hl=hl, watchdog=watchdog, stream=stream)
 
-    loop = TracerLoop(
-        watcher=watcher,
-        watchdog=watchdog,
-        store=store,
-        config=cfg,
-        cadence_s=cadence,
-        aave_executor=aave_exec,
-        hl_executor=hl_exec,
-        bridge_executor=bridge_exec,
-    )
     try:
+        # README §13: reconcile the journal against on-chain reality BEFORE
+        # any new action. In dry-run a failure is only a warning; with live
+        # micro-ops armed, refusing to start is the safe call.
+        ok = await _reconcile_boot(store, watcher, strict=live_micro_ops)
+        if not ok:
+            raise typer.Exit(code=5)
+
+        aave_exec = None
+        hl_exec = None
+        bridge_exec = None
+        if live_micro_ops:
+            aave_exec, hl_exec, bridge_exec = _wire_live_executors(
+                cfg=cfg,
+                settings=settings,
+                store=store,
+                w3=w3,
+                confirmed_kinds=confirmed_kinds,
+            )
+
+        loop = TracerLoop(
+            watcher=watcher,
+            watchdog=watchdog,
+            store=store,
+            config=cfg,
+            cadence_s=cadence,
+            stream=stream,
+            aave_executor=aave_exec,
+            hl_executor=hl_exec,
+            bridge_executor=bridge_exec,
+        )
         n = await loop.run(duration_s=duration_s)
     finally:
+        if stream is not None:
+            stream.stop()
         await store.close()
     console.print(f"[bold green]TRACER terminé[/bold green] — {n} tirs à blanc journalisés.")
+    console.print("Rapport : [bold]delta0 report[/bold]")
+
+
+def _start_hl_stream(cfg: Config, settings: Settings) -> HyperliquidStream | None:
+    """Start the HL WebSocket, or return None if it cannot be started."""
+    log = get_logger("tracer")
+    stream = HyperliquidStream(
+        api_url=cfg.venues.hl_api,
+        user_address=settings.bot_master_address,
+    )
+    try:
+        stream.start()
+    except Exception:
+        log.exception(
+            "hl_stream_start_failed",
+            message="WS Hyperliquid indisponible — repli sur les lectures REST seules",
+        )
+        return None
+    return stream
+
+
+async def _reconcile_boot(store: StateStore, watcher: LiveWatcher, *, strict: bool) -> bool:
+    """Run the boot reconciliation. Returns False when the run must not start.
+
+    `strict` (live micro-ops armed) turns a failed snapshot or any warning
+    into a refusal: we never fire a real transaction against a state we could
+    not verify.
+    """
+    log = get_logger("tracer")
+    try:
+        snap = await watcher.snapshot()
+    except Exception:
+        log.exception(
+            "reconcile_snapshot_failed",
+            message="snapshot de réconciliation impossible au démarrage",
+        )
+        if strict:
+            console.print(
+                "[bold red]REFUS[/bold red]: réconciliation impossible "
+                "(snapshot en échec) alors que --live-micro-ops est armé.",
+            )
+            return False
+        console.print(
+            "[yellow]Réconciliation ignorée[/yellow] : snapshot indisponible. "
+            "La boucle démarre quand même (mode observation).",
+        )
+        return True
+
+    report: ReconcileReport = await reconcile_at_boot(store, snap)
+    _render_reconcile(report)
+    if report.warnings and strict:
+        console.print(
+            "[bold red]REFUS[/bold red]: la réconciliation a levé "
+            f"{len(report.warnings)} avertissement(s) et --live-micro-ops est armé. "
+            "Traite-les avant de rejouer.",
+        )
+        return False
+    return True
+
+
+def _render_reconcile(report: ReconcileReport) -> None:
+    drift = f"{report.anchor_drift_pct:+.2%}" if report.anchor_drift_pct is not None else "n/a"
+    anchor = f"{report.anchor_journal:.2f}" if report.anchor_journal is not None else "aucune"
+    lines = [
+        f"Ancre journalisée : {anchor}   mark : {report.anchor_current_mark:.2f}   "
+        f"dérive : {drift}",
+        f"Dette on-chain : {report.debt_on_chain:.2f} $",
+    ]
+    if report.warnings:
+        lines.extend(f"[yellow]![/yellow] {w}" for w in report.warnings)
+    console.print(
+        Panel(
+            "\n".join(lines),
+            title="Réconciliation au démarrage (README §13)",
+            style="yellow" if report.warnings else "green",
+        ),
+    )
 
 
 def _wire_live_executors(
@@ -393,9 +510,10 @@ def _wire_live_executors(
     The private key stays in memory as a plain string only inside the
     executors; it is never logged and never journaled.
     """
-    from eth_account import Account
-    from hyperliquid.exchange import Exchange
-    from hyperliquid.info import Info as HLInfo
+    # Lazy on purpose: a DRY_RUN run must never import the signing libraries.
+    from eth_account import Account  # noqa: PLC0415
+    from hyperliquid.exchange import Exchange  # noqa: PLC0415
+    from hyperliquid.info import Info as HLInfo  # noqa: PLC0415
 
     pkey = settings.bot_master_private_key.get_secret_value()
     if not pkey or pkey.startswith("REPLACE"):
@@ -455,44 +573,169 @@ def _wire_live_executors(
 @app.command()
 def report(
     db: Annotated[Path, typer.Option("--db")] = _DEFAULT_DB,
+    config: Annotated[Path, typer.Option("--config", "-c")] = _DEFAULT_CONFIG,
 ) -> None:
-    """Rapport TRACER : histogramme des priorités déclenchées + latences p50/p95."""
-    asyncio.run(_run_report(db))
+    """Rapport TRACER : tirs à blanc + p50/p95 des 5 chemins critiques vs budget."""
+    asyncio.run(_run_report(db, config))
 
 
-async def _run_report(db_path: Path) -> None:
+async def _run_report(db_path: Path, config_path: Path) -> None:
+    cfg = load_config(config_path)
     store = StateStore(db_path)
     await store.open()
     try:
         total = await store.count_shadow_intents()
         by_prio = await store.shadow_intents_by_priority()
-        snap_stats = await store.latency_stats(LATENCY_PATH_SNAPSHOT)
-        dec_stats = await store.latency_stats(LATENCY_PATH_DECISION)
+        stats_by_path = await store.latency_stats_all()
     finally:
         await store.close()
 
-    prio_table = Table(title=f"Tirs à blanc par priorité (total: {total})")
-    prio_table.add_column("Priorité")
-    prio_table.add_column("Compte", justify="right")
-    for prio_val in sorted(by_prio):
-        prio_table.add_row(f"P{prio_val}", str(by_prio[prio_val]))
-    console.print(prio_table)
+    factor = cfg.watchdog.latency_budget_factor
+    verdicts = evaluate_all(stats_by_path, budget_factor=factor)
 
-    lat_table = Table(title="Latences observées (ms)")
-    lat_table.add_column("Chemin")
-    lat_table.add_column("Compte", justify="right")
-    lat_table.add_column("p50", justify="right")
-    lat_table.add_column("p95", justify="right")
-    lat_table.add_column("max", justify="right")
-    for name, stats in [("snapshot", snap_stats), ("decision", dec_stats)]:
-        lat_table.add_row(
-            name,
-            f"{int(stats['count'])}",
-            f"{stats['p50']:.2f}",
-            f"{stats['p95']:.2f}",
-            f"{stats['max']:.2f}",
+    _render_shadow_intents(total, by_prio)
+    _render_critical_paths(verdicts, factor)
+    _render_raw_latencies(stats_by_path)
+    _render_m1_verdict(verdicts, factor)
+
+
+_MS_PER_S = 1_000.0
+_MS_PER_MIN = 60_000.0
+# Below this, show two decimals: the decision loop is sub-millisecond.
+_MS_SUBMILLI = 10.0
+
+
+def _fmt_ms(ms: float) -> str:
+    """Render a duration at the scale a human reads it at (ms / s / min)."""
+    if ms < _MS_SUBMILLI:
+        # Rounding the decision loop to "0 ms" would hide the one number that
+        # proves decision.py does no I/O.
+        return f"{ms:.2f} ms"
+    if ms < _MS_PER_S:
+        return f"{ms:.0f} ms"
+    if ms < _MS_PER_MIN:
+        return f"{ms / _MS_PER_S:.1f} s"
+    minutes, seconds = divmod(ms / _MS_PER_S, 60)
+    return f"{int(minutes)} min {seconds:02.0f} s"
+
+
+_VERDICT_STYLE: dict[str, str] = {
+    "OK": "bold green",
+    "DEPASSE": "bold yellow",
+    "PRUDENT": "bold red",
+    "INCOMPLET": "yellow",
+    "AUCUN": "dim",
+}
+
+
+def _render_shadow_intents(total: int, by_prio: dict[int, int]) -> None:
+    table = Table(title=f"Tirs à blanc par priorité (total: {total})")
+    table.add_column("Priorité")
+    table.add_column("Compte", justify="right")
+    for prio_val in sorted(by_prio):
+        table.add_row(f"P{prio_val}", str(by_prio[prio_val]))
+    if not by_prio:
+        table.add_row("—", "0")
+    console.print(table)
+
+
+def _render_critical_paths(verdicts: list[PathVerdict], factor: float) -> None:
+    """The M1 deliverable: p95 of each critical path against its budget."""
+    table = Table(title=f"Chemins critiques (README §7) — p95 vs budget (facteur {factor})")
+    table.add_column("P")
+    table.add_column("Chemin")
+    table.add_column("Venue")
+    table.add_column("n", justify="right")
+    table.add_column("p50", justify="right")
+    table.add_column("p95", justify="right")
+    table.add_column("Budget", justify="right")
+    table.add_column("p95/bud", justify="right")
+    table.add_column("Verdict")
+
+    for v in verdicts:
+        style = _VERDICT_STYLE[v.verdict]
+        measured = v.verdict != "AUCUN"
+        table.add_row(
+            v.path.key,
+            v.path.label,
+            v.path.venue,
+            str(v.samples),
+            _fmt_ms(v.p50_ms) if measured else "—",
+            _fmt_ms(v.p95_ms) if measured else "—",
+            _fmt_ms(v.path.budget_ms),
+            f"{v.budget_ratio:.2f}x" if measured else "—",
+            f"[{style}]{v.verdict}[/{style}]",
         )
-    console.print(lat_table)
+    console.print(table)
+
+    # Explain every non-OK row rather than leaving the operator to guess.
+    for v in verdicts:
+        if v.missing:
+            console.print(
+                f"  [dim]{v.path.key}: aucune mesure pour "
+                f"{', '.join(m.removeprefix('path.') for m in v.missing)}[/dim]",
+            )
+        if v.path.unmeasured:
+            console.print(
+                f"  [dim]{v.path.key}: jambe non mesurable en M1 — "
+                f"{', '.join(v.path.unmeasured)} (venues/swap.py est un stub)[/dim]",
+            )
+
+
+def _render_raw_latencies(stats_by_path: dict[str, dict[str, float]]) -> None:
+    """Every raw measurement, including the non-critical snapshot/decision loops."""
+    table = Table(title="Latences brutes par micro-op")
+    table.add_column("Mesure")
+    table.add_column("Compte", justify="right")
+    table.add_column("p50", justify="right")
+    table.add_column("p95", justify="right")
+    table.add_column("max", justify="right")
+    for name in sorted(stats_by_path):
+        stats = stats_by_path[name]
+        table.add_row(
+            name.removeprefix("path."),
+            f"{int(stats['count'])}",
+            _fmt_ms(stats["p50"]),
+            _fmt_ms(stats["p95"]),
+            _fmt_ms(stats["max"]),
+        )
+    if not stats_by_path:
+        table.add_row("—", "0", "—", "—", "—")
+    console.print(table)
+
+
+def _render_m1_verdict(verdicts: list[PathVerdict], factor: float) -> None:
+    if m1_acceptance_met(verdicts):
+        console.print(
+            Panel(
+                "Les 5 chemins critiques tiennent leur budget (p95 <= budget). "
+                "Critère de vitesse M1 satisfait.",
+                title="Vitesse (README §12)",
+                style="bold green",
+            ),
+        )
+    else:
+        blockers = [f"{v.path.key}={v.verdict}" for v in verdicts if v.verdict != "OK"]
+        console.print(
+            Panel(
+                "Critère de vitesse M1 NON satisfait — "
+                f"{', '.join(blockers)}.\n"
+                "Un chemin AUCUN/INCOMPLET signifie qu'il manque des micro-ops, "
+                "pas que le chemin est lent.",
+                title="Vitesse (README §12)",
+                style="bold yellow",
+            ),
+        )
+    if needs_prudent_mode(verdicts):
+        slow = [v.path.key for v in verdicts if v.verdict == "PRUDENT"]
+        console.print(
+            Panel(
+                f"p95 > budget x {factor} sur {', '.join(slow)} — README §11 impose le "
+                "mode prudent : re-centrage anticipé à +3 % / -4,5 %.",
+                title="Mode prudent",
+                style="bold red",
+            ),
+        )
 
 
 if __name__ == "__main__":

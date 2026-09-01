@@ -26,6 +26,7 @@ from delta0.config import Config
 from delta0.decision import BlindState, OperationalContext, decide
 from delta0.executor import AaveTraceExecutor
 from delta0.hl_executor import HLTraceExecutor
+from delta0.latency import elapsed_ms, now_perf
 from delta0.logging import get_logger, set_cycle_id
 from delta0.safety import SafetyRefused
 from delta0.state import StateStore
@@ -93,21 +94,21 @@ class TracerLoop:
                 break
 
             # --- Snapshot ---------------------------------------------------
-            t0 = time.monotonic()
+            t0 = now_perf()
             try:
                 snap = await self.watcher.snapshot()
             except Exception:
                 log.exception("snapshot_failed", message="échec construction snapshot")
                 await asyncio.sleep(self.cadence_s)
                 continue
-            snap_ms = (time.monotonic() - t0) * 1000.0
+            snap_ms = elapsed_ms(t0)
             await self.store.record_latency(LATENCY_PATH_SNAPSHOT, snap_ms)
 
             # --- Decision ---------------------------------------------------
             ctx = await self._build_context(snap)
-            t1 = time.monotonic()
+            t1 = now_perf()
             action = decide(snap, self.config, ctx)
-            dec_ms = (time.monotonic() - t1) * 1000.0
+            dec_ms = elapsed_ms(t1)
             await self.store.record_latency(LATENCY_PATH_DECISION, dec_ms)
 
             if action.kind != "NOOP":
