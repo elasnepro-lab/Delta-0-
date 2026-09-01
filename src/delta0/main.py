@@ -325,6 +325,13 @@ def tracer(
 ) -> None:
     """M1 marche à blanc — observe, décide, journalise (aucune exécution par défaut)."""
     cfg = load_config(config)
+
+    # Coherence of the execution flags against the config is checked FIRST,
+    # before the environment is read. A contradictory combination is wrong
+    # whatever `.env` contains, and a refusal that needs a populated `.env`
+    # to be reached is a refusal that cannot be tested.
+    _check_execution_flags(cfg, live_micro_ops=live_micro_ops, rehearse=rehearse)
+
     settings = load_settings()
     configure_logging(cfg.mode)
     log = get_logger("tracer")
@@ -335,32 +342,14 @@ def tracer(
         "tracer_boot",
         message=(
             f"démarrage TRACER (cadence {cadence}s, durée {duration or 'infinie'}, "
-            f"live_micro_ops={live_micro_ops}, ws={not no_ws})"
+            f"live_micro_ops={live_micro_ops}, rehearse={rehearse}, ws={not no_ws})"
         ),
         run_id=run_id,
         live_micro_ops=live_micro_ops,
+        rehearse=rehearse,
         confirmed_kinds=confirmed_kinds,
         ws_enabled=not no_ws,
     )
-    if live_micro_ops and rehearse:
-        console.print(
-            "[bold red]REFUS[/bold red]: --live-micro-ops et --rehearse "
-            "s'excluent. La répétition ne doit jamais pouvoir devenir un tir réel.",
-        )
-        raise typer.Exit(code=6)
-    if live_micro_ops and cfg.tracer.dry_run:
-        console.print(
-            "[bold red]REFUS[/bold red]: --live-micro-ops passé mais "
-            "config.tracer.dry_run=true. Bascule dry_run à false d'abord.",
-        )
-        raise typer.Exit(code=2)
-    if rehearse and not cfg.tracer.dry_run:
-        console.print(
-            "[bold red]REFUS[/bold red]: --rehearse passé mais "
-            "config.tracer.dry_run=false. Une répétition qui envoie des "
-            "transactions n'est pas une répétition.",
-        )
-        raise typer.Exit(code=6)
     if rehearse:
         console.print(
             "[bold yellow]RÉPÉTITION[/bold yellow] : executors câblés, "
@@ -381,6 +370,33 @@ def tracer(
             rehearse=rehearse,
         ),
     )
+
+
+def _check_execution_flags(cfg: Config, *, live_micro_ops: bool, rehearse: bool) -> None:
+    """Refuse contradictory execution flags before anything else happens.
+
+    Pure: config + flags in, `typer.Exit` or nothing out. No env, no network,
+    no filesystem — so every refusal is reachable in a test.
+    """
+    if live_micro_ops and rehearse:
+        console.print(
+            "[bold red]REFUS[/bold red]: --live-micro-ops et --rehearse "
+            "s'excluent. La répétition ne doit jamais pouvoir devenir un tir réel.",
+        )
+        raise typer.Exit(code=6)
+    if live_micro_ops and cfg.tracer.dry_run:
+        console.print(
+            "[bold red]REFUS[/bold red]: --live-micro-ops passé mais "
+            "config.tracer.dry_run=true. Bascule dry_run à false d'abord.",
+        )
+        raise typer.Exit(code=2)
+    if rehearse and not cfg.tracer.dry_run:
+        console.print(
+            "[bold red]REFUS[/bold red]: --rehearse passé mais "
+            "config.tracer.dry_run=false. Une répétition qui envoie des "
+            "transactions n'est pas une répétition.",
+        )
+        raise typer.Exit(code=6)
 
 
 async def _run_tracer(

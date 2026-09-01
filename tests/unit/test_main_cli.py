@@ -6,9 +6,11 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from delta0.main import _parse_duration, app
+from delta0.settings import load_settings
 from delta0.state import StateStore
 
 runner = CliRunner()
@@ -135,3 +137,14 @@ def test_rehearse_refused_when_dry_run_is_off(tmp_path: Path) -> None:
     result = runner.invoke(app, ["tracer", "-c", str(cfg), "--rehearse", "-d", "1s"])
     assert result.exit_code == 6
     assert "REFUS" in result.stdout
+
+
+def test_unit_suite_cannot_see_the_operator_env() -> None:
+    """Guard on the conftest isolation fixture itself.
+
+    If this starts passing a populated Settings back, the suite has regained
+    access to a real `.env` and every CLI test that depends on env absence
+    becomes machine-dependent.
+    """
+    with pytest.raises(ValidationError):
+        load_settings()
