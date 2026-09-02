@@ -31,6 +31,7 @@ from eth_typing import ChecksumAddress
 from web3 import AsyncWeb3
 
 from delta0.config import Config
+from delta0.gas import with_gas_margin
 from delta0.latency import elapsed_ms, measurement_path, now_perf
 from delta0.logging import get_logger
 from delta0.safety import MicroOpsGuard
@@ -419,8 +420,9 @@ class AaveTraceExecutor:
                     "chainId": self._chain_id,
                 },
             )
+            tx["gas"] = with_gas_margin(int(tx["gas"]))
             signed = self._w3.eth.account.sign_transaction(tx, private_key=self._pkey())
-            tx_hash = await self._w3.eth.send_raw_transaction(signed.rawTransaction)
+            tx_hash = await self._w3.eth.send_raw_transaction(signed.raw_transaction)
             receipt = await self._w3.eth.wait_for_transaction_receipt(tx_hash)
         except Exception:
             await self._mark_intent_status(intent_id, "failed", None)

@@ -123,3 +123,46 @@ Sur 7 jours à raison d'un cycle toutes les 30 min (336 cycles) :
 Conséquence : les 0,005 ETH de la float initiale ne couvrent pas 7 jours dès
 que le gaz dépasse son plancher. Prévoir ~0,02-0,03 ETH avant une session
 longue.
+
+## 7. Le gaz doit porter une marge — sinon la tx revert
+
+Premier cycle live (2026-09-02) : le `repay` a reverté. Ni ABI, ni allowance,
+ni logique Aave — **manque de gaz**.
+
+```
+repay qui a reverte  : limite 168 594  (= estimate_gas brut)
+repay qui a reussi   : 169 810 consommes
+```
+
+`web3.contract.build_transaction` remplit le champ `gas` avec le retour
+d'`eth_estimateGas` sans y ajouter la moindre marge. Sur Arbitrum cette
+estimation melange le cout d'execution L2 et un cout de publication L1 derive
+de la base fee L1 du moment — ce second terme bouge entre l'estimation et
+l'inclusion. Un ecart de 0,6 % a suffi.
+
+Deux pieges de diagnostic rencontres :
+- `eth_call` de rejeu **ne revert pas** : un call n'est pas contraint par la
+  limite de gaz de la transaction. Une simulation verte ne disculpe pas le gaz.
+- le `gasUsed` du recu (163 761) etait **inferieur** a la limite, ce qui semble
+  exclure l'epuisement. Arbitrum comptabilise la part L1 a part : ne jamais
+  conclure "ce n'est pas le gaz" a partir de `gasUsed < gasLimit` sur un L2.
+
+Solution : `delta0.gas.with_gas_margin()`, marge de 35 %, appliquee dans
+`executor._journal_and_send` et `venues/bridge`. Le gaz non consomme est
+rembourse : la marge ne coute rien.
+
+Consequence en cascade : le `repay` rate laisse la dette ouverte, donc le
+`withdraw` suivant echoue avec `HealthFactorLowerThanLiquidationThreshold`
+(0x6679996d) et la position reste ouverte. D'ou `scripts/unwind_aave.py`,
+a lancer a la main pour refermer ce que le traceur a laisse en plan.
+
+## 8. Selecteurs d'erreurs Aave v3 rencontres
+
+```
+0x47bc4b2c  NotEnoughAvailableUserBalance()               withdraw d'un montant exact
+0x6679996d  HealthFactorLowerThanLiquidationThreshold()   withdraw avec dette ouverte
+```
+
+Aave v3 utilise des erreurs personnalisees : web3 ne remonte que le selecteur.
+Pour en decoder un nouveau, hacher les signatures candidates en keccak et
+comparer les 4 premiers octets.
