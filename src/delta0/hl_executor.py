@@ -43,6 +43,35 @@ _POST_ONLY_OFFSET = 0.10
 # HL enforces a $10 minimum notional per order. We stay conservative at 12 $
 # to avoid rounding-related rejections.
 _MIN_NOTIONAL_USD = 12.0
+_HL_MIN_NOTIONAL_USD = 10.0
+
+# Hyperliquid refuses any order whose size or price is not exactly
+# representable on its wire format — the SDK raises `float_to_wire causes
+# rounding` locally, before anything reaches the venue. Two separate rules:
+#
+#   size  : at most `szDecimals` decimals (per asset, from the exchange meta;
+#           ETH is 4).
+#   price : at most 5 significant figures AND at most `6 - szDecimals`
+#           decimals, whichever binds first. Integer prices are always legal.
+#
+# A naive `notional / mark` is a full-precision float and satisfies neither,
+# which is why the first live order never left the process.
+_PERP_MAX_DECIMALS = 6
+_PRICE_SIG_FIGS = 5
+
+# Fallback when the exchange meta is not wired in (tests, and any caller that
+# does not inject `get_size_decimals`). ETH's value on Hyperliquid.
+_ETH_SZ_DECIMALS = 4
+
+
+def round_size(size: float, sz_decimals: int) -> float:
+    """Round an order size onto the asset's size grid."""
+    return round(size, sz_decimals)
+
+
+def round_price(price: float, sz_decimals: int) -> float:
+    """Round a limit price onto HL's price grid (5 sig figs, then decimals)."""
+    return round(float(f"{price:.{_PRICE_SIG_FIGS}g}"), _PERP_MAX_DECIMALS - sz_decimals)
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +102,7 @@ class HLTraceExecutor:
         guard: MicroOpsGuard,
         exchange_factory: Any,
         get_mark_price: Any,
+        get_size_decimals: Any = None,
         coin: str = "ETH",
     ) -> None:
         self._config = config
@@ -80,7 +110,32 @@ class HLTraceExecutor:
         self._guard = guard
         self._make_exchange = exchange_factory
         self._get_mark_price = get_mark_price
+        # Injected like `get_mark_price` so tests never import the SDK. When
+        # absent, fall back to ETH's grid: wrong for an exotic asset, but the
+        # tracer only ever quotes the coin it was constructed with, and a
+        # mis-rounded order is refused locally rather than mispriced on-venue.
+        self._get_size_decimals = get_size_decimals
         self._coin = coin
+        self._exchange: Any = None
+
+    def _exchange_once(self) -> Any:
+        """Build the SDK client once and keep it for the executor's lifetime.
+
+        `Exchange.__init__` constructs an `Info`, which pulls the perp and spot
+        metadata over HTTP — two round trips. Rebuilding it per order put those
+        inside the measured window and made the first live P1/P2 sample 2.6 s
+        against a 2 s budget. Worse than the bad number: P1/P2 is the
+        liquidation-response path, and standing up an HTTP client mid-emergency
+        is the opposite of what that budget exists to protect.
+        """
+        if self._exchange is None:
+            self._exchange = self._make_exchange()
+        return self._exchange
+
+    async def _size_decimals(self) -> int:
+        if self._get_size_decimals is None:
+            return _ETH_SZ_DECIMALS
+        return int(await self._get_size_decimals(self._coin))
 
     async def post_and_cancel(self, side: Literal["buy", "sell"] = "sell") -> HLOpResult:
         """Place a post-only ALO order 10 % from mark, then cancel it.
@@ -94,13 +149,24 @@ class HLTraceExecutor:
 
         # Get a mark price (from stream cache preferably, else REST).
         mark = await self._get_mark_price(self._coin)
+        sz_decimals = await self._size_decimals()
         offset = _POST_ONLY_OFFSET
         # For a sell post-only, the limit MUST be strictly above mark so it
-        # rests as a maker. For a buy, strictly below.
-        limit_price = mark * (1.0 + offset) if side == "sell" else mark * (1.0 - offset)
+        # rests as a maker. For a buy, strictly below. Rounding to HL's price
+        # grid moves the limit by at most one tick — a 10 % offset absorbs that
+        # without ever crossing back over mark.
+        raw_limit = mark * (1.0 + offset) if side == "sell" else mark * (1.0 - offset)
+        limit_price = round_price(raw_limit, sz_decimals)
 
-        # Size chosen so notional ≈ _MIN_NOTIONAL_USD at mark price.
-        size = _MIN_NOTIONAL_USD / mark
+        # Size chosen so notional ≈ _MIN_NOTIONAL_USD at mark price, then
+        # snapped to the asset's size grid.
+        size = round_size(_MIN_NOTIONAL_USD / mark, sz_decimals)
+        notional = size * mark
+        if notional < _HL_MIN_NOTIONAL_USD:
+            # Rounding down took us under HL's floor: step one tick up rather
+            # than send an order the venue will reject.
+            size = round_size(size + 10.0**-sz_decimals, sz_decimals)
+            notional = size * mark
 
         intent_id = deterministic_id(
             "hl_post_only_cancel",
@@ -120,6 +186,11 @@ class HLTraceExecutor:
                 "mark_at_placement": mark,
             },
         )
+
+        # Built before the clock starts, and only on the first live order: the
+        # SDK client's construction is setup cost, not P1/P2 latency. Skipped
+        # entirely in dry run, where the factory is deliberately a landmine.
+        exchange = None if self._config.tracer.dry_run else self._exchange_once()
 
         start = now_perf()
 
@@ -147,7 +218,6 @@ class HLTraceExecutor:
             )
 
         try:
-            exchange = self._make_exchange()
             is_buy = side == "buy"
             order_response = await self._call_exchange_order(
                 exchange,

@@ -617,12 +617,28 @@ def _wire_micro_op_executors(
             )
         return Exchange(Account.from_key(pkey), cfg.venues.hl_api)
 
+    # Size/price grids come from the exchange meta, not a constant: HL rejects
+    # an order whose size carries more decimals than the asset allows, and the
+    # SDK raises locally so the order never leaves the process. Cached — the
+    # universe changes far more slowly than the tracer loops.
+    _sz_decimals_cache: dict[str, int] = {}
+
+    async def _size_decimals(coin: str) -> int:
+        if coin not in _sz_decimals_cache:
+            meta = await asyncio.to_thread(hl_info.meta)
+            for asset in meta.get("universe", []):
+                name = asset.get("name")
+                if name is not None:
+                    _sz_decimals_cache[name] = int(asset.get("szDecimals", 4))
+        return _sz_decimals_cache.get(coin, 4)
+
     hl_exec = HLTraceExecutor(
         config=cfg,
         store=store,
         guard=guard,
         exchange_factory=_make_exchange,
         get_mark_price=_mark_price,
+        get_size_decimals=_size_decimals,
     )
 
     bridge = BridgeExecutor(
