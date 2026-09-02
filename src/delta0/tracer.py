@@ -176,7 +176,10 @@ class TracerLoop:
         - approve again a small buffer for the repay (borrow + accrued interest).
         - repay_all closes the entire position via MAX_UINT256 (a partial repay
           would leave dust interest that blocks the withdraw).
-        - withdraw pulls back the full `amount` supplied.
+        - withdraw_all pulls back the full collateral, also via MAX_UINT256.
+          Asking for the exact `amount` supplied reverts whenever Aave's
+          scaled-balance rounding lands one unit short (5.000000 supplied reads
+          back as 4.999999) — see memory/aave_findings.md.
 
         Each of the six ops records its own latency via the executor.
         SafetyRefused or any other exception aborts the cycle without killing
@@ -194,7 +197,7 @@ class TracerLoop:
             await self.aave_executor.borrow(usdc, borrow_amount)
             await self.aave_executor.approve(usdc, repay_headroom)
             await self.aave_executor.repay_all(usdc)
-            await self.aave_executor.withdraw(usdc, amount)
+            await self.aave_executor.withdraw_all(usdc, amount)
             log.info(
                 "aave_cycle_ok",
                 message=f"cycle Aave complet ({amount} USDC) OK",

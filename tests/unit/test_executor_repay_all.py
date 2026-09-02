@@ -1,4 +1,9 @@
-"""AaveTraceExecutor.repay_all uses MAX_UINT256 sentinel."""
+"""AaveTraceExecutor closes Aave round trips with the MAX_UINT256 sentinel.
+
+Both ends of the cycle need it: `repay_all` because a partial repay leaves
+accrued interest, `withdraw_all` because Aave's scaled-balance rounding can
+leave the aToken one unit below the deposit. See memory/aave_findings.md.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +15,7 @@ import pytest
 
 from delta0.config import Config
 from delta0.executor import AaveTraceExecutor
-from delta0.safety import MicroOpsGuard
+from delta0.safety import MicroOpsGuard, SafetyRefused
 from delta0.state import StateStore
 
 USDC = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
@@ -40,9 +45,14 @@ class _FakeERC20Functions:
 class _FakePoolFunctions:
     def __init__(self) -> None:
         self.last_repay_args: tuple[object, ...] | None = None
+        self.last_withdraw_args: tuple[object, ...] | None = None
 
     def repay(self, *args: object) -> object:
         self.last_repay_args = args
+        return object()
+
+    def withdraw(self, *args: object) -> object:
+        self.last_withdraw_args = args
         return object()
 
 
@@ -103,3 +113,79 @@ async def test_repay_all_uses_max_uint256(
     call_args = fake_eth._pool_functions.last_repay_args
     # (asset, amount, rate_mode, on_behalf_of)
     assert call_args[1] == max_uint
+
+
+@pytest.mark.asyncio
+async def test_withdraw_all_uses_max_uint256(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+) -> None:
+    """The exact-amount withdraw reverts on rounding; the sentinel does not."""
+    cfg = config.model_copy(
+        update={
+            "tracer": config.tracer.model_copy(
+                update={"dry_run": True, "require_first_use_confirmation": False},
+            ),
+        },
+    )
+    guard = MicroOpsGuard(config=cfg.tracer, project_root=tmp_path)
+    guard.confirm_kind("aave_withdraw")
+    w3 = MagicMock()
+    fake_eth = _FakeEth(cfg.venues.aave_pool)
+    w3.eth = fake_eth
+
+    with patch("delta0.executor.AsyncWeb3") as async_web3_mock:
+        async_web3_mock.to_checksum_address.side_effect = lambda a: a
+        executor = AaveTraceExecutor(
+            web3=w3,
+            config=cfg,
+            store=store,
+            guard=guard,
+            master_address="0x000000000000000000000000000000000000dEaD",
+            chain_id=42161,
+        )
+        result = await executor.withdraw_all(USDC, 5.0)
+
+    assert result.status == "dry_run"
+    call_args = fake_eth._pool_functions.last_withdraw_args
+    assert call_args is not None
+    # (asset, amount, to)
+    assert call_args[1] == 2**256 - 1
+
+
+@pytest.mark.asyncio
+async def test_withdraw_all_notional_hint_respects_the_amount_cap(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+) -> None:
+    """MAX_UINT256 must never reach the guard as a notional — the hint does."""
+    cfg = config.model_copy(
+        update={
+            "tracer": config.tracer.model_copy(
+                update={
+                    "dry_run": True,
+                    "require_first_use_confirmation": False,
+                    "max_op_usd": 10.0,
+                },
+            ),
+        },
+    )
+    guard = MicroOpsGuard(config=cfg.tracer, project_root=tmp_path)
+    guard.confirm_kind("aave_withdraw")
+    w3 = MagicMock()
+    w3.eth = _FakeEth(cfg.venues.aave_pool)
+
+    with patch("delta0.executor.AsyncWeb3") as async_web3_mock:
+        async_web3_mock.to_checksum_address.side_effect = lambda a: a
+        executor = AaveTraceExecutor(
+            web3=w3,
+            config=cfg,
+            store=store,
+            guard=guard,
+            master_address="0x000000000000000000000000000000000000dEaD",
+            chain_id=42161,
+        )
+        with pytest.raises(SafetyRefused):
+            await executor.withdraw_all(USDC, 50.0)

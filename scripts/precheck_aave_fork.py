@@ -236,13 +236,16 @@ async def main() -> None:
         [USDC_ADDR, max_uint, VARIABLE_RATE, USER_ADDR],
     )
 
-    # 5) Withdraw the supplied USDC back to self.
+    # 5) Withdraw ALL collateral back to self, MAX_UINT256 again. Asking for
+    #    the exact RAW_AMOUNT supplied reverts whenever Aave's scaled-balance
+    #    rounding lands the aToken one unit short of the deposit (5.000000 USDC
+    #    supplied reads back as 4.999999). See memory/aave_findings.md.
     await send_impersonated(
         w3,
-        "withdraw(USDC, 5, self)",
+        "withdraw(USDC, MAX_UINT256, self)",
         pool,
         "withdraw",
-        [USDC_ADDR, RAW_AMOUNT, USER_ADDR],
+        [USDC_ADDR, max_uint, USER_ADDR],
     )
 
     ending_usdc: int = await usdc.functions.balanceOf(USER_ADDR).call()

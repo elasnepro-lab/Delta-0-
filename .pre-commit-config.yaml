@@ -12,10 +12,14 @@ repos:
       - id: mixed-line-ending
         args: ["--fix=lf"]
 
+  # Keep this rev in lockstep with the `ruff` pin in pyproject.toml. A hook
+  # older than the project's ruff runs a smaller rule set, so its RUF100 strips
+  # `# noqa` directives for rules it does not know yet (PLC0415 was added after
+  # 0.7.4) — and the project's ruff then flags the very lines it just uncommented.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.7.4
+    rev: v0.16.5
     hooks:
-      - id: ruff
+      - id: ruff-check
         args: ["--fix"]
       - id: ruff-format
 

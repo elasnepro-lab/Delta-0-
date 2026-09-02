@@ -261,6 +261,16 @@ class AaveTraceExecutor:
         )
 
     async def withdraw(self, asset: str, amount_native: float) -> OpResult:
+        """Withdraw an EXACT amount. Prefer `withdraw_all` to close a round trip.
+
+        Asking for the exact amount that was supplied reverts intermittently:
+        Aave stores deposits as `scaledBalance = amount / liquidityIndex` and
+        rounds DOWN on both that division and the multiplication back, so an
+        aToken balance can settle one unit below the deposit (5.000000 USDC
+        supplied reads back as 4.999999). Whether it does depends on the index
+        at deposit time — which is why the same sequence passes one day and
+        reverts the next. See memory/aave_findings.md.
+        """
         return await self._pool_write(
             op_kind="aave_withdraw",
             asset=asset,
@@ -270,6 +280,41 @@ class AaveTraceExecutor:
                 raw_amount,
                 self._master,
             ),
+        )
+
+    async def withdraw_all(self, asset: str, notional_hint: float) -> OpResult:
+        """Withdraw the FULL aToken balance via the MAX_UINT256 sentinel.
+
+        The exact-amount `withdraw` cannot close a round trip reliably (see its
+        docstring): it reverts whenever Aave's rounding leaves the balance one
+        unit short. MAX_UINT256 tells Aave "everything I hold", which is both
+        rounding-proof and the only amount that leaves no dust collateral.
+
+        Mirror of `repay_all`, with the same caveat: this empties the entire
+        USDC collateral, not just this cycle's deposit. That is correct for the
+        M1 tracer, which is the only supplier during the marche a blanc. Once
+        the real USDC cushion exists (M2), a cycle must withdraw its own
+        deposit only — read the aToken balance and pass it to `withdraw`, which
+        is safe in that direction because the balance only grows with interest.
+
+        `notional_hint` is what the guard sees: MAX_UINT256 as a notional would
+        blow the `max_op_usd` cap on every call, so callers pass the amount
+        they supplied.
+        """
+        max_uint = 2**256 - 1
+        op_kind: AaveOpKind = "aave_withdraw"
+        self._guard.check(op_kind, notional_usd=self._estimate_notional(asset, notional_hint))
+
+        call = self._pool.functions.withdraw(
+            AsyncWeb3.to_checksum_address(asset),
+            max_uint,
+            self._master,
+        )
+        return await self._journal_and_send(
+            op_kind=op_kind,
+            asset=asset,
+            amount_native=0.0,  # dummy for journal params — real amount is MAX
+            call=call,
         )
 
     # --- Internal plumbing ----------------------------------------------------

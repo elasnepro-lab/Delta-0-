@@ -79,12 +79,12 @@ async def test_scheduler_fires_aave_cycle_when_interval_zero(
     )
     # A tiny duration is enough — the loop iterates fast on cadence 0.
     await loop.run(duration_s=0.05)
-    # Full cycle: approve, supply, borrow, approve buffer, repay_all, withdraw.
+    # Full cycle: approve, supply, borrow, approve buffer, repay_all, withdraw_all.
     aave.approve.assert_called()
     aave.supply.assert_called()
     aave.borrow.assert_called()
     aave.repay_all.assert_called()
-    aave.withdraw.assert_called()
+    aave.withdraw_all.assert_called()
 
 
 @pytest.mark.asyncio

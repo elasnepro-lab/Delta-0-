@@ -25,7 +25,7 @@ delta0 = "delta0.main:app"
 
 [dependency-groups]
 dev = [
-    "ruff>=0.7.0",
+    "ruff>=0.16.5",       # garder en phase avec .pre-commit-config.yaml
     "mypy>=1.13.0",
     "pytest>=8.3.3",
     "pytest-asyncio>=0.24.0",
