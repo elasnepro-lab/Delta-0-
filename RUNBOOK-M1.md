@@ -169,9 +169,25 @@ l'inverse.
 P4 reste `INCOMPLET` par construction tant que `venues/swap.py` est un stub :
 la jambe swap wstETH -> USDC n'existe pas encore (M2).
 
+**Exception assumée au critère de sortie.** Exiger que les 5 chemins soient
+`OK` rendrait la porte M1 inatteignable : P4 porte une jambe que M1 n'a aucun
+moyen de mesurer. `latency.path_meets_m1()` accepte donc un chemin `INCOMPLET`
+dont le seul manque est une jambe déclarée non mesurable — et rien d'autre :
+
+- toutes les jambes que M1 *peut* mesurer doivent avoir des échantillons
+  (`missing` vide), pour qu'une micro-op oubliée ne passe jamais pour un
+  manque M2 ;
+- les jambes mesurées doivent tenir le budget **complet** du chemin, ce qui
+  est plus sévère que de les juger sur un budget au prorata.
+
+Le panneau vert du rapport nomme explicitement les jambes exemptées. Un
+rapport qui passe en taisant ce qu'il a excusé serait pire qu'un rapport qui
+échoue.
+
 ## 6. Limites connues à la clôture de M1-B2
 
-- `venues/swap.py` est un stub : P4 n'est mesurable qu'en partie.
+- `venues/swap.py` est un stub : P4 n'est mesurable qu'en partie. Le
+  critère de sortie l'exempte explicitement (voir §5).
 - La détection de liquidation côté Aave (`LiquidationCall` sur le Pool) est
   M2 ; seul le flanc HL est câblé.
 - La porte de régime (P10) n'est pas évaluée : elle demande une moyenne 30 j

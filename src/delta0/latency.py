@@ -207,10 +207,36 @@ def needs_prudent_mode(verdicts: list[PathVerdict]) -> bool:
     return any(v.verdict == "PRUDENT" for v in verdicts)
 
 
+def path_meets_m1(verdict: PathVerdict) -> bool:
+    """Whether one path satisfies the M1 speed criterion.
+
+    `OK` obviously qualifies. So does a path whose ONLY gap is a leg M1 has no
+    way to measure — P4's `swap wstETH -> USDC`, which cannot exist while
+    `venues/swap.py` is a stub (that swap is M2 work, RUNBOOK-M1 §6). Holding
+    M1 hostage to a leg M1 cannot produce would make the gate unreachable by
+    construction, so the exception is explicit rather than implied.
+
+    It is deliberately narrow. The path still has to earn its pass:
+      - every leg that CAN be measured must have samples (`missing` empty), so
+        a forgotten micro-op is never mistaken for an M2 gap;
+      - the measured legs must still fit the full budget, which is strictly
+        harsher than judging them against a prorated one.
+    """
+    if verdict.verdict == "OK":
+        return True
+    return (
+        verdict.verdict == "INCOMPLET"
+        and not verdict.missing
+        and bool(verdict.path.unmeasured)
+        and verdict.p95_ms <= verdict.path.budget_ms
+    )
+
+
 def m1_acceptance_met(verdicts: list[PathVerdict]) -> bool:
-    """True when every critical path has samples and holds its budget.
+    """True when every critical path holds its budget on what M1 can measure.
 
     This is the "Vitesse" line of the tableau d'exactitude (README §12) and the
-    M1 gate: no path may be unmeasured, over budget, or incomplete.
+    M1 gate. No path may be unmeasured or over budget; a path may carry a leg
+    that M1 structurally cannot measure — see `path_meets_m1`.
     """
-    return bool(verdicts) and all(v.verdict == "OK" for v in verdicts)
+    return bool(verdicts) and all(path_meets_m1(v) for v in verdicts)

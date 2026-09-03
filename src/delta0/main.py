@@ -28,7 +28,13 @@ from delta0.config import Config, load_config
 from delta0.decision import target_state
 from delta0.executor import AaveTraceExecutor
 from delta0.hl_executor import HLTraceExecutor
-from delta0.latency import PathVerdict, evaluate_all, m1_acceptance_met, needs_prudent_mode
+from delta0.latency import (
+    PathVerdict,
+    evaluate_all,
+    m1_acceptance_met,
+    needs_prudent_mode,
+    path_meets_m1,
+)
 from delta0.logging import configure_logging, get_logger, new_run_id
 from delta0.reconcile import ReconcileReport, reconcile_at_boot
 from delta0.safety import ALLOWED_OP_KINDS, MicroOpsGuard
@@ -792,16 +798,25 @@ def _render_raw_latencies(stats_by_path: dict[str, dict[str, float]]) -> None:
 
 def _render_m1_verdict(verdicts: list[PathVerdict], factor: float) -> None:
     if m1_acceptance_met(verdicts):
+        # Name the exempted legs in the pass message. A green panel that hides
+        # what it excused is worse than no panel: the operator signing off on
+        # M1 has to see exactly what was NOT measured.
+        excused = [
+            f"{v.path.key} ({', '.join(v.path.unmeasured)})" for v in verdicts if v.verdict != "OK"
+        ]
+        note = (
+            f"\nJambes non mesurables en M1, exemptées : {'; '.join(excused)}." if excused else ""
+        )
         console.print(
             Panel(
-                "Les 5 chemins critiques tiennent leur budget (p95 <= budget). "
-                "Critère de vitesse M1 satisfait.",
+                "Les 5 chemins critiques tiennent leur budget (p95 <= budget) "
+                f"sur tout ce que M1 peut mesurer. Critère de vitesse M1 satisfait.{note}",
                 title="Vitesse (README §12)",
                 style="bold green",
             ),
         )
     else:
-        blockers = [f"{v.path.key}={v.verdict}" for v in verdicts if v.verdict != "OK"]
+        blockers = [f"{v.path.key}={v.verdict}" for v in verdicts if not path_meets_m1(v)]
         console.print(
             Panel(
                 "Critère de vitesse M1 NON satisfait — "

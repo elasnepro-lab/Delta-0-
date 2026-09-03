@@ -15,6 +15,7 @@ from delta0.latency import (
     m1_acceptance_met,
     needs_prudent_mode,
     now_perf,
+    path_meets_m1,
 )
 
 _FACTOR = 1.5
@@ -215,3 +216,49 @@ def test_a_repeated_leg_counts_twice_in_the_sum_once_in_the_report() -> None:
     v_missing = evaluate_path(p4, {}, budget_factor=_FACTOR)
     assert v_missing.verdict == "AUCUN"
     assert v_missing.missing == ("path.aave_repay", "path.aave_withdraw")
+
+
+# --- M1 acceptance with a structurally unmeasurable leg -----------------------
+#
+# P4's swap leg cannot exist while `venues/swap.py` is a stub (M2 work,
+# RUNBOOK-M1 §6). Requiring it would make the M1 gate unreachable, so the
+# exception is explicit — and narrow.
+
+
+def _all_legs_fast() -> dict[str, dict[str, float]]:
+    """Every raw leg measured and quick enough for any budget."""
+    names = {name for path in CRITICAL_PATHS for name in path.components}
+    return {name: _stats(50, 100.0, 200.0, 300.0) for name in names}
+
+
+def test_path_with_only_an_unmeasurable_leg_still_passes() -> None:
+    verdicts = evaluate_all(_all_legs_fast(), budget_factor=1.5)
+    p4 = next(v for v in verdicts if v.path.key == "P4")
+    assert p4.verdict == "INCOMPLET"  # the swap leg is still declared missing
+    assert p4.missing == ()  # but nothing measurable was skipped
+    assert path_meets_m1(p4)
+    assert m1_acceptance_met(verdicts)
+
+
+def test_a_forgotten_micro_op_is_not_excused() -> None:
+    """The exemption covers M2 gaps, never an un-run micro-op."""
+    stats = _all_legs_fast()
+    del stats["path.aave_withdraw"]  # a leg M1 *can* measure, simply not run
+    verdicts = evaluate_all(stats, budget_factor=1.5)
+    p4 = next(v for v in verdicts if v.path.key == "P4")
+    assert not path_meets_m1(p4)
+    assert not m1_acceptance_met(verdicts)
+
+
+def test_an_unmeasurable_leg_does_not_excuse_being_over_budget() -> None:
+    """Exempting the swap leg must not exempt the measured ones from budget."""
+    slow = {
+        name: _stats(50, 40_000.0, 40_000.0, 40_000.0)
+        for path in CRITICAL_PATHS
+        for name in path.components
+    }
+    verdicts = evaluate_all(slow, budget_factor=1.5)
+    p4 = next(v for v in verdicts if v.path.key == "P4")
+    assert p4.p95_ms > p4.path.budget_ms
+    assert not path_meets_m1(p4)
+    assert not m1_acceptance_met(verdicts)
