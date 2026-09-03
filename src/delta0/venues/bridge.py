@@ -38,6 +38,7 @@ from web3 import AsyncWeb3
 
 from delta0.config import Config
 from delta0.gas import with_gas_margin
+from delta0.hl_api import ensure_ok, is_ok, response_detail
 from delta0.latency import elapsed_ms, measurement_path, now_perf
 from delta0.logging import get_logger
 from delta0.safety import MicroOpsGuard
@@ -45,6 +46,11 @@ from delta0.state import StateStore, deterministic_id
 
 log = get_logger(__name__)
 
+
+# Hyperliquid refuses spot<->perp transfers on a unified account, where the
+# two sub-accounts already share one balance. Matched on the message text
+# because the SDK surfaces no code — kept lowercase, compared lowercased.
+_UNIFIED_ACCOUNT_MARKER = "unified account"
 
 # HL client-side minimums (README §9.1).
 MIN_DEPOSIT_USDC = 5.0
@@ -190,11 +196,16 @@ class BridgeExecutor:
 
         try:
             exchange = self._make_hl_exchange()
-            await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 exchange.withdraw_from_bridge,
                 amount_usdc,
                 self._master,
             )
+            # The SDK returns an error envelope instead of raising. Without
+            # this the intent would be marked confirmed and a bogus
+            # `bridge_in_submit` latency recorded for a withdrawal the venue
+            # declined to perform.
+            ensure_ok(result, "retrait du pont")
         except Exception:
             await self._mark_intent_status(intent_id, "failed", None)
             log.exception(
@@ -423,36 +434,76 @@ class BridgeExecutor:
         return result
 
     async def transfer_spot_to_perp(self, amount_usdc: float) -> None:
-        """Move bridged USDC from HL's spot sub-account to perp.
+        """Move bridged USDC from HL's spot sub-account to perp, if that applies.
+
+        On a LEGACY Hyperliquid account, spot and perp are separate pools and
+        the two bridge legs disagree about which one they touch: the deposit is
+        credited to spot, while `withdraw3` draws on perp. Left alone, every
+        round trip shifts the balance one way and the withdrawal eventually
+        fails. This step puts it back.
+
+        On a UNIFIED account there is only one balance — the spot USDC *is* the
+        collateral backing perp positions (`spot_user_state` exposes it as
+        `tokenToAvailableAfterMaintenance`), `marginSummary.accountValue` merely
+        reports position equity, and HL disables the transfer outright:
+
+            {'status': 'err', 'response': 'Action disabled when unified
+             account is active'}
+
+        That refusal is the correct outcome, not a failure: nothing needs
+        moving. It is logged as information so a 7-day run does not accumulate
+        14 spurious errors.
 
         Not a micro-op: it crosses no venue boundary, sends no chain
-        transaction, and costs nothing. It exists only to reconcile the two
-        sub-accounts that `bridge_out` and `bridge_in` disagree about, so it is
-        deliberately outside the guard's rate limit and outside any latency
-        path — counting it would inflate P5 with an internal bookkeeping step
-        that the real pompe montante (README §8) does not perform.
+        transaction and costs nothing, so it stays outside the guard's rate
+        limit and outside every latency path — counting it would inflate P5
+        with bookkeeping the real pompe montante (README §8) never performs.
 
-        Failure is logged, not raised: the withdrawal that follows may still
-        succeed on an existing perp balance, and aborting here would strand the
-        funds mid-crossing for no gain.
+        Nothing here raises. The funds are already on HL by this point, and
+        aborting would strand them mid-crossing for no gain.
         """
         exchange = self._make_hl_exchange()
         try:
-            await asyncio.to_thread(exchange.usd_class_transfer, amount_usdc, True)
+            result = await asyncio.to_thread(exchange.usd_class_transfer, amount_usdc, True)
         except Exception:
             log.exception(
                 "hl_spot_to_perp_failed",
                 message=(
-                    f"transfert spot -> perp de {amount_usdc} USDC en échec — "
-                    "le retrait suivant puisera dans le solde perp existant"
+                    f"transfert spot -> perp de {amount_usdc} USDC a levé — "
+                    "le retrait suivant puisera dans le solde existant"
                 ),
                 amount=amount_usdc,
             )
             return
-        log.info(
-            "hl_spot_to_perp",
-            message=f"{amount_usdc} USDC transférés du spot vers le perp",
+
+        # The SDK signals rejection by RETURNING an error envelope, it does not
+        # raise (see delta0.hl_api). Treating "no exception" as success would
+        # have logged a transfer that never happened, on every single crossing.
+        if is_ok(result):
+            log.info(
+                "hl_spot_to_perp",
+                message=f"{amount_usdc} USDC transférés du spot vers le perp",
+                amount=amount_usdc,
+            )
+            return
+
+        detail = response_detail(result)
+        if _UNIFIED_ACCOUNT_MARKER in detail.lower():
+            log.info(
+                "hl_unified_account",
+                message=(
+                    "compte unifié : spot et perp partagent un solde unique, "
+                    "aucun transfert nécessaire"
+                ),
+                amount=amount_usdc,
+            )
+            return
+
+        log.warning(
+            "hl_spot_to_perp_refused",
+            message=f"transfert spot -> perp refusé par HL : {detail}",
             amount=amount_usdc,
+            response=detail,
         )
 
     async def _get_hl_usdc_balance(self) -> float:

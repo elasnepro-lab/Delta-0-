@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from delta0.config import Config
+from delta0.hl_api import HLActionRefused
 from delta0.hl_executor import HLTraceExecutor, round_price, round_size
 from delta0.safety import MicroOpsGuard, SafetyRefused
 from delta0.state import StateStore
@@ -180,19 +181,47 @@ async def test_partial_fill_triggers_warning_but_still_completes(
 
 
 @pytest.mark.asyncio
-async def test_extract_order_id_handles_malformed(
+async def test_an_unrecognised_order_response_is_a_failure(
     config: Config,
     store: StateStore,
     tmp_path: Path,
 ) -> None:
+    """A response we cannot read is a failure, never a confirmed measurement.
+
+    This test previously asserted the opposite — "still confirmed because no
+    exception was raised" — which is exactly the hazard. The Hyperliquid SDK
+    reports refusals by return value, so an unreadable response means the order
+    may never have been placed. Journaling it as confirmed puts a P1/P2 latency
+    sample in the M1 report standing for an order that does not exist, and the
+    whole point of that report is to be believed.
+    """
     executor, _, exchange = _make_executor(tmp_path, store, config, dry_run=False)
     exchange.order.return_value = {"weird": "shape"}
-    result = await executor.post_and_cancel()
-    assert result.order_id is None
-    # No cancel call when order id is unknown.
+
+    with pytest.raises(HLActionRefused):
+        await executor.post_and_cancel()
+
+    # Nothing to cancel, and nothing recorded.
     exchange.cancel.assert_not_called()
-    # Still confirmed status because no exception raised.
-    assert result.status == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_order_is_a_failure(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+) -> None:
+    """The venue's own refusal envelope, verbatim from a live response."""
+    executor, _, exchange = _make_executor(tmp_path, store, config, dry_run=False)
+    exchange.order.return_value = {
+        "status": "err",
+        "response": "Insufficient margin to place order",
+    }
+
+    with pytest.raises(HLActionRefused, match="Insufficient margin"):
+        await executor.post_and_cancel()
+
+    exchange.cancel.assert_not_called()
 
 
 # --- HL wire-format grids -----------------------------------------------------

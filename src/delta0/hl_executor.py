@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from delta0.config import Config
+from delta0.hl_api import ensure_ok
 from delta0.latency import elapsed_ms, measurement_path, now_perf
 from delta0.logging import get_logger
 from delta0.safety import MicroOpsGuard
@@ -226,6 +227,12 @@ class HLTraceExecutor:
                 size,
                 limit_price,
             )
+            # A rejected order comes back as an error envelope, not an
+            # exception. Left unchecked, `_extract_order_id` simply returns
+            # None, the cancel is skipped and the intent is journaled as
+            # confirmed — putting a P1/P2 latency sample in the M1 report for
+            # an order that was never placed.
+            ensure_ok(order_response, "ordre post-only")
             order_id = self._extract_order_id(order_response)
             fill_size = self._extract_fill_size(order_response)
             if fill_size > 0:

@@ -7,33 +7,68 @@ suit a été constaté le 2026-09-02 sur le compte réel
 Ces découvertes contraignent `src/delta0/hl_executor.py` et
 `src/delta0/venues/bridge.py`. Ne pas les "simplifier" sans relire ce fichier.
 
-## 1. Deux sous-comptes, et ils ne se parlent pas tout seuls
+## 1. Compte unifié ou compte historique : deux modèles, pas un
 
-Hyperliquid sépare un compte **spot** et un compte **perp**. Le piège est que
-chaque opération du bot touche un sous-compte différent :
+Hyperliquid expose un compte **spot** et un compte **perp**, mais ce que ça
+signifie dépend du modèle sous lequel le compte tourne. Le nôtre est passé en
+**compte unifié** le 2026-09-02, en cours de session.
 
-| Opération | Sous-compte |
-|---|---|
-| dépôt depuis Arbitrum (`bridge_out` vers Bridge2) | **spot** |
-| retrait vers Arbitrum (`withdraw_from_bridge`, action `withdraw3`) | **perp** |
-| ordre perp (post-only ALO, et toute la stratégie) | marge sur le **perp** |
+**Compte unifié (le nôtre aujourd'hui).** Il n'y a qu'un seul solde : l'USDC
+spot *est* le collatéral qui sert de marge aux positions perp.
+`marginSummary.accountValue` ne rapporte que l'équité des positions ouvertes —
+il vaut 0 quand il n'y a pas de position, même avec 29,8 USDC disponibles. Le
+marqueur fiable est `tokenToAvailableAfterMaintenance` dans `spot_user_state`.
+Le transfert spot↔perp est **désactivé** :
 
-Conséquences vécues :
+```
+{'status': 'err', 'response': 'Action disabled when unified account is active'}
+```
 
-- `wait_for_hl_credit` lisait `user_state(...)["marginSummary"]["accountValue"]`
-  — le perp seul — et n'a jamais vu un crédit arrivé sur le spot. La première
-  traversée réelle a tourné jusqu'à son timeout de 900 s, l'argent bien visible
-  sur l'autre sous-compte. Le solde HL doit se lire comme **spot + perp**.
-- Un aller-retour de pont déplace donc le solde du perp vers le spot, sans
-  retour. Sur les 14 traversées d'une marche à blanc de 7 jours : −70 USDC sur
-  le perp. Le retrait casse vers la cinquième traversée, et les ordres avec.
-  `round_trip` intercale désormais `usd_class_transfer(montant, to_perp=True)`
-  après le crédit.
+**Compte historique.** Deux poches séparées, et chaque opération du bot en
+touche une différente : dépôt depuis Arbitrum → spot ; retrait
+(`withdraw_from_bridge`, action `withdraw3`) → perp ; marge d'un ordre → perp.
+Sans rééquilibrage, chaque aller-retour de pont vide le perp de son montant.
 
-Lire les deux : `info.user_state(addr)` (perp) et `info.spot_user_state(addr)`
-(spot, liste `balances` où chercher `coin == "USDC"`).
-`info.user_non_funding_ledger_updates(addr, depuis_ms)` donne le journal des
-mouvements — indispensable pour comprendre où est passé un solde.
+Le code doit gérer les deux : `round_trip` tente le transfert et traite le
+refus « unified account » comme une issue normale, pas comme une erreur.
+
+Attention au piège de diagnostic : voir `accountValue` à 0 avec des fonds bien
+présents ne veut **pas** dire que l'argent est mal placé. Sur un compte unifié
+c'est la lecture normale. Lire les deux avant de conclure —
+`info.user_state(addr)` et `info.spot_user_state(addr)` — et
+`info.user_non_funding_ledger_updates(addr, depuis_ms)` pour le journal des
+mouvements.
+
+## 1 bis. Le SDK ne lève pas, il retourne une enveloppe d'erreur
+
+C'est le piège le plus dangereux de cette place, parce qu'il est silencieux.
+Toutes les actions — poser un ordre, retirer du pont, transférer entre
+sous-comptes — signalent un refus **par valeur de retour** :
+
+```
+{'status': 'err', 'response': '...'}
+```
+
+Du code écrit autour d'un `try/except` prend donc un refus pour un succès.
+Constaté trois fois dans notre propre code :
+
+- le transfert spot→perp refusé, journalisé comme effectué ;
+- `bridge_in` : un retrait refusé aurait marqué l'intent `confirmed` et
+  enregistré une latence `bridge_in_submit` fictive ;
+- `hl_post_only_cancel` : un ordre rejeté faisait renvoyer `None` par
+  `_extract_order_id`, l'annulation était sautée, et l'opération journalisée
+  comme confirmée — **avec un échantillon de latence P1/P2 pour un ordre qui
+  n'a jamais existé**.
+
+Un test unitaire assertait même explicitement ce dernier comportement
+(« toujours confirmé puisqu'aucune exception n'a été levée »). Il encodait le
+bug comme une intention.
+
+Tout passe désormais par `delta0.hl_api.ensure_ok`, qui transforme un refus en
+exception au point d'appel. Une réponse de forme inconnue compte comme un
+refus : le SDK renvoie toujours un dictionnaire pour ces actions, donc une
+autre forme signifie que le contrat a changé, et la lecture prudente d'une
+réponse illisible quand des fonds ont bougé est l'échec.
 
 ## 2. Les ordres doivent tomber pile sur les grilles de la place
 
