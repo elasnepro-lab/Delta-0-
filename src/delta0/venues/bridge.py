@@ -287,12 +287,21 @@ class BridgeExecutor:
         Enregistre p5_bridge_up et p6_bridge_down. En dry_run, les deux waits
         sont court-circuités (ils reposeraient sur des balances qui ne bougent
         pas).
+
+        Les deux jambes ne touchent PAS le même sous-compte Hyperliquid : le
+        dépôt depuis Arbitrum est crédité au compte spot, alors que le retrait
+        (`withdraw3`) puise dans le compte perp. Sans le transfert intercalaire,
+        chaque aller-retour déplace le solde du perp vers le spot — sur les 14
+        traversées des 7 jours, le perp se viderait de 70 USDC et le retrait
+        échouerait vers la cinquième, entraînant aussi les ordres HL, qui ont
+        besoin de marge sur le perp.
         """
         up = await self.bridge_out(amount_usdc)
         if self._config.tracer.dry_run:
             up_wait = 0.0
         else:
             up_wait = await self.wait_for_hl_credit(amount_usdc)
+            await self.transfer_spot_to_perp(amount_usdc)
 
         down = await self.bridge_in(amount_usdc)
         if self._config.tracer.dry_run:
@@ -413,18 +422,84 @@ class BridgeExecutor:
         result: float = raw / (10**decimals)
         return result
 
+    async def transfer_spot_to_perp(self, amount_usdc: float) -> None:
+        """Move bridged USDC from HL's spot sub-account to perp.
+
+        Not a micro-op: it crosses no venue boundary, sends no chain
+        transaction, and costs nothing. It exists only to reconcile the two
+        sub-accounts that `bridge_out` and `bridge_in` disagree about, so it is
+        deliberately outside the guard's rate limit and outside any latency
+        path — counting it would inflate P5 with an internal bookkeeping step
+        that the real pompe montante (README §8) does not perform.
+
+        Failure is logged, not raised: the withdrawal that follows may still
+        succeed on an existing perp balance, and aborting here would strand the
+        funds mid-crossing for no gain.
+        """
+        exchange = self._make_hl_exchange()
+        try:
+            await asyncio.to_thread(exchange.usd_class_transfer, amount_usdc, True)
+        except Exception:
+            log.exception(
+                "hl_spot_to_perp_failed",
+                message=(
+                    f"transfert spot -> perp de {amount_usdc} USDC en échec — "
+                    "le retrait suivant puisera dans le solde perp existant"
+                ),
+                amount=amount_usdc,
+            )
+            return
+        log.info(
+            "hl_spot_to_perp",
+            message=f"{amount_usdc} USDC transférés du spot vers le perp",
+            amount=amount_usdc,
+        )
+
     async def _get_hl_usdc_balance(self) -> float:
-        state = await asyncio.to_thread(self._hl_info.user_state, self._master)
+        """Total USDC held on Hyperliquid, spot AND perp.
+
+        Reading `marginSummary.accountValue` alone — the perp account — misses
+        bridge deposits entirely: USDC arriving from Arbitrum is credited to the
+        SPOT account. `wait_for_hl_credit` polled the perp side and never saw a
+        credit that had already landed, so the first live bridge round trip sat
+        there until its 900 s timeout while the money was sitting in plain view
+        on the other sub-account.
+
+        Summing both is also the honest answer to the question the callers ask:
+        "how much USDC do I hold on this venue". Which sub-account it sits in is
+        an HL implementation detail, and one that moves — a withdrawal draws on
+        spot, an order needs margin in perp.
+        """
+        perp = await asyncio.to_thread(self._hl_info.user_state, self._master)
+        spot = await asyncio.to_thread(self._hl_info.spot_user_state, self._master)
+        return self._perp_usdc(perp) + self._spot_usdc(spot)
+
+    @staticmethod
+    def _perp_usdc(state: object) -> float:
         if not isinstance(state, dict):
             return 0.0
         margin = state.get("marginSummary")
         if not isinstance(margin, dict):
             return 0.0
-        raw = margin.get("accountValue", "0")
         try:
-            return float(raw)
+            return float(margin.get("accountValue", "0"))
         except (TypeError, ValueError):
             return 0.0
+
+    @staticmethod
+    def _spot_usdc(state: object) -> float:
+        if not isinstance(state, dict):
+            return 0.0
+        balances = state.get("balances")
+        if not isinstance(balances, list):
+            return 0.0
+        for entry in balances:
+            if isinstance(entry, dict) and entry.get("coin") == "USDC":
+                try:
+                    return float(entry.get("total", "0"))
+                except (TypeError, ValueError):
+                    return 0.0
+        return 0.0
 
     def _pkey(self) -> str:
         if not self._private_key:
