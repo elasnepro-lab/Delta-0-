@@ -21,7 +21,7 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from web3 import AsyncHTTPProvider, AsyncWeb3
+from web3 import AsyncWeb3
 
 from delta0 import __version__
 from delta0.config import Config, load_config
@@ -37,6 +37,7 @@ from delta0.latency import (
 )
 from delta0.logging import configure_logging, get_logger, new_run_id
 from delta0.reconcile import ReconcileReport, reconcile_at_boot
+from delta0.rpc import build_provider
 from delta0.safety import ALLOWED_OP_KINDS, MicroOpsGuard
 from delta0.settings import Settings, load_settings
 from delta0.state import StateStore
@@ -136,7 +137,9 @@ async def _gather_status(cfg: Config, settings: Settings) -> dict[str, object]:
     log = get_logger("status.gather")
 
     # Aave leg.
-    w3 = AsyncWeb3(AsyncHTTPProvider(settings.arbitrum_rpc_primary))
+    w3 = AsyncWeb3(
+        build_provider(settings.arbitrum_rpc_primary, settings.arbitrum_rpc_fallback),
+    )
     aave = AaveReader(
         web3=w3,
         pool_address=cfg.venues.aave_pool,
@@ -419,7 +422,9 @@ async def _run_tracer(
     store = StateStore(db_path)
     await store.open()
 
-    w3 = AsyncWeb3(AsyncHTTPProvider(settings.arbitrum_rpc_primary))
+    w3 = AsyncWeb3(
+        build_provider(settings.arbitrum_rpc_primary, settings.arbitrum_rpc_fallback),
+    )
     aave = AaveReader(
         web3=w3,
         pool_address=cfg.venues.aave_pool,
