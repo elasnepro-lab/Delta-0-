@@ -127,7 +127,18 @@ async def main() -> int:
     result = await asyncio.to_thread(exchange.usd_class_transfer, amount, to_perp)
     print(f"reponse HL : {result}")
 
-    if not (isinstance(result, dict) and result.get("status") == "ok"):
+    detail = str(result.get("response", result)) if isinstance(result, dict) else str(result)
+    if isinstance(result, dict) and result.get("status") == "ok":
+        pass
+    elif "unified account" in detail.lower():
+        print(
+            "\nCompte UNIFIE : spot et perp partagent un solde unique, "
+            "le transfert n'a pas lieu d'etre.\n"
+            "Le solde spot sert deja de marge aux positions perp — il n'y a "
+            "rien a deplacer, les ordres\net le retrait puisent dedans "
+            "directement. Voir memory/hl_findings.md §1.",
+        )
+    else:
         print("\nATTENTION: reponse inattendue — verifier les soldes ci-dessous.")
 
     after_spot = _usdc_in_spot(await asyncio.to_thread(info.spot_user_state, addr))
