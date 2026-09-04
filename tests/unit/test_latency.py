@@ -51,11 +51,11 @@ def test_no_samples_reports_aucun_not_a_fake_zero() -> None:
     v = evaluate_path(_path_by_key("P1/P2"), {}, budget_factor=_FACTOR)
     assert v.verdict == "AUCUN"
     assert v.samples == 0
-    assert v.missing == ("path.p1_p2_hl_local",)
+    assert v.missing == ("path.p1_p2_hl_order",)
 
 
 def test_within_budget_is_ok() -> None:
-    stats = {"path.p1_p2_hl_local": _stats(120, 300.0, 480.0)}
+    stats = {"path.p1_p2_hl_order": _stats(120, 300.0, 480.0)}
     v = evaluate_path(_path_by_key("P1/P2"), stats, budget_factor=_FACTOR)
     assert v.verdict == "OK"
     assert v.samples == 120
@@ -65,24 +65,24 @@ def test_within_budget_is_ok() -> None:
 
 def test_over_budget_but_under_factor_is_depasse() -> None:
     # 2 500 ms: above the 2 s budget, below 2 s x 1.5.
-    stats = {"path.p1_p2_hl_local": _stats(50, 1_800.0, 2_500.0)}
+    stats = {"path.p1_p2_hl_order": _stats(50, 1_800.0, 2_500.0)}
     v = evaluate_path(_path_by_key("P1/P2"), stats, budget_factor=_FACTOR)
     assert v.verdict == "DEPASSE"
 
 
 def test_over_budget_times_factor_is_prudent() -> None:
-    stats = {"path.p1_p2_hl_local": _stats(50, 2_900.0, 3_100.0)}
+    stats = {"path.p1_p2_hl_order": _stats(50, 2_900.0, 3_100.0)}
     v = evaluate_path(_path_by_key("P1/P2"), stats, budget_factor=_FACTOR)
     assert v.verdict == "PRUDENT"
 
 
 def test_exactly_at_budget_is_ok_not_depasse() -> None:
-    stats = {"path.p1_p2_hl_local": _stats(10, 1_000.0, 2_000.0)}
+    stats = {"path.p1_p2_hl_order": _stats(10, 1_000.0, 2_000.0)}
     assert evaluate_path(_path_by_key("P1/P2"), stats, budget_factor=_FACTOR).verdict == "OK"
 
 
 def test_exactly_at_budget_times_factor_is_depasse_not_prudent() -> None:
-    stats = {"path.p1_p2_hl_local": _stats(10, 1_000.0, 3_000.0)}
+    stats = {"path.p1_p2_hl_order": _stats(10, 1_000.0, 3_000.0)}
     assert evaluate_path(_path_by_key("P1/P2"), stats, budget_factor=_FACTOR).verdict == "DEPASSE"
 
 
@@ -144,7 +144,7 @@ def test_evaluate_all_returns_one_verdict_per_path_in_order() -> None:
 
 
 def test_needs_prudent_mode_only_on_prudent() -> None:
-    slow = {"path.p1_p2_hl_local": _stats(10, 4_000.0, 5_000.0)}
+    slow = {"path.p1_p2_hl_order": _stats(10, 4_000.0, 5_000.0)}
     assert needs_prudent_mode(evaluate_all(slow, budget_factor=_FACTOR)) is True
     assert needs_prudent_mode(evaluate_all({}, budget_factor=_FACTOR)) is False
 

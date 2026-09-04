@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -10,7 +11,14 @@ import pytest
 
 from delta0.config import Config
 from delta0.hl_api import HLActionRefused
-from delta0.hl_executor import HLTraceExecutor, round_price, round_size
+from delta0.hl_executor import (
+    LATENCY_PATH_CANCEL,
+    LATENCY_PATH_ORDER,
+    LATENCY_PATH_ROUND_TRIP,
+    HLTraceExecutor,
+    round_price,
+    round_size,
+)
 from delta0.safety import MicroOpsGuard, SafetyRefused
 from delta0.state import StateStore
 
@@ -339,3 +347,74 @@ async def test_exchange_is_built_once_across_orders(
 
     assert builds == 1
     assert exchange_mock.order.call_count == 3
+
+
+# --- P1/P2 measures the order, not the order plus its cleanup ----------------
+#
+# The tracer cannot leave an order resting, so it cancels right after. That
+# cancel is rehearsal hygiene, not part of the emergency path README §7 gives
+# 2 s to. Timing the pair as one block charged P1/P2 for two API round trips
+# and took it to 0.99x of budget on 185 live samples.
+
+
+@pytest.mark.asyncio
+async def test_the_order_is_timed_apart_from_its_cancel(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+) -> None:
+    executor, _, _exchange = _make_executor(tmp_path, store, config, dry_run=False)
+
+    async def _slow_cancel(*args: object, **kwargs: object) -> dict[str, str]:
+        _ = args, kwargs
+        await asyncio.sleep(0.05)
+        return {"status": "ok"}
+
+    executor._call_exchange_cancel = _slow_cancel  # type: ignore[method-assign]
+
+    await executor.post_and_cancel()
+
+    order = await store.latency_stats(LATENCY_PATH_ORDER)
+    cancel = await store.latency_stats(LATENCY_PATH_CANCEL)
+    total = await store.latency_stats(LATENCY_PATH_ROUND_TRIP)
+
+    assert order["count"] == 1
+    assert cancel["count"] == 1
+    assert total["count"] == 1
+    # The critical-path sample excludes the cleanup it does not pay for.
+    assert order["p50"] < cancel["p50"]
+    assert total["p50"] >= order["p50"] + cancel["p50"]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_order_records_no_p1_p2_sample(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+) -> None:
+    """No order, no measurement — the M1 report must not carry a phantom."""
+    executor, _, exchange = _make_executor(tmp_path, store, config, dry_run=False)
+    exchange.order.return_value = {"status": "err", "response": "refusé"}
+
+    with pytest.raises(HLActionRefused):
+        await executor.post_and_cancel()
+
+    assert (await store.latency_stats(LATENCY_PATH_ORDER))["count"] == 0
+    assert (await store.latency_stats(LATENCY_PATH_ROUND_TRIP))["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_rehearsal_exercises_all_three_paths(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+) -> None:
+    """A dry run must name every path a live run does, under `dry.`."""
+    executor, _, _ = _make_executor(tmp_path, store, config, dry_run=True)
+    await executor.post_and_cancel()
+
+    for path in (LATENCY_PATH_ORDER, LATENCY_PATH_CANCEL, LATENCY_PATH_ROUND_TRIP):
+        stats = await store.latency_stats(f"dry.{path}")
+        assert stats["count"] == 1, path
+        # Rehearsal samples never enter the critical-path statistics.
+        assert (await store.latency_stats(path))["count"] == 0

@@ -64,6 +64,22 @@ _PRICE_SIG_FIGS = 5
 # does not inject `get_size_decimals`). ETH's value on Hyperliquid.
 _ETH_SZ_DECIMALS = 4
 
+# P1/P2 (README §7, 2 s) is "couper ou réduire le short": ONE order sent to
+# Hyperliquid. The tracer cannot leave an order resting, so it cancels right
+# after — but the cancel is rehearsal hygiene, not part of the emergency
+# path. Timing the pair as one block charged P1/P2 for two API round trips
+# and pushed it to 0.99x of budget on 185 samples, heading for a DEPASSE
+# that would have failed M1 on an artifact.
+#
+# Three measurements are now recorded per rehearsal:
+#   p1_p2_hl_order  the order alone — this is the critical path
+#   hl_cancel       the cancel alone — informative, no budget
+#   p1_p2_hl_local  the pair, unchanged, so the existing series stays
+#                   comparable across the measurement change
+LATENCY_PATH_ORDER = "path.p1_p2_hl_order"
+LATENCY_PATH_CANCEL = "path.hl_cancel"
+LATENCY_PATH_ROUND_TRIP = "path.p1_p2_hl_local"
+
 
 def round_size(size: float, sz_decimals: int) -> float:
     """Round an order size onto the asset's size grid."""
@@ -205,10 +221,11 @@ class HLTraceExecutor:
                 limit_price=limit_price,
             )
             duration_ms = elapsed_ms(start)
-            await self._store.record_latency(
-                measurement_path("path.p1_p2_hl_local", dry_run=True),
-                duration_ms,
-            )
+            for path in (LATENCY_PATH_ORDER, LATENCY_PATH_CANCEL, LATENCY_PATH_ROUND_TRIP):
+                await self._store.record_latency(
+                    measurement_path(path, dry_run=True),
+                    duration_ms,
+                )
             await self._mark_intent_status(intent_id, "confirmed", None)
             return HLOpResult(
                 intent_id=intent_id,
@@ -218,8 +235,11 @@ class HLTraceExecutor:
                 fill_size=0.0,
             )
 
+        order_ms: float | None = None
+        cancel_ms: float | None = None
         try:
             is_buy = side == "buy"
+            order_started = now_perf()
             order_response = await self._call_exchange_order(
                 exchange,
                 self._coin,
@@ -233,6 +253,8 @@ class HLTraceExecutor:
             # confirmed — putting a P1/P2 latency sample in the M1 report for
             # an order that was never placed.
             ensure_ok(order_response, "ordre post-only")
+            # Stopped here on purpose: everything after this point is cleanup.
+            order_ms = elapsed_ms(order_started)
             order_id = self._extract_order_id(order_response)
             fill_size = self._extract_fill_size(order_response)
             if fill_size > 0:
@@ -247,7 +269,9 @@ class HLTraceExecutor:
                 )
             # Cancel immediately.
             if order_id is not None:
+                cancel_started = now_perf()
                 await self._call_exchange_cancel(exchange, self._coin, order_id)
+                cancel_ms = elapsed_ms(cancel_started)
         except Exception:
             await self._mark_intent_status(intent_id, "failed", None)
             log.exception(
@@ -258,12 +282,22 @@ class HLTraceExecutor:
             raise
 
         duration_ms = elapsed_ms(start)
-        await self._store.record_latency("path.p1_p2_hl_local", duration_ms)
+        await self._store.record_latency(LATENCY_PATH_ROUND_TRIP, duration_ms)
+        if order_ms is not None:
+            await self._store.record_latency(LATENCY_PATH_ORDER, order_ms)
+        if cancel_ms is not None:
+            await self._store.record_latency(LATENCY_PATH_CANCEL, cancel_ms)
         await self._mark_intent_status(intent_id, "confirmed", None)
         log.info(
             "hl_op_confirmed",
-            message=f"hl_post_only_cancel round-trip {duration_ms:.1f} ms",
+            message=(
+                f"hl_post_only_cancel round-trip {duration_ms:.1f} ms (ordre {order_ms:.1f} ms)"
+                if order_ms is not None
+                else f"hl_post_only_cancel round-trip {duration_ms:.1f} ms"
+            ),
             duration_ms=duration_ms,
+            order_ms=order_ms,
+            cancel_ms=cancel_ms,
             order_id=order_id,
             fill_size=fill_size,
         )

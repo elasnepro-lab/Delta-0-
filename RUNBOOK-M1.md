@@ -166,6 +166,17 @@ Le p95 d'un chemin est la somme des p95 de ses jambes : une majoration
 conservatrice, qui peut signaler lent un chemin qui tient son budget, jamais
 l'inverse.
 
+**Ce que P1/P2 mesure exactement.** L'ordre seul (`path.p1_p2_hl_order`), pas
+l'ordre plus son annulation. Le traceur annule aussitôt parce qu'il ne peut pas
+laisser un ordre au carnet, mais cette annulation est une hygiène de
+répétition — la vraie action P1/P2 en urgence, réduire le short, n'envoie qu'un
+ordre. Chronométrer la paire facturait au chemin deux allers-retours d'API au
+lieu d'un : mesuré à 0,99x du budget sur 185 échantillons, il partait vers un
+`DEPASSE` qui aurait fait échouer M1 sur un artefact de mesure et non sur une
+lenteur réelle. La paire reste enregistrée sous `path.p1_p2_hl_local`, sans
+budget, visible dans le tableau des latences brutes, et `path.hl_cancel` isole
+l'annulation.
+
 P4 reste `INCOMPLET` par construction tant que `venues/swap.py` est un stub :
 la jambe swap wstETH -> USDC n'existe pas encore (M2).
 

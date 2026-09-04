@@ -91,7 +91,14 @@ CRITICAL_PATHS: tuple[CriticalPath, ...] = (
         label="Coupe/réduction short",
         venue="local HL",
         budget_ms=2_000.0,
-        components=("path.p1_p2_hl_local",),
+        # The ORDER alone. The tracer cancels right after — it cannot leave an
+        # order resting — but that cancel is rehearsal hygiene, not part of the
+        # emergency path this budget covers. Charging P1/P2 for both API round
+        # trips took it to 0.99x on 185 samples, heading for a DEPASSE that
+        # would have failed M1 on a measurement artifact rather than on speed.
+        # The pair is still recorded as `path.p1_p2_hl_local`, uncapped, and
+        # shows up among the raw micro-op latencies.
+        components=("path.p1_p2_hl_order",),
     ),
     CriticalPath(
         key="P3",

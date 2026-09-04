@@ -89,17 +89,17 @@ def test_report_on_empty_db_reports_aucun(tmp_path: Path) -> None:
 
 def test_report_renders_a_measured_path_within_budget(tmp_path: Path) -> None:
     db = tmp_path / "seeded.db"
-    asyncio.run(_seed(db, {"path.p1_p2_hl_local": [300.0, 420.0, 510.0]}))
+    asyncio.run(_seed(db, {"path.p1_p2_hl_order": [300.0, 420.0, 510.0]}))
     result = runner.invoke(app, ["report", "--db", str(db), "-c", "config.yaml.example"])
     assert result.exit_code == 0
     assert "OK" in result.stdout
-    assert "p1_p2_hl_local" in result.stdout
+    assert "p1_p2_hl_order" in result.stdout
 
 
 def test_report_flags_prudent_mode_when_p95_blows_the_budget(tmp_path: Path) -> None:
     db = tmp_path / "slow.db"
     # P1/P2 budget is 2 s; 5 s is past 2 s x 1.5.
-    asyncio.run(_seed(db, {"path.p1_p2_hl_local": [5_000.0, 5_200.0, 5_400.0]}))
+    asyncio.run(_seed(db, {"path.p1_p2_hl_order": [5_000.0, 5_200.0, 5_400.0]}))
     result = runner.invoke(app, ["report", "--db", str(db), "-c", "config.yaml.example"])
     assert result.exit_code == 0
     assert "PRUDENT" in result.stdout
