@@ -197,6 +197,10 @@ rapport qui passe en taisant ce qu'il a excusé serait pire qu'un rapport qui
 
 ## 6. Limites connues à la clôture de M1-B2
 
+Ces limites, plus les manques révélés par la marche à blanc elle-même, sont
+reprises et détaillées dans `BACKLOG-M2.md`.
+
+
 - `venues/swap.py` est un stub : P4 n'est mesurable qu'en partie. Le
   critère de sortie l'exempte explicitement (voir §5).
 - La détection de liquidation côté Aave (`LiquidationCall` sur le Pool) est
