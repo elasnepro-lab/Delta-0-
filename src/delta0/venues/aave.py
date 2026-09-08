@@ -43,6 +43,13 @@ _POOL_ABI: list[dict[str, Any]] = [
         ],
     },
     {
+        "name": "ADDRESSES_PROVIDER",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "address"}],
+    },
+    {
         "name": "getUserEMode",
         "type": "function",
         "stateMutability": "view",
@@ -118,6 +125,59 @@ class AaveTokenBalances:
     variable_debt_balance: float
 
 
+_ADDRESSES_PROVIDER_ABI: list[dict[str, Any]] = [
+    {
+        "name": "getPriceOracle",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "address"}],
+    }
+]
+
+_ORACLE_ABI: list[dict[str, Any]] = [
+    {
+        "name": "getAssetPrice",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [{"name": "asset", "type": "address"}],
+        "outputs": [{"name": "", "type": "uint256"}],
+    },
+    {
+        "name": "BASE_CURRENCY_UNIT",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "uint256"}],
+    },
+]
+
+
+@dataclass(frozen=True, slots=True)
+class AaveOraclePrices:
+    """Asset prices as Aave itself sees them, in its base currency (USD).
+
+    These are the prices behind the health factor. Pricing the collateral with
+    anything else — a perp mark, a DEX mid — means deciding on a different
+    number from the one that can liquidate us.
+    """
+
+    wsteth_usd: float
+    weth_usd: float
+
+    @property
+    def wsteth_eth_ratio(self) -> float:
+        """How many ETH one wstETH is worth, per the oracle.
+
+        `stEthPerToken()` does not exist on Arbitrum's bridged wstETH, so the
+        rate comes from the ratio of two oracle prices. That is the better
+        source anyway: it cannot drift from the prices Aave applies.
+        """
+        if self.weth_usd == 0.0:
+            return 0.0
+        return self.wsteth_usd / self.weth_usd
+
+
 @dataclass(frozen=True, slots=True)
 class AaveReserveRates:
     """Interest rates for one reserve (already converted from RAY to APR)."""
@@ -156,6 +216,11 @@ class AaveReader:
         # would need a governance upgrade to alter them. Caching cuts 4 RPC
         # calls per snapshot per asset after the first fetch.
         self._token_meta: dict[str, _TokenMeta] = {}
+        # The oracle address is resolved once from the pool's AddressesProvider
+        # rather than configured: Aave governance can swap the oracle, and a
+        # hardcoded address would keep pricing the collateral with the old one.
+        self._oracle: AsyncContract | None = None
+        self._oracle_unit: int | None = None
 
     async def read_account_data(self) -> AaveAccountData:
         # Parallel: getUserAccountData + getUserEMode.
@@ -231,6 +296,40 @@ class AaveReader:
         return AaveReserveRates(
             liquidity_apr=liquidity_rate_ray / _RAY,
             variable_borrow_apr=variable_borrow_rate_ray / _RAY,
+        )
+
+    async def _get_oracle(self) -> tuple[AsyncContract, int]:
+        """Resolve and cache the price oracle the pool currently points at."""
+        if self._oracle is None or self._oracle_unit is None:
+            provider_address = await self._pool.functions.ADDRESSES_PROVIDER().call()
+            provider = self._w3.eth.contract(
+                address=AsyncWeb3.to_checksum_address(provider_address),
+                abi=_ADDRESSES_PROVIDER_ABI,
+            )
+            oracle_address = await provider.functions.getPriceOracle().call()
+            oracle = self._w3.eth.contract(
+                address=AsyncWeb3.to_checksum_address(oracle_address),
+                abi=_ORACLE_ABI,
+            )
+            self._oracle_unit = await oracle.functions.BASE_CURRENCY_UNIT().call()
+            self._oracle = oracle
+            log.info(
+                "aave_oracle_resolved",
+                message="oracle Aave résolu depuis l'AddressesProvider",
+                oracle=str(oracle_address),
+            )
+        return self._oracle, self._oracle_unit
+
+    async def read_oracle_prices(self, wsteth: str, weth: str) -> AaveOraclePrices:
+        """Return wstETH and WETH prices as Aave prices them."""
+        oracle, unit = await self._get_oracle()
+        wsteth_raw, weth_raw = await asyncio.gather(
+            oracle.functions.getAssetPrice(AsyncWeb3.to_checksum_address(wsteth)).call(),
+            oracle.functions.getAssetPrice(AsyncWeb3.to_checksum_address(weth)).call(),
+        )
+        return AaveOraclePrices(
+            wsteth_usd=wsteth_raw / unit,
+            weth_usd=weth_raw / unit,
         )
 
     async def read_gas_balance_eth(self) -> float:

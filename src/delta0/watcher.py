@@ -67,6 +67,10 @@ class LiveWatcher:
             self.aave.read_token_balances(self.config.venues.usdc_address),
             self.aave.read_reserve_rates(self.config.venues.usdc_address),
             self.aave.read_gas_balance_eth(),
+            self.aave.read_oracle_prices(
+                self.config.venues.wsteth_address,
+                self.config.venues.weth_address,
+            ),
         )
         hl_task = asyncio.gather(
             self.hl.read_market_meta(self.coin),
@@ -89,7 +93,7 @@ class LiveWatcher:
                 error=repr(aave_result),
             )
             raise aave_result
-        account, wsteth, usdc, usdc_rates, gas = aave_result
+        account, wsteth, usdc, usdc_rates, gas, oracle = aave_result
         self.watchdog.mark_aave_ok(now=now_mono)
 
         # --- HL outcome -------------------------------------------------------
@@ -123,8 +127,12 @@ class LiveWatcher:
         return Snapshot(
             ts=now_utc,
             wsteth_atoken_balance=wsteth.atoken_balance,
-            # wstETH ≈ ETH for M1; refine with wstETH/stETH rate in M1-B.
-            wsteth_price_usd=mark_price,
+            # Priced by the Aave oracle, never by the perp mark: this is the
+            # number behind the health factor. wstETH trades around 1.24 ETH,
+            # so using the mark understated the collateral by ~20 % and made
+            # the bot read a healthy position as one to deleverage.
+            wsteth_price_usd=oracle.wsteth_usd,
+            wsteth_eth_ratio=oracle.wsteth_eth_ratio,
             usdc_atoken_balance=usdc.atoken_balance,
             usdc_variable_debt_balance=usdc.variable_debt_balance,
             hf=account.health_factor,

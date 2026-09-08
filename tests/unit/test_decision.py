@@ -36,8 +36,9 @@ def stable_snapshot(now: datetime) -> Snapshot:
     """A snapshot exactly at target: nothing should trigger."""
     return Snapshot(
         ts=now,
-        wsteth_atoken_balance=20.0,
-        wsteth_price_usd=2_500.0,
+        wsteth_atoken_balance=16.0,
+        wsteth_price_usd=3_125.0,
+        wsteth_eth_ratio=1.25,
         usdc_atoken_balance=1_000.0,
         usdc_variable_debt_balance=35_000.0,
         hf=1.5,
@@ -100,7 +101,10 @@ def test_p1_liquidation_event_fires_first(
     action = decide(snap, config, ctx)
     assert action.priority is Priority.P1_LIQUIDATION_DETECTED
     assert action.kind == "LIQUIDATION_RESPONSE"
-    assert action.params["target_short_size_eth"] == stable_snapshot.wsteth_atoken_balance
+    # The target is the collateral in ETH terms, not the raw wstETH balance:
+    # 16 wstETH at 1.25 ETH each is 20 ETH to hedge, not 16.
+    assert action.params["target_short_size_eth"] == pytest.approx(20.0)
+    assert action.params["target_short_size_eth"] == stable_snapshot.spot_eth_equivalent
 
 
 # --- P2: emergency reduce (margin_ratio <= 0.035) ----------------------------
@@ -297,16 +301,35 @@ def test_p7_no_anchor_yields_no_recenter(
 # --- P8: delta retrue (|delta_pct| > 0.02) -----------------------------------
 
 
-def test_p8_fires_on_small_price_move_below_recenter_band(
+def test_p8_fires_when_the_hedged_quantity_drifts(
     stable_snapshot: Snapshot,
     config: Config,
     nominal_ctx: OperationalContext,
 ) -> None:
-    # +3 % move: no recenter (band 4.5 %), but delta 3 % > tol 2 %.
-    snap = replace(stable_snapshot, mark_price=2_500.0 * 1.03)
+    """Staking accrual raises the wstETH/ETH rate, so the long leg grows."""
+    # 16 wstETH at 1.29 ETH = 20.64 ETH against a 20 ETH short: delta 3.1 %.
+    snap = replace(stable_snapshot, wsteth_eth_ratio=1.29)
     action = decide(snap, config, nominal_ctx)
     assert action.priority is Priority.P8_DELTA_RETRUE
     assert action.kind == "RETRUE_SHORT"
+    assert action.params["target_short_size_eth"] == pytest.approx(20.64)
+
+
+def test_p8_ignores_a_pure_price_move(
+    stable_snapshot: Snapshot,
+    config: Config,
+    nominal_ctx: OperationalContext,
+) -> None:
+    """Neutrality is an equality of ETH quantities, so price cannot break it.
+
+    Both legs are denominated in ETH: the collateral through the oracle rate,
+    the short by construction. A move that leaves the quantities alone leaves
+    the delta alone — and must not spend fees re-hedging noise.
+    """
+    snap = replace(stable_snapshot, mark_price=2_500.0 * 1.03, wsteth_price_usd=3_125.0 * 1.03)
+    assert snap.delta_pct == pytest.approx(0.0)
+    action = decide(snap, config, nominal_ctx)
+    assert action.priority is not Priority.P8_DELTA_RETRUE
 
 
 # --- P9: skim ----------------------------------------------------------------

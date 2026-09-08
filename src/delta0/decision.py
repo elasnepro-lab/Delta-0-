@@ -133,8 +133,10 @@ def _blind_action(snapshot: Snapshot, config: Config, blind: BlindState) -> Acti
 def _p1_liquidation(ctx: OperationalContext, snapshot: Snapshot) -> Action | None:
     if not ctx.liquidation_event:
         return None
-    # Match short size to remaining spot after the liquidation.
-    target = snapshot.wsteth_atoken_balance  # in ETH terms — assumes wstETH ≈ ETH
+    # Match short size to remaining spot after the liquidation, in ETH terms.
+    # The balance is in wstETH, which is worth ~1.24 ETH: using it directly
+    # would have left ~20 % of the spot unhedged right after a liquidation.
+    target = snapshot.spot_eth_equivalent
     return Action(
         kind="LIQUIDATION_RESPONSE",
         priority=Priority.P1_LIQUIDATION_DETECTED,
@@ -264,9 +266,10 @@ def _p7_recenter(snapshot: Snapshot, config: Config, ctx: OperationalContext) ->
 def _p8_delta_retrue(snapshot: Snapshot, config: Config) -> Action | None:
     if abs(snapshot.delta_pct) <= config.delta_tolerance:
         return None
-    # Bring notional back to spot (delta-neutral).
-    # Short size in ETH = spot_usd / mark_price.
-    target = snapshot.spot_usd / snapshot.mark_price
+    # Bring the short back to the collateral's ETH equivalent. Dividing a USD
+    # spot by the perp mark would reintroduce the two-price mix the ETH basis
+    # exists to avoid.
+    target = snapshot.spot_eth_equivalent
     return Action(
         kind="RETRUE_SHORT",
         priority=Priority.P8_DELTA_RETRUE,

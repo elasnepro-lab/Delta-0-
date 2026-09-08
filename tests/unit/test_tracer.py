@@ -30,8 +30,9 @@ class _FakeWatcher:
 def _base_snap() -> Snapshot:
     return Snapshot(
         ts=datetime.now(UTC),
-        wsteth_atoken_balance=20.0,
-        wsteth_price_usd=2_500.0,
+        wsteth_atoken_balance=16.0,
+        wsteth_price_usd=3_125.0,
+        wsteth_eth_ratio=1.25,
         usdc_atoken_balance=1_000.0,
         usdc_variable_debt_balance=35_000.0,
         hf=1.5,
@@ -65,8 +66,9 @@ async def test_tracer_journals_shadow_intent_when_action_fires(
     store: StateStore,
     tmp_path: Path,
 ) -> None:
-    # Craft a snapshot that triggers P8 (delta retrue): +3 % price move.
-    snap = replace(_base_snap(), mark_price=2_500.0 * 1.03)
+    # Craft a snapshot that triggers P8 (delta retrue): the staking rate has
+    # drifted, so 16 wstETH now stand for 20.64 ETH against a 20 ETH short.
+    snap = replace(_base_snap(), wsteth_eth_ratio=1.29)
     watcher = _FakeWatcher(snapshots=[snap])
     wd = Watchdog(config=config.watchdog, project_root=tmp_path)
     loop = TracerLoop(

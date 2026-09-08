@@ -21,8 +21,9 @@ from delta0.watchdog import Watchdog
 def _stable_snap() -> Snapshot:
     return Snapshot(
         ts=datetime.now(UTC),
-        wsteth_atoken_balance=20.0,
-        wsteth_price_usd=2_500.0,
+        wsteth_atoken_balance=16.0,
+        wsteth_price_usd=3_125.0,
+        wsteth_eth_ratio=1.25,
         usdc_atoken_balance=1_000.0,
         usdc_variable_debt_balance=35_000.0,
         hf=1.5,

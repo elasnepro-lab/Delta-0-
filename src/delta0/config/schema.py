@@ -153,6 +153,12 @@ class VenuesConfig(BaseModel):
 
     usdc_address: str
     wsteth_address: str
+    # Needed to price wstETH in ETH terms: the Aave oracle quotes both assets in
+    # USD, and their ratio is the wstETH/ETH rate. Reading it there rather than
+    # from the token keeps the rate consistent with the health factor Aave
+    # applies — and wstETH on Arbitrum is a bridged token that does not expose
+    # stEthPerToken() at all. See memory/aave_findings.md §10.
+    weth_address: str
     aave_pool: str
     aave_data_provider: str
     hl_api: str
@@ -164,6 +170,7 @@ class VenuesConfig(BaseModel):
     @field_validator(
         "usdc_address",
         "wsteth_address",
+        "weth_address",
         "aave_pool",
         "aave_data_provider",
         "hl_bridge2",

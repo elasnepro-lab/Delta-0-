@@ -62,6 +62,7 @@ venues:
   # Aave v3 Arbitrum official addresses (verify against Aave docs at boot).
   usdc_address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"     # native USDC, NEVER USDC.e
   wsteth_address: "0x5979D7b546E38E414F7E9822514be443A4800529"
+  weth_address: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"     # pour le ratio wstETH/ETH via l'oracle
   aave_pool: "0x794a61358D6845594F94dc1DB02A252b5b4814aD"
   aave_data_provider: "0x7F23D86Ee20D869112572136221e173428DD740B"
   hl_api: "https://api.hyperliquid.xyz"

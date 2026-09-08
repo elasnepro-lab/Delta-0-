@@ -60,7 +60,8 @@ class Snapshot:
 
     # Aave leg.
     wsteth_atoken_balance: float
-    wsteth_price_usd: float
+    wsteth_price_usd: float  # Aave oracle price — the one behind the health factor
+    wsteth_eth_ratio: float  # ETH per wstETH, from the same oracle
     usdc_atoken_balance: float
     usdc_variable_debt_balance: float
     hf: float  # from Pool.getUserAccountData — trusted, never recomputed
@@ -119,14 +120,36 @@ class Snapshot:
         return self.isolated_margin_usd / self.notional_usd
 
     @property
-    def delta_usd(self) -> float:
-        return self.spot_usd - self.notional_usd
+    def spot_eth_equivalent(self) -> float:
+        """The collateral expressed in ETH — what the short has to match.
+
+        The hedge is a short on ETH, so neutrality is an equality of ETH
+        quantities, not of dollar amounts. Stating it this way makes the delta
+        immune to the USD base: a stETH depeg moves the Aave leg's LTV, which
+        is an Aave problem, and leaves this figure alone. See README §5.
+        """
+        return self.wsteth_atoken_balance * self.wsteth_eth_ratio
+
+    @property
+    def delta_eth(self) -> float:
+        """Uncovered ETH exposure. Positive means long, negative means short."""
+        return self.spot_eth_equivalent - self.short_size_eth
 
     @property
     def delta_pct(self) -> float:
-        if self.spot_usd == 0.0:
+        if self.spot_eth_equivalent == 0.0:
             return 0.0
-        return self.delta_usd / self.spot_usd
+        return self.delta_eth / self.spot_eth_equivalent
+
+    @property
+    def delta_usd(self) -> float:
+        """Reporting only — decisions use `delta_eth` / `delta_pct`.
+
+        Kept because a dollar figure reads better in a digest, but it mixes two
+        price sources (oracle for the spot, mark for the notional) and so drifts
+        from `delta_eth` whenever they diverge.
+        """
+        return self.spot_usd - self.notional_usd
 
     @property
     def carry_spread(self) -> float:

@@ -12,8 +12,9 @@ from delta0.types import Snapshot
 def _make_snapshot(**overrides: float | int | bool) -> Snapshot:
     base = {
         "ts": datetime.now(UTC),
-        "wsteth_atoken_balance": 20.0,  # 20 wstETH at 2500$ = 50 000$
-        "wsteth_price_usd": 2_500.0,
+        "wsteth_atoken_balance": 16.0,  # 16 wstETH a 3 125 $ = 50 000 $
+        "wsteth_price_usd": 3_125.0,
+        "wsteth_eth_ratio": 1.25,
         "usdc_atoken_balance": 1_000.0,
         "usdc_variable_debt_balance": 35_000.0,
         "hf": 1.5,
@@ -55,11 +56,27 @@ def test_margin_ratio() -> None:
     assert s.margin_ratio == pytest.approx(0.10)
 
 
-def test_delta_pct_when_price_moves_up() -> None:
+def test_delta_is_blind_to_price() -> None:
+    """Both legs are ETH quantities, so a price move cannot create a delta."""
+    s = _make_snapshot(mark_price=2_600.0, wsteth_price_usd=3_250.0)
+    assert s.spot_eth_equivalent == pytest.approx(20.0)
+    assert s.delta_eth == pytest.approx(0.0)
+    assert s.delta_pct == pytest.approx(0.0)
+
+
+def test_delta_follows_the_staking_rate() -> None:
+    """The wstETH/ETH rate drifting up is what actually widens the delta."""
+    s = _make_snapshot(wsteth_eth_ratio=1.29)
+    assert s.spot_eth_equivalent == pytest.approx(20.64)
+    assert s.delta_eth == pytest.approx(0.64)
+    assert s.delta_pct == pytest.approx(0.64 / 20.64)
+
+
+def test_delta_usd_is_reporting_only() -> None:
+    """It mixes oracle and mark, so it moves where `delta_eth` does not."""
     s = _make_snapshot(mark_price=2_600.0)
-    # short notional = 20 * 2600 = 52 000; spot = 50 000; delta = -2 000
-    assert s.delta_usd == pytest.approx(-2_000.0)
-    assert s.delta_pct == pytest.approx(-0.04)
+    assert s.delta_usd == pytest.approx(50_000.0 - 52_000.0)
+    assert s.delta_eth == pytest.approx(0.0)
 
 
 def test_carry_spread_positive() -> None:
