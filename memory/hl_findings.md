@@ -342,3 +342,59 @@ dangereux : **du code qui lirait `withdrawable` pour dimensionner une pompe
 descendante conclurait toujours qu'il n'y a rien a pomper.** Le montant
 mobilisable est la somme de la marge isolee excedentaire (point 13) et du solde
 spot libre, jamais `withdrawable`.
+
+## 15. Retrait vers Arbitrum : un agent ne peut pas, et le testnet ne permet pas de conclure
+
+Complement du point 13, teste avec la cle maitre sur le testnet le 2026-09-09.
+
+**Acquis solide.** Un agent ne peut pas davantage retirer que transferer :
+
+```
+withdraw_from_bridge signe par l'agent
+-> {"status":"err","response":"Must deposit before performing actions. User: 0x6765...3799"}
+```
+
+La frontiere est donc complete : **un agent trade, il ne deplace aucun fonds.**
+Ni `usd_class_transfer`, ni `withdraw_from_bridge`.
+
+**Acquis solide.** Un retrait signe par la cle maitre fonctionne, et la grille de
+frais du point 5 est confirmee par le journal :
+
+```
+userNonFundingLedgerUpdates -> {"type":"withdraw","usdc":"4.0","fee":"1.0"}
+```
+
+5 USDC demandes, 1 de frais, 4 credites.
+
+**NON CONCLUANT.** La question de fond — une position ouverte empeche-t-elle le
+retrait ? — n'a pas de reponse exploitable ici. Le deroule :
+
+```
+sans position, retrait de 5      ACCEPTE
+position isolee 3 ETH, 984       refuse
+   puis 800, 600, 400, 300, 260, 245, 230, 200, 50, 10   tous refuses
+position croisee 3 ETH, 200/50/10                        tous refuses
+position reduite a 1,5 puis 0,2, retrait de 10           refuses
+position entierement fermee, retrait de 10               refuse
+sans position, retrait de 10 toutes les minutes pendant 4 min  refuses
+```
+
+Le refus persiste **apres fermeture complete et apres attente**, donc il ne
+s'explique ni par la position ni par une simple limitation de frequence. Le
+journal ne montre qu'un seul retrait sur l'heure. Le testnet parait plafonner
+les retraits d'une maniere qui rend la question intestable ici.
+
+Message toujours identique et inexploitable : `"Error withdrawing from bridge"`.
+A noter pour le code : c'est un refus de **premier niveau**, donc `ensure_ok`
+l'attrape — contrairement au refus d'ordre du point 7.
+
+**Ce qu'il faut en retenir pour la conception, malgre l'absence de reponse :**
+P6 ne doit pas etre ecrit en supposant que le retrait aboutit. La sequence sure
+est « liberer la marge isolee » (non contraint, point 13, et signable par
+l'agent) puis « retirer », cette seconde etape devant traiter le refus comme une
+issue normale et non comme une anomalie. Le budget de temps de P6 doit couvrir
+un echec et une reprise.
+
+**Reste a trancher, sur le mainnet et avec un petit montant** : un retrait de
+3 USDC avec une position ouverte. C'est le seul environnement ou la reponse
+vaudra quelque chose. Cout : 1 USDC de frais.
