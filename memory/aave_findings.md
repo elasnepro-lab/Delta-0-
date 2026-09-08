@@ -166,3 +166,69 @@ a lancer a la main pour refermer ce que le traceur a laisse en plan.
 Aave v3 utilise des erreurs personnalisees : web3 ne remonte que le selecteur.
 Pour en decoder un nouveau, hacher les signatures candidates en keccak et
 comparer les 4 premiers octets.
+
+## 9. Parametres de reserve lus on-chain (chantier 0.1, bloc 503134105)
+
+Lecture du 2026-09-08 sur `AaveProtocolDataProvider`
+(`0x7F23D86Ee20D869112572136221e173428DD740B`), reproductible avec
+`scripts/read_aave_params.py`.
+
+```
+wstETH  LTV max 0.7500   LT 0.7900   bonus 1.0720 (penalite 7,2 %)
+        frais de protocole 10 %   collateral oui   emprunt non
+        actif, non gele, non en pause
+        supply cap 34 000 (18 217 deposes, 53,6 %)   marge 15 783
+USDC    LTV max 0.7500   LT 0.7800   bonus 1.0500
+        borrow cap 225 000 000 (141 724 563 empruntes, 63,0 %)
+```
+
+**Le LT du wstETH vaut exactement 0,79.** Les seuils du YAML sont donc faux :
+
+```
+ltv_pump        0.75   marge au LT +0.04   OK
+ltv_cushion     0.79   marge au LT  0.00   EST le seuil de liquidation
+ltv_deleverage  0.81   marge au LT -0.02   AU-DELA de la liquidation
+```
+
+P4 ne peut mathematiquement pas se declencher avant la liquidation. La bande
+basse reelle est de **-11,39 %** depuis LTV 0,70 (le classeur annonce -15,7 %,
+valeur qui correspond a un LT de 0,81 : celui du wstETH sur Ethereum, pas sur
+Arbitrum).
+
+E-mode : trois categories existent (Stablecoins, ETH correlated,
+ezETH/wstETH/WETH), toutes en LTV 0,93 / LT 0,95, mais une dette USDC contre un
+collateral wstETH n'y est pas eligible. La strategie tourne donc en e-mode 0,
+LT 0,79. Le champ `getReserveEModeCategory` n'existe pas sur cette version du
+data provider.
+
+Caps : sans contrainte a l'echelle du chassis 20 000 $ (il faut ~16,5 wstETH
+pour 15 783 disponibles). A verifier au boot malgre tout, pas avant.
+
+## 10. `stEthPerToken()` n'existe pas sur le wstETH d'Arbitrum
+
+Les trois fonctions de taux de Lido revertent sur
+`0x5979D7b546E38E414F7E9822514be443A4800529` : `stEthPerToken()`,
+`tokensPerStEth()`, `getStETHByWstETH()`. C'est un jeton ponte, il ne porte pas
+le taux de conversion — celui-ci vit sur L1.
+
+Consequence : le ratio doit venir de l'oracle Aave lui-meme, ce qui est de toute
+facon preferable puisque c'est le prix qui fait foi pour le HF.
+
+```
+AaveOracle  0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7   (base 1e8)
+getAssetPrice(wstETH) = 3 093,02      source 0xb4a28DF1b926646f94e6fE6f15828c491b4def5F
+getAssetPrice(WETH)   = 2 487,23      source 0xbD41b1548a5A06544cBcf87c0c54864312842C00
+ratio wstETH/ETH = 3093,02 / 2487,23 = 1,243559
+```
+
+Erreur actuelle du snapshot (`watcher.py:127` pose
+`wsteth_price_usd = mark_price`), au prix du jour :
+
+```
+16,5 wstETH  reel 51 035 $   vu par le bot 41 039 $   ecart -19,59 %
+LTV sur 35 000 $ de dette :  reel 0,6858   vu par le bot 0,8528
+```
+
+Le bot verrait donc **0,8528 sur une position saine a 0,6858**, soit au-dessus
+du LT de 0,79 : des le premier cycle apres BUILD, il declencherait P4 sur une
+position qui n'a aucun probleme.
