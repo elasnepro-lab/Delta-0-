@@ -293,3 +293,52 @@ la place** (verifie ci-dessus, et il reagit correctement a la marge). La
 correction prevue — declencher sur la distance a `liquidationPx` au lieu de
 reconstruire un ratio — ne depend pas de la semantique de `marginUsed`. A7 sort
 donc du chemin critique sans avoir ete tranche, et c'est acceptable.
+
+## 13. A4 : pas de regle des 20 % sur le retrait de marge isolee
+
+Position isolee ETH 10x, marge portee a 18 % puis retiree par paliers de 2 USDC
+(testnet, 2026-09-09, signe par l'agent) :
+
+```
+ratio 18,00 %  retrait -2  OK
+ratio 16,39 %  retrait -2  OK
+ratio 14,78 %  retrait -2  OK
+ratio 13,18 %  retrait -2  OK
+ratio 11,57 %  retrait -2  REFUSE
+   {"status":"err","response":"Position does not have sufficient margin for reduction."}
+```
+
+Le pas refuse aurait amene le ratio a 9,955 %, soit juste sous le 1/10 impose par
+le levier 10x. **Le plancher est le reglage de levier, pas un seuil de 20 %.**
+
+Consequence : la marge isolee excedentaire est librement recuperable jusqu'au
+levier choisi, et cette action est **signable par l'agent**. C'est la premiere
+etape de la pompe descendante P6, et elle n'est pas contrainte.
+
+Ce qui reste non teste : le **retrait vers Arbitrum** (`withdraw_from_bridge`),
+qui demande une signature maitre. La regle des 20 %, si elle existe, porterait
+sur ce chemin-la. A garder ouvert, mais l'enjeu baisse : P6 libere d'abord de la
+marge (non contraint), et ne retire ensuite que du solde libre.
+
+Sur compte unifie, le transfert perp->spot n'existe pas : cette troisieme
+variante de A4 ne s'applique pas a notre modele.
+
+## 14. Piege : `withdrawable` vaut 0 des qu'une position est ouverte
+
+Mesure ci-dessus, a chaque palier, y compris a 18 % de ratio de marge :
+
+```
+accountValue 22,36   withdrawable 0,0000
+```
+
+Sur un compte unifie, `accountValue` ne rapporte que l'equite des positions
+ouvertes, et `withdrawable` ne compte que ce qui pourrait quitter cette poche —
+soit rien tant que tout est engage en marge isolee. Les fonds libres, eux, sont
+sur le spot (998 USDC au moment de la mesure) et n'apparaissent dans aucun des
+deux champs.
+
+C'est le meme piege que `accountValue = 0` decrit au point 1, et il est plus
+dangereux : **du code qui lirait `withdrawable` pour dimensionner une pompe
+descendante conclurait toujours qu'il n'y a rien a pomper.** Le montant
+mobilisable est la somme de la marge isolee excedentaire (point 13) et du solde
+spot libre, jamais `withdrawable`.
