@@ -17,7 +17,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
 import simulate as sim  # noqa: E402
-from classeur import BORROW_APR, FUNDING_APR, STAKING_APR  # noqa: E402
+from classeur import BORROW_APR, FUNDING_APR, STAKING_APR, solve  # noqa: E402
 
 from delta0.config import Config, load_config  # noqa: E402
 
@@ -94,6 +94,60 @@ def headline(w: Writer, args: argparse.Namespace) -> None:
         "<p>Ce resultat tient entierement au modele de frequence de liquidation. "
         "Voir la section de sensibilite avant d'en tirer une conclusion "
         "ferme.</p></div>"
+    )
+    w("</section>")
+
+
+def allocation(w: Writer, config: Config) -> None:
+    """Where the capital actually sits — the first question a reader has."""
+    w("<section>")
+    w("<h2>Ou va le capital</h2>")
+    w(
+        '<p class="sub">Le capital n\'est jamais ailleurs : il se repartit entre '
+        "quatre postes qui bouclent au dollar pres. Les proportions ne dependent "
+        "pas du montant, le chassis etant lineaire.</p>"
+    )
+    w(
+        '<div class="scroll"><table><thead><tr><th>Capital</th>'
+        "<th>Coussin (Aave)</th><th>Reserve (HL)</th>"
+        "<th>Fonds propres Aave</th><th>Marge isolee (HL)</th>"
+        "<th>Notionnel</th></tr></thead><tbody>"
+    )
+    for cap in sim.CAPITALS:
+        chassis = solve(config.model_copy(update={"capital_usd": cap}), lt=sim.LT)
+        own = chassis.spot - chassis.debt
+        w(
+            f"<tr><td>{money(cap)} $</td>"
+            f'<td class="num">{money(chassis.cushion)}'
+            f'<br><span class="soft">{100 * chassis.cushion / cap:.1f} %</span></td>'
+            f'<td class="num">{money(chassis.reserve)}'
+            f'<br><span class="soft">{100 * chassis.reserve / cap:.1f} %</span></td>'
+            f'<td class="num">{money(own)}'
+            f'<br><span class="soft">{100 * own / cap:.1f} %</span></td>'
+            f'<td class="num">{money(chassis.margin)}'
+            f'<br><span class="soft">{100 * chassis.margin / cap:.1f} %</span></td>'
+            f'<td class="num">{money(chassis.spot)}'
+            f'<br><span class="soft">{chassis.spot / cap:.2f} x</span></td></tr>'
+        )
+    w("</tbody></table></div>")
+
+    ref = solve(config.model_copy(update={"capital_usd": 20_000.0}), lt=sim.LT)
+    idle = (ref.cushion + ref.reserve + ref.margin) / 20_000.0
+    reserve_share = ref.reserve / 20_000.0
+    w('<div class="note"><h4>Deux lectures qui surprennent</h4>')
+    w(
+        f"<p>La reserve Hyperliquid pese <strong>{100 * reserve_share:.1f} % du "
+        f"capital</strong>, pas les {100 * config.emergency.hl_reserve_pct:.0f} % "
+        "annonces : ce pourcentage-la porte sur le <em>notionnel</em>, qui vaut "
+        "plus de deux fois le capital. Son cout de portage est donc plus lourd "
+        "qu'il n'y parait.</p>"
+    )
+    w(
+        f"<p>Et <strong>{100 * idle:.0f} % du capital ne travaille pas dans la "
+        "boucle</strong> : coussin, reserve et marge isolee ne produisent ni "
+        "funding ni staking. C'est le prix structurel de la neutralite — la "
+        "marge isolee est ce qui permet d'avoir un short, et les deux autres "
+        "postes sont ce qui permet d'y survivre.</p></div>"
     )
     w("</section>")
 
@@ -275,6 +329,7 @@ def main() -> None:
 
     masthead(w)
     headline(w, args)
+    allocation(w, config)
     yearly(w, args)
     sensitivity(w, args)
     assumptions(w, config)
