@@ -56,12 +56,23 @@ def test_reject_reduce_above_pump(example_config_path: Path, tmp_path: Path) -> 
         load_config(bad)
 
 
-def test_reject_ltv_order(example_config_path: Path, tmp_path: Path) -> None:
+def test_reject_ltv_margin_order(example_config_path: Path, tmp_path: Path) -> None:
     raw = yaml.safe_load(example_config_path.read_text())
-    raw["emergency"]["ltv_pump"] = 0.80  # above cushion 0.79
+    # A pump margin narrower than the cushion's would make the pump fire last.
+    raw["emergency"]["ltv_margin_pump"] = 0.010
     bad = tmp_path / "bad.yaml"
     bad.write_text(yaml.safe_dump(raw))
-    with pytest.raises(ValidationError, match="ltv_pump < ltv_cushion < ltv_deleverage"):
+    with pytest.raises(ValidationError, match="a wider margin fires earlier"):
+        load_config(bad)
+
+
+def test_reject_margin_too_close_to_liquidation(example_config_path: Path, tmp_path: Path) -> None:
+    """The shipped config used to put the cushion exactly ON the threshold."""
+    raw = yaml.safe_load(example_config_path.read_text())
+    raw["emergency"]["ltv_margin_deleverage"] = 0.002
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValidationError, match=r"at least 0\.01"):
         load_config(bad)
 
 

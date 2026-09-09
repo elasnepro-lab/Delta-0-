@@ -32,9 +32,15 @@ emergency:
   margin_ratio_pump: 0.05    # ~+5% price move: pump up
   margin_ratio_reduce: 0.035 # ~+6.5% price move: emergency reduce (2s)
   reduce_fraction: 0.30
-  ltv_pump: 0.75             # ~-6.7% price move: pump down
-  ltv_cushion: 0.79          # ~-11.4% price move: repay from cushion
-  ltv_deleverage: 0.81       # ~-13.6% price move: stepwise deleverage
+  # Marges SOUS le seuil de liquidation lu on-chain, en points de LTV.
+  # Les seuils absolus ont ete retires : ils dependaient d'un LT de 0,81
+  # (Ethereum) alors qu'Arbitrum applique 0,79, ce qui placait le coussin
+  # pile sur la liquidation et le desendettement deux points au-dela.
+  # Avec LT = 0,79 ces marges donnent 0,75 / 0,765 / 0,775,
+  # soit -6,7 % / -8,5 % / -9,7 % de mouvement de prix depuis LTV 0,70.
+  ltv_margin_pump: 0.040       # pompe descendante, la plus precoce
+  ltv_margin_cushion: 0.025    # remboursement depuis le coussin
+  ltv_margin_deleverage: 0.015 # desendettement par etapes, dernier recours
 
 watchdog:
   ws_stale_s: 10

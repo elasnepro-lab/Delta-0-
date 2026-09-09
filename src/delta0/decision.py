@@ -85,6 +85,83 @@ def target_state(equity: float, config: Config) -> TargetState:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class Bands:
+    """The down-flank thresholds, derived from the liquidation threshold.
+
+    Aave governance moves the liquidation threshold several times a year, and
+    it differs per chain — Arbitrum's wstETH sits at 0.79 where Ethereum's is
+    0.81. Thresholds written as absolute LTVs in a file therefore decay into
+    fiction: the shipped config had the cushion exactly ON the liquidation
+    point and the deleverage two points past it, so neither could ever fire in
+    time. Deriving them from the value read on-chain each cycle keeps them
+    honest, and makes a governance change move the bands instead of silently
+    invalidating them.
+
+    Both forms are exposed: LTV for reading and reporting, health factor for
+    deciding. The health factor is what README §9.2 requires — it comes from
+    the chain already combined with the oracle prices Aave applies, so it
+    cannot drift from the number that can liquidate us.
+    """
+
+    lt: float
+    ltv_pump: float
+    ltv_cushion: float
+    ltv_deleverage: float
+
+    @property
+    def hf_pump(self) -> float:
+        return self.lt / self.ltv_pump
+
+    @property
+    def hf_cushion(self) -> float:
+        return self.lt / self.ltv_cushion
+
+    @property
+    def hf_deleverage(self) -> float:
+        return self.lt / self.ltv_deleverage
+
+    def price_drop_to(self, ltv_threshold: float, target_ltv: float) -> float:
+        """Fraction the collateral price must fall for `ltv_threshold` to be hit."""
+        if ltv_threshold <= 0.0:
+            return 0.0
+        return max(0.0, 1.0 - target_ltv / ltv_threshold)
+
+
+def derive_bands(lt: float, config: Config) -> Bands:
+    """Build the down-flank thresholds from the on-chain liquidation threshold.
+
+    Pure: same inputs, same bands. `lt` comes from `Snapshot.aave_lt_wsteth`,
+    which Aave reports as the collateral-weighted threshold for this account.
+    """
+    margins = config.emergency
+    return Bands(
+        lt=lt,
+        ltv_pump=lt - margins.ltv_margin_pump,
+        ltv_cushion=lt - margins.ltv_margin_cushion,
+        ltv_deleverage=lt - margins.ltv_margin_deleverage,
+    )
+
+
+def bands_incoherence(lt: float, config: Config) -> str | None:
+    """Return why the bands are unusable against this LT, or None if they hold.
+
+    Called at boot to refuse starting, and worth re-checking when the observed
+    LT moves: a governance cut can push the pump under the target, at which
+    point the bot would try to deleverage a position that is already at rest.
+    """
+    if lt <= 0.0:
+        return "liquidation threshold read as 0 — Aave data unavailable or asset unlisted"
+    bands = derive_bands(lt, config)
+    if bands.ltv_pump <= config.target_ltv:
+        return (
+            f"pump threshold {bands.ltv_pump:.4f} is at or below target LTV "
+            f"{config.target_ltv:.4f} (LT {lt:.4f}): the bot would pump at rest. "
+            "Lower target_ltv or narrow emergency.ltv_margin_pump."
+        )
+    return None
+
+
 def cushion_tranche_size(config: Config) -> float:
     """25 % of the *initial* cushion — README section 8.7.
 
@@ -165,7 +242,8 @@ def _p2_emergency_reduce(snapshot: Snapshot, config: Config) -> Action | None:
 
 
 def _p3_repay_from_cushion(snapshot: Snapshot, config: Config) -> Action | None:
-    if snapshot.ltv < config.emergency.ltv_cushion:
+    bands = derive_bands(snapshot.aave_lt_wsteth, config)
+    if snapshot.hf > bands.hf_cushion:
         return None
     tranche = cushion_tranche_size(config)
     if snapshot.cushion_usd < tranche:
@@ -174,15 +252,16 @@ def _p3_repay_from_cushion(snapshot: Snapshot, config: Config) -> Action | None:
         kind="REPAY_FROM_CUSHION",
         priority=Priority.P3_EMERGENCY_REPAY,
         reason=(
-            f"LTV {snapshot.ltv:.4f} >= seuil coussin {config.emergency.ltv_cushion} "
-            f"— remboursement d'une tranche ({tranche:.0f} USDC)"
+            f"HF {snapshot.hf:.4f} <= seuil coussin {bands.hf_cushion:.4f} "
+            f"(LT {bands.lt:.4f}) — remboursement d'une tranche ({tranche:.0f} USDC)"
         ),
         params={"repay_amount_usdc": tranche},
     )
 
 
 def _p4_stepwise_deleverage(snapshot: Snapshot, config: Config) -> Action | None:
-    if snapshot.ltv < config.emergency.ltv_deleverage:
+    bands = derive_bands(snapshot.aave_lt_wsteth, config)
+    if snapshot.hf > bands.hf_deleverage:
         return None
     tranche = cushion_tranche_size(config)
     if snapshot.cushion_usd >= tranche:
@@ -192,8 +271,8 @@ def _p4_stepwise_deleverage(snapshot: Snapshot, config: Config) -> Action | None
         kind="STEPWISE_DELEVERAGE",
         priority=Priority.P4_DELEVERAGE,
         reason=(
-            f"LTV {snapshot.ltv:.4f} >= seuil désendettement "
-            f"{config.emergency.ltv_deleverage} et coussin épuisé "
+            f"HF {snapshot.hf:.4f} <= seuil désendettement {bands.hf_deleverage:.4f} "
+            f"(LT {bands.lt:.4f}) et coussin épuisé "
             f"({snapshot.cushion_usd:.0f} < {tranche:.0f}) — boucle repay/withdraw/swap"
         ),
         params={"target_ltv_after": config.target_ltv + 0.01},
@@ -219,7 +298,8 @@ def _p5_pump_up(snapshot: Snapshot, config: Config) -> Action | None:
 
 
 def _p6_pump_down(snapshot: Snapshot, config: Config) -> Action | None:
-    if snapshot.ltv < config.emergency.ltv_pump:
+    bands = derive_bands(snapshot.aave_lt_wsteth, config)
+    if snapshot.hf > bands.hf_pump:
         return None
     # Repay enough to bring LTV back to target + 1%.
     target_ltv_after = config.target_ltv + 0.01
@@ -229,8 +309,8 @@ def _p6_pump_down(snapshot: Snapshot, config: Config) -> Action | None:
         kind="PUMP_DOWN",
         priority=Priority.P6_PUMP_DOWN,
         reason=(
-            f"LTV {snapshot.ltv:.4f} >= seuil pompe {config.emergency.ltv_pump} "
-            f"— withdraw HL + bridge + repay ({repay_amount:.0f} USDC)"
+            f"HF {snapshot.hf:.4f} <= seuil pompe {bands.hf_pump:.4f} "
+            f"(LT {bands.lt:.4f}) — withdraw HL + bridge + repay ({repay_amount:.0f} USDC)"
         ),
         params={"repay_amount_usdc": repay_amount},
     )

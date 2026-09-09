@@ -526,7 +526,7 @@ async def _reconcile_boot(store: StateStore, watcher: LiveWatcher, *, strict: bo
         )
         return True
 
-    report: ReconcileReport = await reconcile_at_boot(store, snap)
+    report: ReconcileReport = await reconcile_at_boot(store, snap, watcher.config)
     _render_reconcile(report)
     if report.warnings and strict:
         console.print(

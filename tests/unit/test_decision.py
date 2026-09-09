@@ -20,57 +20,6 @@ from delta0.types import Priority, Snapshot
 # --- Fixtures -----------------------------------------------------------------
 
 
-@pytest.fixture
-def now() -> datetime:
-    # Monday 2026-08-24 10:00 UTC.
-    return datetime(2026, 8, 24, 10, 0, tzinfo=UTC)
-
-
-@pytest.fixture
-def anchor_price() -> float:
-    return 2_500.0
-
-
-@pytest.fixture
-def stable_snapshot(now: datetime) -> Snapshot:
-    """A snapshot exactly at target: nothing should trigger."""
-    return Snapshot(
-        ts=now,
-        wsteth_atoken_balance=16.0,
-        wsteth_price_usd=3_125.0,
-        wsteth_eth_ratio=1.25,
-        usdc_atoken_balance=1_000.0,
-        usdc_variable_debt_balance=35_000.0,
-        hf=1.5,
-        aave_lt_wsteth=0.83,
-        aave_ltv_max_wsteth=0.80,
-        aave_emode=0,
-        mark_price=2_500.0,
-        short_size_eth=20.0,
-        isolated_margin_usd=5_000.0,
-        hl_maintenance_margin=0.02,
-        funding_last_hour=1.25e-5,
-        funding_30d_annualized=0.11,
-        borrow_apr=0.05,
-        gas_eth=0.01,
-        ws_last_tick_age_s=1.0,
-        rpc_ok=True,
-    )
-
-
-@pytest.fixture
-def nominal_ctx(now: datetime, anchor_price: float) -> OperationalContext:
-    return OperationalContext(
-        now_utc=now,
-        blind_state=BlindState.NOMINAL,
-        liquidation_event=False,
-        anchor_price=anchor_price,
-        last_skim_at=None,
-        desired_exposure_mult=2.5,
-        current_exposure_mult=2.5,
-    )
-
-
 # --- Baseline -----------------------------------------------------------------
 
 
@@ -136,7 +85,7 @@ def test_p2_edge_at_threshold_fires(
     assert action.params["close_fraction"] == pytest.approx(0.30)
 
 
-# --- P3 vs P4: LTV cushion / deleverage --------------------------------------
+# --- P3 vs P4 : bandes derivees du LT on-chain -------------------------------
 
 
 def test_p3_edge_below_threshold(
@@ -144,8 +93,8 @@ def test_p3_edge_below_threshold(
     config: Config,
     nominal_ctx: OperationalContext,
 ) -> None:
-    # LTV = 0.789 — must NOT trigger P3.
-    snap = _snap_with_ltv(stable_snapshot, 0.789)
+    # LTV 0.764, juste sous le coussin derive (0.765) — P3 ne doit pas tirer.
+    snap = _snap_with_ltv(stable_snapshot, 0.764)
     action = decide(snap, config, nominal_ctx)
     assert action.priority is not Priority.P3_EMERGENCY_REPAY
 
@@ -155,8 +104,8 @@ def test_p3_edge_at_threshold(
     config: Config,
     nominal_ctx: OperationalContext,
 ) -> None:
-    # LTV = 0.791 — must trigger P3 (cushion has 1000 $ > tranche 250 $).
-    snap = _snap_with_ltv(stable_snapshot, 0.791)
+    # LTV 0.766, juste au-dessus du coussin — P3 tire (coussin 1000 $ > tranche 250 $).
+    snap = _snap_with_ltv(stable_snapshot, 0.766)
     action = decide(snap, config, nominal_ctx)
     assert action.priority is Priority.P3_EMERGENCY_REPAY
     assert action.params["repay_amount_usdc"] == pytest.approx(cushion_tranche_size(config))
@@ -167,9 +116,9 @@ def test_p4_fires_when_ltv_over_deleverage_and_cushion_empty(
     config: Config,
     nominal_ctx: OperationalContext,
 ) -> None:
-    # LTV = 0.82, cushion depleted below tranche.
-    snap = _snap_with_ltv(stable_snapshot, 0.82)
-    snap = replace(snap, usdc_atoken_balance=100.0)  # < tranche 250 $
+    # Coussin vide d'abord : il entre dans le collatéral, donc dans le HF.
+    depleted = replace(stable_snapshot, usdc_atoken_balance=100.0)  # < tranche 250 $
+    snap = _snap_with_ltv(depleted, 0.78)  # au-delà du désendettement (0.775)
     action = decide(snap, config, nominal_ctx)
     assert action.priority is Priority.P4_DELEVERAGE
     assert action.kind == "STEPWISE_DELEVERAGE"
@@ -180,7 +129,7 @@ def test_p3_wins_when_cushion_has_funds_even_at_high_ltv(
     config: Config,
     nominal_ctx: OperationalContext,
 ) -> None:
-    snap = _snap_with_ltv(stable_snapshot, 0.85)
+    snap = _snap_with_ltv(stable_snapshot, 0.785)
     # Cushion 1000 $ > tranche 250 $: P3 still handles.
     action = decide(snap, config, nominal_ctx)
     assert action.priority is Priority.P3_EMERGENCY_REPAY
@@ -213,7 +162,7 @@ def test_p2_takes_priority_over_p5(
     assert action.priority is Priority.P2_EMERGENCY_REDUCE
 
 
-# --- P6: pump down (ltv >= 0.75) ---------------------------------------------
+# --- P6: pump down (LT 0.79 - marge 0.040 = 0.75) ---------------------------------------------
 
 
 def test_p6_fires_at_ltv_pump(
@@ -221,7 +170,7 @@ def test_p6_fires_at_ltv_pump(
     config: Config,
     nominal_ctx: OperationalContext,
 ) -> None:
-    snap = _snap_with_ltv(stable_snapshot, 0.76)
+    snap = _snap_with_ltv(stable_snapshot, 0.755)
     action = decide(snap, config, nominal_ctx)
     assert action.priority is Priority.P6_PUMP_DOWN
     assert action.kind == "PUMP_DOWN"
@@ -232,7 +181,7 @@ def test_p3_takes_priority_over_p6(
     config: Config,
     nominal_ctx: OperationalContext,
 ) -> None:
-    snap = _snap_with_ltv(stable_snapshot, 0.80)
+    snap = _snap_with_ltv(stable_snapshot, 0.77)
     action = decide(snap, config, nominal_ctx)
     assert action.priority is Priority.P3_EMERGENCY_REPAY
 
@@ -462,6 +411,14 @@ def test_target_state_zero_equity_rejected(config: Config) -> None:
 
 
 def _snap_with_ltv(base: Snapshot, ltv: float) -> Snapshot:
-    """Return a snapshot with the given target LTV (varies debt, keeps collateral)."""
+    """Return a snapshot at the given LTV, health factor included.
+
+    The health factor has to move with the debt: it is what P3, P4 and P6 read,
+    and a fixture that raised the debt while leaving `hf` frozen described a
+    position Aave could never report. That decoupling is exactly what let the
+    old thresholds look tested.
+    """
     collateral = base.collateral_usd
-    return replace(base, usdc_variable_debt_balance=ltv * collateral)
+    debt = ltv * collateral
+    hf = float("inf") if debt == 0 else base.aave_lt_wsteth * collateral / debt
+    return replace(base, usdc_variable_debt_balance=debt, hf=hf)

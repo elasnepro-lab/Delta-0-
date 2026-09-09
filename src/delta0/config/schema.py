@@ -44,6 +44,10 @@ class OrderStyle(StrEnum):
 
 # --- Sub-models ---------------------------------------------------------------
 
+# A priority whose threshold sits closer than this to the liquidation threshold
+# has no room to act before Aave liquidates.
+MIN_LTV_MARGIN_TO_LT = 0.01
+
 _Ratio = Annotated[float, Field(gt=0.0, lt=1.0)]
 _PositiveFloat = Annotated[float, Field(gt=0.0)]
 _PositiveInt = Annotated[int, Field(gt=0)]
@@ -65,9 +69,16 @@ class EmergencyConfig(BaseModel):
     margin_ratio_pump: _Ratio
     margin_ratio_reduce: _Ratio
     reduce_fraction: _Ratio
-    ltv_pump: _Ratio
-    ltv_cushion: _Ratio
-    ltv_deleverage: _Ratio
+
+    # Down flank: distances BELOW the on-chain liquidation threshold, in LTV
+    # points — not absolute LTVs. Absolute values cannot live in a file: they
+    # only mean something relative to a parameter Aave governance can change,
+    # and the previous ones were calibrated on Ethereum's LT (0.81) while
+    # Arbitrum's is 0.79, which put two of the three thresholds at or beyond
+    # the liquidation point. See memory/aave_findings.md §9.
+    ltv_margin_pump: _Ratio
+    ltv_margin_cushion: _Ratio
+    ltv_margin_deleverage: _Ratio
 
     @model_validator(mode="after")
     def _check_monotonicity(self) -> EmergencyConfig:
@@ -77,10 +88,20 @@ class EmergencyConfig(BaseModel):
                 "margin_ratio_reduce must be strictly lower than margin_ratio_pump "
                 "(reduce fires closer to liquidation)."
             )
-        # Down flank: pump < cushion < deleverage.
-        if not (self.ltv_pump < self.ltv_cushion < self.ltv_deleverage):
+        # Down flank: a wider margin means the priority fires earlier, so the
+        # pump must sit furthest from the liquidation threshold.
+        margins = (self.ltv_margin_pump, self.ltv_margin_cushion, self.ltv_margin_deleverage)
+        if not (margins[0] > margins[1] > margins[2]):
             raise ValueError(
-                "LTV emergency thresholds must satisfy ltv_pump < ltv_cushion < ltv_deleverage."
+                "LTV margins must satisfy "
+                "ltv_margin_pump > ltv_margin_cushion > ltv_margin_deleverage "
+                "(a wider margin fires earlier)."
+            )
+        if margins[2] < MIN_LTV_MARGIN_TO_LT:
+            raise ValueError(
+                f"the tightest LTV margin must leave at least {MIN_LTV_MARGIN_TO_LT} "
+                "to the liquidation threshold; below that the priority cannot act "
+                "before Aave does."
             )
         return self
 
@@ -292,8 +313,16 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def _check_ltv_below_liquidation(self) -> Config:
-        # We do not know the on-chain LT here — it is fetched at boot and compared then.
-        # Sanity: emergency LTV thresholds must be strictly above target_ltv.
-        if self.emergency.ltv_pump <= self.target_ltv:
-            raise ValueError("emergency.ltv_pump must be strictly above target_ltv.")
+        # The thresholds themselves depend on the on-chain LT, so they cannot be
+        # checked here — `derive_bands` builds them and `check_bands` refuses the
+        # boot when they collapse onto the target. What IS checkable without the
+        # chain: the widest margin must still leave the pump above the target,
+        # whatever plausible LT we face. With LT >= target + widest margin the
+        # pump sits above target by construction; below that the config can
+        # never be coherent.
+        if self.emergency.ltv_margin_pump >= 1.0 - self.target_ltv:
+            raise ValueError(
+                "emergency.ltv_margin_pump is so wide that no liquidation threshold "
+                "could place the pump above target_ltv."
+            )
         return self
