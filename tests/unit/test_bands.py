@@ -81,8 +81,9 @@ def test_the_shipped_thresholds_were_past_liquidation() -> None:
 
 def test_boot_refuses_when_the_pump_would_fire_at_rest(config: Config) -> None:
     """A threshold low enough to sit under the target must stop the boot."""
-    # target_ltv 0.70 and a pump margin of 0.04 need LT > 0.74.
-    problem = bands_incoherence(0.73, config)
+    # Any LT under target + pump margin collapses the pump onto the target.
+    collapsing = config.target_ltv + config.emergency.ltv_margin_pump - 0.001
+    problem = bands_incoherence(collapsing, config)
     assert problem is not None
     assert "pump threshold" in problem
     assert bands_incoherence(LT_ARBITRUM, config) is None
@@ -97,7 +98,9 @@ def test_price_drop_to_a_band(config: Config) -> None:
     """The bands in the operator's language: how far the price may fall."""
     bands = derive_bands(LT_ARBITRUM, config)
     drop = bands.price_drop_to(bands.ltv_pump, config.target_ltv)
-    assert drop == pytest.approx(1 - 0.70 / 0.75, abs=1e-6)  # -6.67 %
+    expected = 1 - config.target_ltv / bands.ltv_pump
+    assert drop == pytest.approx(expected, abs=1e-9)
+    assert drop > 0.05  # the pump has real room before the cushion
 
 
 # --- The property that matters, end to end -----------------------------------

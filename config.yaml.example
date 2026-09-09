@@ -6,9 +6,9 @@
 
 capital_usd: 20000
 short_leverage: 10
-target_ltv: 0.70
+target_ltv: 0.675          # revisable : voir scripts/classeur.py --compare
 target_margin_ratio: 0.10
-exposure_mult: 2.5           # = 1 / (1 - target_ltv + 1 / short_leverage), verified at boot
+exposure_mult: 2.3529411765  # = 1 / (1 - target_ltv + 1 / short_leverage), verifie au boot
 exposure_mult_half: 1.5
 maintenance_margin: 0.02     # HL estimate; read via API at boot, alert on divergence
 cushion_pct: 0.05            # 5% of capital held as USDC supply on Aave = 1000$
@@ -32,7 +32,7 @@ emergency:
   margin_ratio_pump: 0.05    # ~+5% price move: pump up
   margin_ratio_reduce: 0.035 # ~+6.5% price move: emergency reduce (2s)
   reduce_fraction: 0.30
-  hl_reserve_pct: 0.02        # 2 % du notionnel garde libre sur HL pour P2
+  hl_reserve_pct: 0.03        # couvre un squeeze de +9 %/min (harnais 1.6)
   # Marges SOUS le seuil de liquidation lu on-chain, en points de LTV.
   # Les seuils absolus ont ete retires : ils dependaient d'un LT de 0,81
   # (Ethereum) alors qu'Arbitrum applique 0,79, ce qui placait le coussin

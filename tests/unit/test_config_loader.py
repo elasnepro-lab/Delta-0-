@@ -15,7 +15,10 @@ def test_example_config_loads(example_config_path: Path) -> None:
     cfg = load_config(example_config_path)
     assert cfg.capital_usd == pytest.approx(20_000.0)
     assert cfg.short_leverage == 10
-    assert cfg.target_ltv == pytest.approx(0.70)
+    # Volontairement pas de valeur en dur ici : la cible est un parametre
+    # revisable (chantier 1.5). On verifie qu'elle est plausible et que
+    # les invariants croises tiennent, pas qu'elle vaut un chiffre precis.
+    assert 0.5 < cfg.target_ltv < 0.78
     assert cfg.skim_policy is SkimPolicy.RECOMPOSE
     assert cfg.mode is RuntimeMode.DRY_RUN
 

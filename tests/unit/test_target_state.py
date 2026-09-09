@@ -24,13 +24,19 @@ CUSHION = 1_000.0
 EQUITY = DEPLOYED + CUSHION
 
 
-def test_reference_balance_model_c(config: Config) -> None:
-    """With Model C parameters, targets must match the classeur (±1 %)."""
+def test_reference_balance_matches_the_classeur(config: Config) -> None:
+    """Targets must follow the config, not a number frozen in a test.
+
+    The whole point of chantier 1.5: the workbook is generated from the config,
+    so the assertions here derive from it too. Hard-coding 50 000 $ is exactly
+    how a liquidation threshold of 0.81 survived beside an on-chain 0.79.
+    """
     ts = target_state(equity=EQUITY, config=config, cushion_usd=CUSHION)
-    assert ts.spot_target_usd == pytest.approx(50_000.0, rel=0.01)
-    assert ts.notional_target_usd == pytest.approx(50_000.0, rel=0.01)
-    assert ts.margin_target_usd == pytest.approx(5_000.0, rel=0.01)
-    assert ts.debt_target_usd == pytest.approx(35_000.0, rel=0.01)
+    expected_spot = DEPLOYED * config.exposure_mult
+    assert ts.spot_target_usd == pytest.approx(expected_spot)
+    assert ts.notional_target_usd == pytest.approx(expected_spot)
+    assert ts.margin_target_usd == pytest.approx(expected_spot * config.target_margin_ratio)
+    assert ts.debt_target_usd == pytest.approx(expected_spot * config.target_ltv)
 
 
 def test_the_reference_balance_sheet_is_a_fixed_point(config: Config) -> None:
@@ -117,4 +123,7 @@ def test_the_resulting_ltv_sits_below_the_nominal_target(config: Config) -> None
     ts = target_state(equity=EQUITY, config=config, cushion_usd=CUSHION)
     observed_ltv = ts.debt_target_usd / (ts.spot_target_usd + CUSHION)
     assert observed_ltv < config.target_ltv
-    assert observed_ltv == pytest.approx(35_000.0 / 51_000.0, rel=1e-6)
+    # The softening is exactly the cushion's weight in the collateral:
+    #   target - observed = target x cushion / (spot + cushion)
+    softening = config.target_ltv * CUSHION / (ts.spot_target_usd + CUSHION)
+    assert config.target_ltv - observed_ltv == pytest.approx(softening)

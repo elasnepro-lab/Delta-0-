@@ -115,8 +115,7 @@ def test_p2_stays_silent_above_its_threshold(
 def test_the_reserve_target_is_configured(config: Config) -> None:
     """The classeur has to price it: undeployed capital costs carry."""
     assert 0.0 < config.emergency.hl_reserve_pct < 1.0
-    notional = 50_000.0
-    reserve = config.emergency.hl_reserve_pct * notional
-    # 2 % of notional buys 2 points of margin ratio, which clears the trigger
-    # from 0.030 with room to spare.
-    assert reserve == pytest.approx(1_000.0)
+    # Sized against the squeeze it must survive, per the stress harness: the
+    # reserve has to lift the margin ratio clear of the reduce trigger.
+    lift = config.emergency.hl_reserve_pct
+    assert lift > config.emergency.margin_ratio_pump - config.emergency.margin_ratio_reduce
