@@ -232,3 +232,56 @@ LTV sur 35 000 $ de dette :  reel 0,6858   vu par le bot 0,8528
 Le bot verrait donc **0,8528 sur une position saine a 0,6858**, soit au-dessus
 du LT de 0,79 : des le premier cycle apres BUILD, il declencherait P4 sur une
 position qui n'a aucun probleme.
+
+## 11. Le coussin se leviérise lui-même
+
+Constat de conception, tire du calcul des bandes le 2026-09-09 avec LT 0,79.
+
+Le coussin est de l'USDC depose sur Aave. Il compte donc dans le collateral, et
+a LTV cible constant il **porte de la dette supplementaire**. Chassis a capital
+20 000 constant, cible 0,70 :
+
+```
+coussin    spot    dette   bande (coussin plein)   bande (coussin consomme)
+ 1 000   49 250   35 175          -11,62 %                 -9,59 %
+ 2 000   48 500   35 350          -11,86 %                 -7,74 %
+ 3 500   47 375   35 612          -12,23 %                 -4,85 %
+```
+
+Grossir le coussin achete quelques dixiemes de point tant qu'il est plein, et en
+coute plusieurs une fois vide — **au moment precis ou P3 vient de s'en servir**.
+La defense se paie en marge de securite, et plus le coussin est gros, plus elle
+coute cher.
+
+Deux consequences :
+
+1. Le solveur ne doit pas dimensionner la dette sur un collateral qui inclut le
+   coussin (chantier 1.3, point K10). Sinon le coussin finance sa propre dette.
+2. Le classeur doit afficher **les deux bandes**, pleine et consommee. La seconde
+   est celle qui vaut apres la premiere tranche de P3, donc celle qui compte.
+
+Note sur les chiffres publies : la bande depend du LTV de depart. Le chassis
+d'illustration de l'audit (spot 50 000, dette 35 000, coussin 1 000) est en fait
+a LTV 0,686 et non 0,70 — le coussin adoucit le ratio — d'ou son -13,39 %. Un
+chassis reellement construit a 0,70 donne -11,62 %. Les deux sont justes ; ils ne
+partent pas du meme point. Que le chassis de reference ne soit pas a sa propre
+cible est le point K10.
+
+## 12. Arbitrage chiffre de la cible LTV
+
+Meme modele, capital 20 000, coussin 1 000, levier short 10x :
+
+```
+cible    exposition   bande    coussin vide   carry relatif
+0,700       2,51     -11,62 %     -9,59 %        100,0 %
+0,675       2,36     -14,87 %    -12,71 %         94,0 %
+0,650       2,23     -18,13 %    -15,84 %         88,7 %
+```
+
+Descendre de 0,70 a 0,65 achete **6,5 points de bande** contre 11 % de carry,
+soit environ 575 $/an sur les 5 100 $ bruts attendus. A comparer aux 1 300 $
+d'une liquidation « propre » (point A3 de l'audit), sachant que l'ETH fait -13 %
+en une journee plusieurs fois par an. Le depeg stETH (F7) s'ajoute a cette
+bande, il ne s'en deduit pas.
+
+Decision a prendre au chantier 1.5. Elle remet en cause la decision figee n° 3.
