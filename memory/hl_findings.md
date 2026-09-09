@@ -398,3 +398,42 @@ un echec et une reprise.
 **Reste a trancher, sur le mainnet et avec un petit montant** : un retrait de
 3 USDC avec une position ouverte. C'est le seul environnement ou la reponse
 vaudra quelque chose. Cout : 1 USDC de frais.
+
+## 16. A4 TRANCHE sur le mainnet : une position ouverte n'empeche pas le retrait
+
+Mesure du 2026-09-09 sur le compte reel, position minuscule ouverte puis
+refermee, retrait signe par la cle maitre :
+
+```
+depart             spot 29,80   accountValue 0,00   withdrawable 0,00   positions 0
+position ouverte   spot 29,79   accountValue 1,24   withdrawable 0,00   positions 1
+   0,005 ETH isole 10x, rempli a 2 488,7 (~12,44 USD de notionnel)
+retrait de 3 USDC  -> {"status":"ok","response":{"type":"default"}}   ACCEPTE
+final              spot 26,79   accountValue 0,00   withdrawable 0,00   positions 0
+```
+
+**Il n'y a pas de regle des 20 % qui bloquerait la pompe descendante.** P6 peut
+retirer avec le hedge en place. Le point A4 de l'audit est infirme.
+
+Deux enseignements au-dela de la reponse :
+
+**1. Le retrait puise dans le spot, pas dans la poche perp.** Le compte affichait
+`accountValue` a 1,24 et a laisse sortir 3 USDC — plus que toute l'equite perp.
+Sur un compte unifie, la marge isolee d'une position et le solde retirable sont
+deux choses distinctes, et la position ne fait pas barrage.
+
+**2. `withdrawable` a 0,00 pendant qu'un retrait de 3 USDC aboutit.** C'est le
+contre-exemple qui cloue le piege du point 14 : ce champ ne mesure pas ce qui
+peut quitter le compte. Du code qui s'en servirait pour dimensionner une pompe
+conclurait qu'il n'y a rien a pomper, alors que le retrait passe. Le montant
+mobilisable se lit sur le solde spot.
+
+**Sur le testnet, les memes tentatives echouaient toutes** (point 15), y compris
+sans position et apres attente. C'etait donc un artefact de la plateforme de
+test, pas une regle de la place. Enseignement de methode : ne pas conclure une
+regle metier depuis un refus de testnet.
+
+Reserve honnete : la position testee etait minuscule (12 USD de notionnel, 1,24
+de marge, pour 29,80 de solde). Une contrainte pourrait apparaitre quand la
+position est grande devant le compte. Ce qui est acquis, c'est qu'il n'existe pas
+de barrage systematique.
