@@ -76,13 +76,13 @@ def test_p2_edge_at_threshold_fires(
     config: Config,
     nominal_ctx: OperationalContext,
 ) -> None:
-    # margin_ratio = 0.0349 — must trigger P2.
+    # margin_ratio = 0.0349 — must trigger P2. With a reserve on hand the
+    # defence is to add margin, not to close: see test_p2_up_flank.
     notional = stable_snapshot.notional_usd
     snap = replace(stable_snapshot, isolated_margin_usd=0.0349 * notional)
     action = decide(snap, config, nominal_ctx)
     assert action.priority is Priority.P2_EMERGENCY_REDUCE
-    assert action.kind == "REDUCE"
-    assert action.params["close_fraction"] == pytest.approx(0.30)
+    assert action.kind == "ADD_ISOLATED_MARGIN"
 
 
 # --- P3 vs P4 : bandes derivees du LT on-chain -------------------------------

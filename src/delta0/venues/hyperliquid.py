@@ -138,3 +138,29 @@ class HyperliquidReader:
     async def read_user_summary(self) -> dict[str, Any]:
         """Full clearinghouse state — useful for `status` command."""
         return cast(dict[str, Any], await self._run(self._info.user_state, self._user))
+
+    async def read_free_usdc(self) -> float:
+        """USDC available on the account but not committed as isolated margin.
+
+        Read from the SPOT state, not from `withdrawable`. On a unified account
+        — which ours is — `withdrawable` reports 0 the moment a position exists,
+        even while a withdrawal of that size succeeds; sizing anything on it
+        would conclude there is nothing to draw on. Measured 2026-09-09, see
+        memory/hl_findings.md §14 and §16.
+
+        This is what the fast up-flank defence spends: adding isolated margin
+        from here is one local request, no bridge.
+        """
+        state = await self._run(self._info.spot_user_state, self._user)
+        if not isinstance(state, dict):
+            return 0.0
+        balances = state.get("balances")
+        if not isinstance(balances, list):
+            return 0.0
+        for entry in balances:
+            if isinstance(entry, dict) and entry.get("coin") == "USDC":
+                try:
+                    return float(entry.get("total", "0"))
+                except (TypeError, ValueError):
+                    return 0.0
+        return 0.0

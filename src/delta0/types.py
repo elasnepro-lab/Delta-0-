@@ -32,7 +32,8 @@ class Priority(IntEnum):
 
 ActionKind = Literal[
     "NOOP",
-    "REDUCE",  # P2 IOC close a fraction of the short
+    "ADD_ISOLATED_MARGIN",  # P2 — local, one request, actually moves liquidationPx
+    "REDUCE",  # P2 fallback — damage limitation only, see decision._p2
     "REPAY_FROM_CUSHION",  # P3
     "STEPWISE_DELEVERAGE",  # P4
     "PUMP_UP",  # P5
@@ -73,6 +74,7 @@ class Snapshot:
     mark_price: float
     short_size_eth: float  # positive number, this is a short position
     isolated_margin_usd: float
+    hl_free_usdc: float  # on the account, not committed as margin
     hl_maintenance_margin: float  # observed, compared to config
     funding_last_hour: float  # hourly rate
     funding_30d_annualized: float

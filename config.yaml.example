@@ -32,6 +32,7 @@ emergency:
   margin_ratio_pump: 0.05    # ~+5% price move: pump up
   margin_ratio_reduce: 0.035 # ~+6.5% price move: emergency reduce (2s)
   reduce_fraction: 0.30
+  hl_reserve_pct: 0.02        # 2 % du notionnel garde libre sur HL pour P2
   # Marges SOUS le seuil de liquidation lu on-chain, en points de LTV.
   # Les seuils absolus ont ete retires : ils dependaient d'un LT de 0,81
   # (Ethereum) alors qu'Arbitrum applique 0,79, ce qui placait le coussin

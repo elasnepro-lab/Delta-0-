@@ -245,20 +245,64 @@ def _p1_liquidation(ctx: OperationalContext, snapshot: Snapshot) -> Action | Non
 
 
 def _p2_emergency_reduce(snapshot: Snapshot, config: Config) -> Action | None:
-    if snapshot.margin_ratio > config.emergency.margin_ratio_reduce:
+    """Fast defence of the up flank: add isolated margin from the HL reserve.
+
+    The README specified a partial close here, on the assumption that shrinking
+    the short pushes the liquidation price away. Measured on 2026-09-08, it does
+    not: Hyperliquid releases margin in proportion to the size closed, so
+    margin/notional is unchanged and `liquidationPx` moves by -0.012 %. Closing
+    30 % three times in a row would therefore have emptied the short without
+    ever improving the position — the bot manufacturing the naked leg it exists
+    to prevent. See memory/hl_findings.md §10.
+
+    What does work, measured the same day: `update_isolated_margin(+5 USDC)` on
+    an 86.8 USD notional moved the liquidation price +5.24 %. One request, local,
+    no bridge, and an agent can sign it (§11, §9).
+
+    So the reserve is not a comfort — it is the only real defence this flank
+    has. When it is empty the fallback closes the short, but that is damage
+    limitation, not rescue: it shrinks what a liquidation would take without
+    moving the price at which it happens. It carries an alert for that reason.
+    """
+    reduce_at = config.emergency.margin_ratio_reduce
+    if snapshot.margin_ratio > reduce_at:
         return None
+
+    notional = snapshot.notional_usd
+    # Enough to reach the nominal margin ratio, capped by what is on hand.
+    wanted = max(0.0, (config.target_margin_ratio - snapshot.margin_ratio) * notional)
+    add = min(wanted, snapshot.hl_free_usdc)
+    # Below this, adding leaves the ratio under the trigger and P2 fires again
+    # next cycle for nothing — spending the reserve without leaving the danger.
+    clears_trigger = max(0.0, (reduce_at - snapshot.margin_ratio) * notional)
+
+    if add > clears_trigger:
+        return Action(
+            kind="ADD_ISOLATED_MARGIN",
+            priority=Priority.P2_EMERGENCY_REDUCE,
+            reason=(
+                f"marge {snapshot.margin_ratio:.4f} <= seuil {reduce_at} "
+                f"— ajout local de {add:.0f} USDC depuis la réserve "
+                f"({snapshot.hl_free_usdc:.0f} disponibles)"
+            ),
+            params={"add_margin_amount_usdc": add},
+        )
+
     close_fraction = config.emergency.reduce_fraction
     target = snapshot.short_size_eth * (1.0 - close_fraction)
     return Action(
         kind="REDUCE",
         priority=Priority.P2_EMERGENCY_REDUCE,
         reason=(
-            f"marge {snapshot.margin_ratio:.4f} <= seuil réduction "
-            f"{config.emergency.margin_ratio_reduce} — IOC {close_fraction:.0%}"
+            f"marge {snapshot.margin_ratio:.4f} <= seuil {reduce_at} et réserve "
+            f"insuffisante ({snapshot.hl_free_usdc:.0f} USDC) — fermeture "
+            f"{close_fraction:.0%} pour limiter la perte, le prix de liquidation "
+            "ne bouge pas"
         ),
         params={
             "close_fraction": close_fraction,
             "target_short_size_eth": target,
+            "reserve_exhausted": 1,
         },
     )
 

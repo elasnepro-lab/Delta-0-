@@ -77,6 +77,7 @@ class LiveWatcher:
             self.hl.read_position(self.coin),
             self.hl.read_funding_avg_30d(self.coin),
             self.hl.read_last_hour_funding(self.coin),
+            self.hl.read_free_usdc(),
         )
         aave_result, hl_result = await asyncio.gather(
             aave_task,
@@ -105,7 +106,7 @@ class LiveWatcher:
                 error=repr(hl_result),
             )
             raise hl_result
-        meta, position, funding_30d, funding_1h = hl_result
+        meta, position, funding_30d, funding_1h, hl_free = hl_result
         self.watchdog.mark_hl_ok(now=now_mono)
 
         # WS ticks (if any) refresh the freshness signal. Without a stream,
@@ -142,6 +143,7 @@ class LiveWatcher:
             mark_price=mark_price,
             short_size_eth=short_size,
             isolated_margin_usd=margin,
+            hl_free_usdc=hl_free,
             hl_maintenance_margin=meta.maintenance_margin_ratio,
             funding_last_hour=funding_1h,
             funding_30d_annualized=funding_30d,

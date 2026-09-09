@@ -69,6 +69,11 @@ class EmergencyConfig(BaseModel):
     margin_ratio_pump: _Ratio
     margin_ratio_reduce: _Ratio
     reduce_fraction: _Ratio
+    # USDC left free on Hyperliquid, as a fraction of the notional. This is
+    # what P2 spends: adding isolated margin is the only action measured to
+    # move the liquidation price, and it can only spend what sits there.
+    # Undeployed capital, so it costs carry — priced in the classeur.
+    hl_reserve_pct: _Ratio
 
     # Down flank: distances BELOW the on-chain liquidation threshold, in LTV
     # points — not absolute LTVs. Absolute values cannot live in a file: they

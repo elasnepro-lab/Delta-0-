@@ -30,6 +30,7 @@ def _snap(**overrides: float | int | bool) -> Snapshot:
         "mark_price": 2_500.0,
         "short_size_eth": 20.0,
         "isolated_margin_usd": 5_000.0,
+        "hl_free_usdc": 1_000.0,
         "hl_maintenance_margin": 0.02,
         "funding_last_hour": 1.25e-5,
         "funding_30d_annualized": 0.11,
