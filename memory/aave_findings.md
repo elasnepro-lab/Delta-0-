@@ -285,3 +285,56 @@ en une journee plusieurs fois par an. Le depeg stETH (F7) s'ajoute a cette
 bande, il ne s'en deduit pas.
 
 Decision a prendre au chantier 1.5. Elle remet en cause la decision figee n° 3.
+
+## 11 bis. Correction du point 11 : un coussin consomme n'est pas un coussin perdu
+
+Verifie le 2026-09-09 en suivant un seul chassis dans le temps, au lieu de
+comparer deux chassis differents comme le faisait le point 11.
+
+Quand P3 depense le coussin, il **rembourse de la dette**. Le bilan ne perd pas
+le coussin, il le convertit :
+
+```
+tampons pleins      dette 28 187   marge 4 176   bande basse -16,95 %
+tampons consommes   dette 27 187   marge 5 429   bande basse -17,59 %
+```
+
+Les deux bandes s'**elargissent**. Le point 11 comparait la bande d'un chassis
+avec coussin a celle du meme chassis dont le coussin aurait disparu **sans
+rembourser** — ce qui n'arrive jamais. Lu ainsi, sa conclusion « le coussin
+coute plusieurs points une fois vide » est fausse.
+
+Ce qui reste vrai du point 11, et qui a motive le chantier 1.3 : a LTV cible
+constant, un chassis dote d'un plus gros coussin porte **plus de dette**, parce
+que le coussin compte dans le collateral. Le solveur ne doit donc pas
+dimensionner la dette sur un collateral qui l'inclut. C'est une remarque sur le
+dimensionnement initial, pas sur ce que devient le coussin une fois utilise.
+
+## 13. Le couplage des defenses ne fait pas de cliquet
+
+Autre intuition infirmee le meme jour. Sans tampons, chaque defense puise dans
+l'autre jambe : P5 emprunte sur Aave pour recharger la marge (le LTV monte), P6
+retire de la marge pour rembourser (le ratio baisse). J'en avais conclu qu'une
+oscillation de prix ferait deriver la position vers un coin.
+
+Simulation d'une oscillation de +/-14 %, tampons vides :
+
+```
+tour     dette    marge  bande bas  bande haut
+   0    27 187    5 429    -17,59%      10,78%
+   1    24 600    3 259    -25,43%       5,69%
+   2    24 600    5 846    -25,43%      11,76%
+   3    24 600    5 846    -25,43%      11,76%
+```
+
+La position se stabilise des le deuxieme tour et repete le meme cycle. **P5 et
+P6 sont exactement inverses** : l'une emprunte X et le met en marge, l'autre
+retire X et rembourse. Sur un aller-retour, elles s'annulent.
+
+Le cout reel d'un marche qui oscille n'est donc pas la solvabilite mais les
+**frais** : chaque aller-retour paie deux traversees de pont pour des defenses
+qui se neutralisent. C'est le whipsaw du point F2 de l'audit, a chiffrer au
+backtest M2b et non au harnais de stress.
+
+Lecon de methode, la deuxieme du meme genre : regarder une demi-oscillation et
+extrapoler donne une conclusion inverse de la realite. Simuler le cycle entier.
