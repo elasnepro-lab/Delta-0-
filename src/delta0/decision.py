@@ -60,19 +60,41 @@ class OperationalContext:
 # --- Target-state solver ------------------------------------------------------
 
 
-def target_state(equity: float, config: Config) -> TargetState:
+def target_state(equity: float, config: Config, *, cushion_usd: float) -> TargetState:
     """Solve for the target state given current equity.
 
     README section 3:
-        spot_target     = equity * exposure_mult
+        spot_target     = deployable * exposure_mult
         notional_target = spot_target
         margin_target   = spot_target * target_margin_ratio
         debt_target     = target_ltv * spot_target
+
+    `deployable` is equity MINUS the cushion. The cushion is emergency reserve:
+    leveraging it would mean borrowing against the very money kept aside to
+    repay a loan. Feeding raw equity in asked for a machine 5 % larger than the
+    balance sheet it was calibrated on, so the first skim-and-recompose would
+    have borrowed an extra 1 750 $ and grown the short to match — compounding
+    every time. With the cushion removed the reference balance sheet is an
+    exact fixed point, which is what `test_target_state` now pins.
+
+    `cushion_usd` is keyword-only and has no default on purpose: a caller that
+    forgets it must fail to compile rather than silently over-lever.
+
+    Note on `target_ltv`: the debt is sized against the spot alone, not against
+    spot + cushion. That is deliberate — sizing on the full collateral would let
+    the cushion carry its own debt, which costs more band than it buys once
+    spent. See memory/aave_findings.md §11.
     """
     if equity <= 0.0:
         raise ValueError(f"equity must be positive, got {equity}")
+    if cushion_usd < 0.0:
+        raise ValueError(f"cushion must not be negative, got {cushion_usd}")
 
-    spot_target = equity * config.exposure_mult
+    deployable = equity - cushion_usd
+    if deployable <= 0.0:
+        raise ValueError(f"cushion {cushion_usd} leaves no deployable equity out of {equity}")
+
+    spot_target = deployable * config.exposure_mult
     notional_target = spot_target
     margin_target = spot_target * config.target_margin_ratio
     debt_target = config.target_ltv * spot_target

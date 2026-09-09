@@ -404,7 +404,7 @@ def test_blind_hl_only_still_honours_liquidation_event(
 
 def test_target_state_zero_equity_rejected(config: Config) -> None:
     with pytest.raises(ValueError, match="equity must be positive"):
-        target_state(equity=0.0, config=config)
+        target_state(equity=0.0, config=config, cushion_usd=0.0)
 
 
 # --- Helpers -----------------------------------------------------------------

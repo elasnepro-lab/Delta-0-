@@ -168,7 +168,13 @@ async def _gather_status(cfg: Config, settings: Settings) -> dict[str, object]:
         + (position.isolated_margin_usd if position else 0.0)
         - account.total_debt_usd
     )
-    targets = target_state(equity=max(equity, 1.0), config=cfg) if equity > 0 else None
+    # The cushion is the USDC sitting as Aave collateral — reserve, not fuel.
+    cushion_usd = usdc_bal.atoken_balance
+    targets = (
+        target_state(equity=equity, config=cfg, cushion_usd=cushion_usd)
+        if equity > cushion_usd
+        else None
+    )
 
     return {
         "ts": datetime.now(UTC).isoformat(),
