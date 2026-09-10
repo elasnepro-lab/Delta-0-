@@ -338,3 +338,50 @@ backtest M2b et non au harnais de stress.
 
 Lecon de methode, la deuxieme du meme genre : regarder une demi-oscillation et
 extrapoler donne une conclusion inverse de la realite. Simuler le cycle entier.
+
+## 14. La cascade du §7 s'est produite en vrai, et personne ne l'a vue
+
+Constate le 2026-09-10 en diagnostiquant la marche a blanc. Ce n'est plus un
+scenario : c'est un incident, avec ses horaires.
+
+```
+aave_repay     dernier succes  2026-09-08 20:09     puis 35 echecs
+aave_withdraw  dernier succes  2026-09-08 20:09     puis  3 echecs
+aave_supply    dernier succes  2026-09-09 13:41     puis 58 echecs
+bridge_out     dernier succes  2026-09-09 08:26     puis  2 echecs
+```
+
+**Enchainement.** Le cycle du 8 septembre a 20h39 a repay rate. Comme
+`OpResult` renvoie `failed` au lieu de lever (point C7 de l'audit, chantier
+4.4), la sequence a continue : le withdraw a echoue a son tour, HF sous le
+seuil, et la position est restee ouverte. Les cycles suivants ont continue a
+deposer 5 USDC sans jamais les recuperer, jusqu'a vider le portefeuille.
+
+**Etat au moment du diagnostic**, 46 heures plus tard :
+
+```
+USDC libre du wallet   2,97      (un cycle en demande 5, un pont 5)
+ETH pour le gaz        0,0278    (largement au-dessus du seuil, ce n'etait pas ca)
+position Aave ouverte  collateral 175 $   dette 35 $   HF 3,90
+```
+
+Aucun danger de liquidation a cette echelle, mais la jambe Aave et le pont
+n'ont plus produit un seul echantillon pendant deux jours.
+
+**Ce que l'incident demontre.** La boucle tournait parfaitement pendant ce
+temps : 96 167 snapshots, p95 a 951 ms, deux gels seulement au-dessus de 10 s
+sur six jours. Le processus etait vivant, la base s'ecrivait, Hyperliquid
+repondait. **Rien ne distinguait un bot casse d'un bot calme** — le point K8 de
+l'audit, verifie sur notre propre run avec de l'argent reel.
+
+Consequences a traiter :
+
+1. Le rapport M1 doit dire que les chemins Aave et pont couvrent **5 jours et
+   non 7**. Leurs echantillons restent valables (250 supply, 215 repay, 11
+   allers-retours), mais le critere de continuite n'est pas tenu pour eux. Il
+   l'est pour P1/P2, qui a 917 echantillons et tournait encore.
+2. Refermer la position avec `scripts/unwind_aave.py` apres la cloture.
+3. Le chantier 5.1 (alertes) monte en priorite : sans lui, le meme silence se
+   reproduira en M2 sur un chassis a 20 000 $ au lieu de 175.
+4. Le garde-fou manquant n'est pas seulement C7 : un controle de solde avant
+   chaque cycle aurait refuse de demarrer plutot que d'echouer 58 fois.
