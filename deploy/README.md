@@ -52,7 +52,13 @@ elle n'a rien à faire dans un dossier synchronisé ni dans un dépôt git.
 
 ## 2. Installation
 
-Debian 12 n'a ni `git` ni `uv`. L'outillage d'abord :
+**Debian 13 (Trixie)**, la version stable actuelle. Rien dans ce qui suit n'est
+propre à une version : `apt`, `systemd`, `journald` et `chrony` sont identiques
+sur 12 et 13, et `uv` embarque sa propre version de Python, donc celle du
+système ne contraint rien. À choix égal, prendre la stable la plus récente :
+elle est supportée plus longtemps, et cette machine doit tourner des années.
+
+Ni `git` ni `uv` ne sont installés par défaut. L'outillage d'abord :
 
 ```bash
 sudo apt update && sudo apt install -y git curl ca-certificates
@@ -61,8 +67,7 @@ uv --version
 ```
 
 `uv` va dans `/usr/local/bin` pour être visible de tous les comptes, y compris
-celui du service. Il gère aussi sa propre version de Python, donc le 3.11 de
-Debian ne contraint rien.
+celui du service.
 
 Puis le compte, les répertoires et le dépôt :
 
