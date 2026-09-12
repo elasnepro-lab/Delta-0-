@@ -123,6 +123,7 @@ class AaveAccountData:
 class AaveTokenBalances:
     atoken_balance: float  # native units (float, tight to Decimal in M1)
     variable_debt_balance: float
+    wallet_balance: float  # free in the wallet — what an operation spends
 
 
 _ADDRESSES_PROVIDER_ABI: list[dict[str, Any]] = [
@@ -267,18 +268,37 @@ class AaveReader:
         return meta
 
     async def read_token_balances(self, asset: str) -> AaveTokenBalances:
-        """Read aToken and variableDebtToken balances for a given underlying."""
+        """The three balances of one asset: supplied, owed, and free.
+
+        The third one is new, and it is the one whose absence cost the marche à
+        blanc two days. `atoken` says what is deposited and `variableDebt` says
+        what is owed, but neither says what the wallet can actually spend — so
+        the tracer kept depositing 5 USDC per cycle until the wallet was empty,
+        then failed 86 times with nothing anywhere to explain it.
+
+        Read here rather than in a separate call because `asyncio.gather` loses
+        its element types past six tasks, and because the three numbers belong
+        together anyway: they are the same asset seen from three sides.
+        """
         meta = await self._get_token_meta(asset)
         atoken = self._w3.eth.contract(address=meta.atoken_address, abi=_ERC20_BALANCE_ABI)
         var_debt = self._w3.eth.contract(address=meta.var_debt_address, abi=_ERC20_BALANCE_ABI)
+        underlying = self._w3.eth.contract(
+            address=AsyncWeb3.to_checksum_address(asset),
+            abi=_ERC20_BALANCE_ABI,
+        )
         # Parallel balance reads.
-        atoken_bal, vdebt_bal = await asyncio.gather(
+        atoken_bal, vdebt_bal, wallet_bal = await asyncio.gather(
             atoken.functions.balanceOf(self._user).call(),
             var_debt.functions.balanceOf(self._user).call(),
+            underlying.functions.balanceOf(self._user).call(),
         )
         return AaveTokenBalances(
             atoken_balance=atoken_bal / 10**meta.atoken_decimals,
             variable_debt_balance=vdebt_bal / 10**meta.var_debt_decimals,
+            # Aave mints the aToken one-for-one with the underlying, so its
+            # decimals are the underlying's.
+            wallet_balance=wallet_bal / 10**meta.atoken_decimals,
         )
 
     async def read_reserve_rates(self, asset: str) -> AaveReserveRates:

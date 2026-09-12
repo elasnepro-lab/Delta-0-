@@ -35,6 +35,7 @@ def _base_snap() -> Snapshot:
         wsteth_eth_ratio=1.25,
         usdc_atoken_balance=1_000.0,
         usdc_variable_debt_balance=35_000.0,
+        usdc_wallet_balance=0.0,
         hf=1.5,
         aave_lt_wsteth=0.83,
         aave_ltv_max_wsteth=0.80,

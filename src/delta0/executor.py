@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from eth_typing import ChecksumAddress
 from web3 import AsyncWeb3
@@ -35,8 +35,9 @@ from delta0.config import Config
 from delta0.gas import with_gas_margin
 from delta0.latency import elapsed_ms, measurement_path, now_perf
 from delta0.logging import get_logger
-from delta0.safety import MicroOpsGuard
+from delta0.safety import InsufficientBalance, MicroOpsGuard
 from delta0.state import StateStore, deterministic_id
+from delta0.venues.aave import AaveTokenBalances
 
 log = get_logger(__name__)
 
@@ -139,6 +140,12 @@ _VARIABLE_RATE_MODE = 2
 _REFERRAL_CODE = 0
 
 
+class BalanceReader(Protocol):
+    """The one read the funding guard needs. Structural, so a test can fake it."""
+
+    async def read_token_balances(self, asset: str) -> AaveTokenBalances: ...
+
+
 @dataclass(frozen=True, slots=True)
 class OpResult:
     """Outcome of one micro-op."""
@@ -167,6 +174,7 @@ class AaveTraceExecutor:
         master_address: str,
         chain_id: int,
         private_key: str | None = None,
+        balances: BalanceReader | None = None,
     ) -> None:
         self._w3 = web3
         self._config = config
@@ -181,6 +189,11 @@ class AaveTraceExecutor:
         # Held only when the CLI explicitly wired --live-micro-ops. Never
         # logged (structlog + our own code never format `_private_key`).
         self._private_key = private_key
+        # Without a reader the funding guard cannot run. It is optional rather
+        # than required so that a caller wiring an executor for something else
+        # is not forced to build one, and its absence is logged at the first
+        # operation that would have been checked — never silently skipped.
+        self._balances = balances
 
     # --- Public micro-op API --------------------------------------------------
 
@@ -197,6 +210,7 @@ class AaveTraceExecutor:
         )
 
     async def supply(self, asset: str, amount_native: float) -> OpResult:
+        await self._refuse_if_underfunded("aave_supply", asset, needed=amount_native)
         return await self._pool_write(
             op_kind="aave_supply",
             asset=asset,
@@ -248,6 +262,11 @@ class AaveTraceExecutor:
         max_uint = 2**256 - 1
         op_kind: AaveOpKind = "aave_repay"
         self._guard.check(op_kind, notional_usd=self._estimate_notional(asset, 2.0))
+        # MAX_UINT256 does not mean "whatever I have": Aave pulls the full
+        # outstanding debt, so that is the amount the wallet must hold. It is
+        # the exact shape of the 8 September failure, where a wallet at 2,97
+        # was asked for 35,01.
+        await self._refuse_if_underfunded(op_kind, asset, needed=None)
 
         call = self._pool.functions.repay(
             AsyncWeb3.to_checksum_address(asset),
@@ -365,6 +384,52 @@ class AaveTraceExecutor:
             amount_native=amount_native,
             call=call,
         )
+
+    async def _refuse_if_underfunded(
+        self,
+        op_kind: AaveOpKind,
+        asset: str,
+        *,
+        needed: float | None,
+    ) -> None:
+        """Refuse an operation the wallet demonstrably cannot fund.
+
+        `needed=None` means "the full outstanding debt", which is what
+        `repay_all` spends: MAX_UINT256 does not mean "whatever I have", Aave
+        pulls the whole debt. Resolving it from the same read keeps the guard
+        to one round trip.
+
+        The guard refuses only on a balance it actually read. A failed read
+        must NOT block the operation: on an emergency path a repay that might
+        have worked is worth more than a refusal based on ignorance, and the
+        transaction still carries its own revert as a second line of defence.
+        We block what we know to be impossible, never what we merely failed to
+        check.
+        """
+        if self._balances is None:
+            log.warning(
+                "balance_check_absent",
+                message=f"{op_kind}: aucun lecteur de soldes câblé — opération non vérifiée",
+                op_kind=op_kind,
+            )
+            return
+        try:
+            balances = await self._balances.read_token_balances(asset)
+        except Exception:
+            log.warning(
+                "balance_check_unavailable",
+                message=f"{op_kind}: solde libre illisible — opération tentée quand même",
+                op_kind=op_kind,
+            )
+            return
+        required = balances.variable_debt_balance if needed is None else needed
+        if required <= 0.0:
+            return
+        if balances.wallet_balance < required:
+            raise InsufficientBalance(
+                f"{op_kind}: le portefeuille porte {balances.wallet_balance:.6f} "
+                f"et l'opération en demande {required:.6f}",
+            )
 
     async def _journal_and_send(
         self,

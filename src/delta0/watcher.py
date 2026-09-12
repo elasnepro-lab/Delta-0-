@@ -136,6 +136,7 @@ class LiveWatcher:
             wsteth_eth_ratio=oracle.wsteth_eth_ratio,
             usdc_atoken_balance=usdc.atoken_balance,
             usdc_variable_debt_balance=usdc.variable_debt_balance,
+            usdc_wallet_balance=usdc.wallet_balance,
             hf=account.health_factor,
             aave_lt_wsteth=account.liquidation_threshold,
             aave_ltv_max_wsteth=account.ltv_max,

@@ -36,6 +36,17 @@ class SafetyRefused(Exception):  # noqa: N818 - "Refused" reads better in stack 
     """Raised when the guard refuses a micro-op. Always safe to catch."""
 
 
+class InsufficientBalance(SafetyRefused):
+    """The wallet cannot fund the operation, and we read the balance to know.
+
+    A subclass of `SafetyRefused` on purpose: the callers already treat a
+    refusal as "log it, skip this cycle, keep the loop alive", which is exactly
+    the right handling. What changes is that the refusal now happens BEFORE the
+    transaction instead of as a revert after it — no gas spent, no receipt to
+    interpret, and one legible reason instead of 86 identical failures.
+    """
+
+
 ALLOWED_OP_KINDS: frozenset[str] = frozenset(
     {
         "aave_approve",

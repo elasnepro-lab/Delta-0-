@@ -88,6 +88,7 @@ class Position:
             wsteth_eth_ratio=self.wsteth_eth_ratio,
             usdc_atoken_balance=self.cushion_usd,
             usdc_variable_debt_balance=self.debt_usd,
+            usdc_wallet_balance=0.0,
             hf=hf,
             aave_lt_wsteth=self.lt,
             aave_ltv_max_wsteth=0.75,

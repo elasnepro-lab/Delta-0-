@@ -187,10 +187,20 @@ async def _gather_status(cfg: Config, settings: Settings) -> dict[str, object]:
     meta = await hl.read_market_meta("ETH")
     position = await hl.read_position("ETH")
     funding_30d = await hl.read_funding_avg_30d("ETH")
+    # Le solde SPOT, pas `withdrawable` ni `accountValue` : en compte unifie
+    # ces deux-la valent 0 pendant que l'argent est bien la (voir
+    # memory/hl_findings.md). Le lecteur le sait deja, le panneau l'ignorait.
+    hl_free = await hl.read_free_usdc()
 
+    # Les soldes libres comptent dans l'equite : ce sont des dollars qu'on
+    # possede. Les omettre faisait annoncer « equite 0,00 $ » au lendemain de
+    # la cloture de la campagne, avec 143 USDC sur Arbitrum et 26,79 sur
+    # Hyperliquid.
     equity = (
         account.total_collateral_usd
         + (position.isolated_margin_usd if position else 0.0)
+        + usdc_bal.wallet_balance
+        + hl_free
         - account.total_debt_usd
     )
     # The cushion is the USDC sitting as Aave collateral — reserve, not fuel.
@@ -217,6 +227,7 @@ async def _gather_status(cfg: Config, settings: Settings) -> dict[str, object]:
             "wsteth_balance": wsteth_bal.atoken_balance,
             "usdc_supply_balance": usdc_bal.atoken_balance,
             "usdc_debt_balance": usdc_bal.variable_debt_balance,
+            "usdc_wallet_balance": usdc_bal.wallet_balance,
             "gas_eth": gas_eth,
         },
         "hyperliquid": {
@@ -227,6 +238,7 @@ async def _gather_status(cfg: Config, settings: Settings) -> dict[str, object]:
             "isolated_margin_usd": position.isolated_margin_usd if position else 0.0,
             "leverage": position.leverage if position else 0,
             "funding_30d_annualized": funding_30d,
+            "free_usdc": hl_free,
         },
         "equity_usd": equity,
         "targets": (
@@ -264,6 +276,10 @@ def _render_status(cfg: Config, data: dict[str, object]) -> None:
     aave_table.add_row("wstETH aToken", f"{aave['wsteth_balance']:.6f}")
     aave_table.add_row("USDC coussin", f"{aave['usdc_supply_balance']:,.2f}")
     aave_table.add_row("USDC dette", f"{aave['usdc_debt_balance']:,.2f}")
+    # Le solde libre du portefeuille : celui qu'une operation depense, et le
+    # seul que le panneau ne montrait pas. Apres la cloture de la campagne il
+    # affichait « equite 0,00 $ » avec 143 USDC dans le portefeuille.
+    aave_table.add_row("USDC libre", f"{aave['usdc_wallet_balance']:,.2f}")
     aave_table.add_row("Gaz ETH", f"{aave['gas_eth']:.6f}")
 
     hl_table = Table(title="Hyperliquid (lecture seule)", show_header=True)
@@ -273,6 +289,7 @@ def _render_status(cfg: Config, data: dict[str, object]) -> None:
     hl_table.add_row("Prix mark", f"${hl['mark_price']:,.2f}")
     hl_table.add_row("Taille position", f"{hl['position_size']:.6f}")
     hl_table.add_row("Marge isolée", f"${hl['isolated_margin_usd']:,.2f}")
+    hl_table.add_row("USDC libre (spot)", f"${hl['free_usdc']:,.2f}")
     hl_table.add_row("Levier", str(hl["leverage"]))
     hl_table.add_row("Funding 30j annualisé", f"{hl['funding_30d_annualized']:.4%}")
 
@@ -542,6 +559,7 @@ async def _run_tracer(
                 confirmed_kinds=confirmed_kinds,
                 rehearse=rehearse,
                 project_root=root,
+                balances=aave,
             )
 
         loop = TracerLoop(
@@ -653,6 +671,7 @@ def _wire_micro_op_executors(
     confirmed_kinds: list[str],
     rehearse: bool,
     project_root: Path,
+    balances: AaveReader,
 ) -> tuple[AaveTraceExecutor, HLTraceExecutor, BridgeExecutor]:
     """Instantiate the three micro-op executors.
 

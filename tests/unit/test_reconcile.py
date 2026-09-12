@@ -23,6 +23,7 @@ def _snap(**overrides: float | int | bool) -> Snapshot:
         "wsteth_eth_ratio": 1.25,
         "usdc_atoken_balance": 1_000.0,
         "usdc_variable_debt_balance": 35_000.0,
+        "usdc_wallet_balance": 0.0,
         "hf": 1.1511,  # 0.79 x 51 000 / 35 000
         "aave_lt_wsteth": 0.79,
         "aave_ltv_max_wsteth": 0.80,

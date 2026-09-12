@@ -65,6 +65,7 @@ class Snapshot:
     wsteth_eth_ratio: float  # ETH per wstETH, from the same oracle
     usdc_atoken_balance: float
     usdc_variable_debt_balance: float
+    usdc_wallet_balance: float  # libre dans le portefeuille, ce qu'une op dépense
     hf: float  # from Pool.getUserAccountData — trusted, never recomputed
     aave_lt_wsteth: float  # liquidation threshold, on-chain
     aave_ltv_max_wsteth: float  # max LTV allowed, on-chain
