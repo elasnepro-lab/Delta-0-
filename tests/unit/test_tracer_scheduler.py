@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -109,8 +110,12 @@ async def test_scheduler_does_not_fire_before_interval(
         cadence_s=0.0,
         aave_executor=aave,
     )
-    # Bump the "last fired" so the initial 0.0 doesn't immediately trigger.
-    loop._last_aave_cycle = 999999.0  # any large value > monotonic now
+    # Bump the "last fired" so the initial -inf doesn't immediately trigger.
+    # It has to be read on the same clock the scheduler uses: a constant such
+    # as 999999.0 stops being "in the future" once the machine's monotonic
+    # clock passes it, which takes 11,6 days of uptime — this test went red on
+    # the 2026-09-12 for exactly that reason, after 13 days up.
+    loop._last_aave_cycle = time.monotonic()
     await loop.run(duration_s=0.02)
     aave.approve.assert_not_called()
 
