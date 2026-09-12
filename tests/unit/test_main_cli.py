@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
+from delta0.latency import M1_REPORT_STAMP_KEY, M1_REPORT_STATUS_KEY
 from delta0.main import _parse_duration, app, resolve_root, resolve_under_root
 from delta0.settings import load_settings
 from delta0.state import StateStore
@@ -74,24 +77,30 @@ async def _seed(db: Path, samples: dict[str, list[float]]) -> None:
         await store.close()
 
 
-def test_report_on_empty_db_reports_aucun(tmp_path: Path) -> None:
-    result = runner.invoke(
-        app,
-        ["report", "--db", str(tmp_path / "empty.db"), "-c", "config.yaml.example"],
-    )
-    assert result.exit_code == 0
-    assert "Chemins critiques" in result.stdout
-    assert "P1/P2" in result.stdout
-    # No measurement must never render as a fast path.
-    assert "AUCUN" in result.stdout
-    assert "NON satisfait" in result.stdout
+def test_report_refuses_a_database_with_no_measurement(tmp_path: Path) -> None:
+    """The runbook trap, closed.
+
+    `delta0 report` without `--db` read `data/delta0.db`, a journal abandoned
+    days before the campaign, and rendered a full verdict about the wrong
+    database. Naming the path and refusing beats describing nothing: a report
+    on an empty base is not a report.
+    """
+    empty = tmp_path / "empty.db"
+    result = runner.invoke(app, ["report", "--db", str(empty), "-c", "config.yaml.example"])
+    assert result.exit_code == 2
+    assert "REFUS" in result.stdout
+    assert "empty.db" in result.stdout
+    # And no verdict at all, rather than a comforting one.
+    assert "Chemins critiques" not in result.stdout
 
 
 def test_report_renders_a_measured_path_within_budget(tmp_path: Path) -> None:
     db = tmp_path / "seeded.db"
     asyncio.run(_seed(db, {"path.p1_p2_hl_order": [300.0, 420.0, 510.0]}))
     result = runner.invoke(app, ["report", "--db", str(db), "-c", "config.yaml.example"])
-    assert result.exit_code == 0
+    # Exit 1: P1/P2 holds its budget but the other four paths have no samples,
+    # so the M1 criterion is not met. The code is the verdict, machine-readable.
+    assert result.exit_code == 1
     assert "OK" in result.stdout
     assert "p1_p2_hl_order" in result.stdout
 
@@ -101,7 +110,7 @@ def test_report_flags_prudent_mode_when_p95_blows_the_budget(tmp_path: Path) -> 
     # P1/P2 budget is 2 s; 5 s is past 2 s x 1.5.
     asyncio.run(_seed(db, {"path.p1_p2_hl_order": [5_000.0, 5_200.0, 5_400.0]}))
     result = runner.invoke(app, ["report", "--db", str(db), "-c", "config.yaml.example"])
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     assert "PRUDENT" in result.stdout
     assert "Mode prudent" in result.stdout
 
@@ -207,11 +216,9 @@ async def _seed_failures(db: Path, rows: list[tuple[str, str, str | None]]) -> N
 
 
 def test_report_says_so_when_nothing_failed(tmp_path: Path) -> None:
-    result = runner.invoke(
-        app,
-        ["report", "--db", str(tmp_path / "clean.db"), "-c", "config.yaml.example"],
-    )
-    assert result.exit_code == 0
+    db = tmp_path / "clean.db"
+    asyncio.run(_seed(db, {"path.p1_p2_hl_order": [300.0]}))
+    result = runner.invoke(app, ["report", "--db", str(db), "-c", "config.yaml.example"])
     assert "Aucune intention en échec" in result.stdout
 
 
@@ -234,11 +241,123 @@ def test_report_groups_failures_by_cause(tmp_path: Path) -> None:
             ],
         ),
     )
+    # A latency sample so the report renders at all: a journal with failures
+    # but no measurement is still an empty report, and refused as such.
+    asyncio.run(_seed(db, {"path.p1_p2_hl_order": [300.0]}))
     result = runner.invoke(app, ["report", "--db", str(db), "-c", "config.yaml.example"])
-    assert result.exit_code == 0
     assert "total: 4" in result.stdout
     assert "revert_gas" in result.stdout
     # An unrecorded cause is named as such, never rendered as a blank.
     assert "non enregistrée" in result.stdout
     # Grouped, so the three identical ones are one row carrying a count.
     assert "aave_supply" in result.stdout
+
+
+# --- Un rapport qui ne peut pas mentir (chantier 4.9) ------------------------
+
+
+async def _seed_at(db: Path, path_name: str, when: str, value: float) -> None:
+    """Insert one latency sample with a chosen timestamp."""
+    store = StateStore(db)
+    await store.open()
+    try:
+        async with store.transaction() as conn:
+            await conn.execute(
+                "INSERT INTO latencies (ts, path, duration_ms) VALUES (?, ?, ?)",
+                (when, path_name, value),
+            )
+    finally:
+        await store.close()
+
+
+def test_the_window_excludes_an_older_campaign(tmp_path: Path) -> None:
+    """18,3 % of `m1_run.db` predated the campaign it was meant to describe.
+
+    Every maximum in the M1 report came from that older session. Without a
+    window the report describes a campaign that is not its own.
+    """
+    db = tmp_path / "two_campaigns.db"
+    old = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+    recent = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    # Enough old samples that they own the p95, which is the whole point:
+    # a handful of stale outliers decided the verdict of the M1 report.
+    for _ in range(5):
+        asyncio.run(_seed_at(db, "path.p1_p2_hl_order", old, 9_000.0))
+    asyncio.run(_seed_at(db, "path.p1_p2_hl_order", recent, 300.0))
+
+    whole = runner.invoke(app, ["report", "--db", str(db), "-c", "config.yaml.example"])
+    windowed = runner.invoke(
+        app,
+        ["report", "--db", str(db), "-c", "config.yaml.example", "--days", "7"],
+    )
+    # The old 9 s sample blows the 2 s budget; the window leaves only the 300 ms.
+    assert "PRUDENT" in whole.stdout
+    assert "PRUDENT" not in windowed.stdout
+    assert "7 derniers jours" in windowed.stdout
+
+
+def test_the_window_can_empty_the_report_and_says_so(tmp_path: Path) -> None:
+    db = tmp_path / "stale.db"
+    old = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+    asyncio.run(_seed_at(db, "path.p1_p2_hl_order", old, 300.0))
+    result = runner.invoke(
+        app,
+        ["report", "--db", str(db), "-c", "config.yaml.example", "--days", "7"],
+    )
+    assert result.exit_code == 2
+    assert "7 derniers jours" in result.stdout
+
+
+def test_the_report_always_names_its_journal_and_window(tmp_path: Path) -> None:
+    """A number without its provenance is how the wrong base went unnoticed."""
+    db = tmp_path / "named.db"
+    asyncio.run(_seed(db, {"path.p1_p2_hl_order": [300.0]}))
+    result = runner.invoke(app, ["report", "--db", str(db), "-c", "config.yaml.example"])
+    assert "named.db" in result.stdout
+    assert "tout le journal" in result.stdout
+
+
+def test_the_json_artifact_carries_the_verdict(tmp_path: Path) -> None:
+    db = tmp_path / "artifact.db"
+    out = tmp_path / "nested" / "report.json"
+    asyncio.run(_seed(db, {"path.p1_p2_hl_order": [300.0, 420.0]}))
+    result = runner.invoke(
+        app,
+        ["report", "--db", str(db), "-c", "config.yaml.example", "--json", str(out)],
+    )
+    assert result.exit_code == 1
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["m1_speed_criterion_met"] is False
+    assert payload["database"].endswith("artifact.db")
+    p1 = next(p for p in payload["critical_paths"] if p["key"] == "P1/P2")
+    assert p1["samples"] == 2
+    assert p1["budget_ms"] == 2_000.0
+    # P4 declares the leg M1 cannot measure, so a reader knows what was excused.
+    p4 = next(p for p in payload["critical_paths"] if p["key"] == "P4")
+    assert p4["unmeasured_legs"]
+
+
+def test_the_report_stamps_the_journal_it_read(tmp_path: Path) -> None:
+    """The evidence travels with the journal, not with the machine.
+
+    A report about another campaign must not unlock this one, so the stamp
+    goes into the base that was read.
+    """
+    db = tmp_path / "stamped.db"
+    asyncio.run(_seed(db, {"path.p1_p2_hl_order": [300.0]}))
+    runner.invoke(app, ["report", "--db", str(db), "-c", "config.yaml.example"])
+
+    async def _read() -> tuple[str | None, str | None]:
+        store = StateStore(db)
+        await store.open()
+        try:
+            return (
+                await store.kv_get(M1_REPORT_STAMP_KEY),
+                await store.kv_get(M1_REPORT_STATUS_KEY),
+            )
+        finally:
+            await store.close()
+
+    stamp, status = asyncio.run(_read())
+    assert stamp is not None
+    assert status == "ECHEC"  # only one of the five paths has samples

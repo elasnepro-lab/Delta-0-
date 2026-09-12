@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
@@ -25,13 +25,16 @@ from web3 import AsyncWeb3
 
 from delta0 import __version__
 from delta0.alerts import AlertSink, build_sink, make_alert_processor
-from delta0.config import Config, load_config
+from delta0.config import Config, RuntimeMode, load_config
 from delta0.decision import target_state
 from delta0.executor import AaveTraceExecutor
 from delta0.hl_executor import HLTraceExecutor
 from delta0.latency import (
+    M1_REPORT_STAMP_KEY,
+    M1_REPORT_STATUS_KEY,
     PathVerdict,
     evaluate_all,
+    live_gate_refusal,
     m1_acceptance_met,
     needs_prudent_mode,
     path_meets_m1,
@@ -520,6 +523,7 @@ async def _run_tracer(
         await alert_sink.start()
     store = StateStore(db_path)
     await store.open()
+    await _assert_m1_report_fresh(store, cfg)
 
     w3 = AsyncWeb3(
         build_provider(settings.arbitrum_rpc_primary, settings.arbitrum_rpc_fallback),
@@ -602,6 +606,34 @@ def _start_hl_stream(cfg: Config, settings: Settings) -> HyperliquidStream | Non
         )
         return None
     return stream
+
+
+async def _assert_m1_report_fresh(store: StateStore, cfg: Config) -> None:
+    """README §14 : pas de mode LIVE sans rapport M1 de moins de 30 jours.
+
+    Le contrôle porte sur le `mode` de la config, pas sur `--live-micro-ops` :
+    les micro-ops du traceur sont la façon dont on PRODUIT le rapport, donc les
+    exiger avant lui rendrait la porte infranchissable. Ce qui est gardé, c'est
+    le passage du châssis en LIVE ou LIVE_SMALL, c'est-à-dire le moment où du
+    capital est réellement exposé.
+
+    L'estampille est lue dans le journal que le bot s'apprête à écrire, pas
+    dans un fichier de côté : un rapport portant sur une autre campagne ne peut
+    pas déverrouiller celle-ci.
+    """
+    if cfg.mode is RuntimeMode.DRY_RUN:
+        return
+    refusal = live_gate_refusal(
+        await store.kv_get(M1_REPORT_STAMP_KEY),
+        await store.kv_get(M1_REPORT_STATUS_KEY),
+    )
+    if refusal is None:
+        return
+    console.print(
+        f"[bold red]REFUS[/bold red] : mode {cfg.mode.value} demandé mais {refusal}. "
+        f"Lancer [bold]delta0 report --db <base>[/bold] sur ce journal d'abord.",
+    )
+    raise typer.Exit(code=8)
 
 
 async def _reconcile_boot(store: StateStore, watcher: LiveWatcher, *, strict: bool) -> bool:
@@ -778,31 +810,126 @@ def _wire_micro_op_executors(
 def report(
     db: Annotated[Path, typer.Option("--db")] = _DEFAULT_DB,
     config: Annotated[Path, typer.Option("--config", "-c")] = _DEFAULT_CONFIG,
+    days: Annotated[
+        float | None,
+        typer.Option(
+            "--days",
+            help=(
+                "Ne lire que les N derniers jours. Sans cette borne, une base "
+                "qui a servi à plusieurs campagnes les mélange."
+            ),
+        ),
+    ] = None,
+    json_out: Annotated[
+        Path | None,
+        typer.Option("--json", help="Écrit aussi le rapport en JSON dans ce fichier."),
+    ] = None,
 ) -> None:
-    """Rapport TRACER : tirs à blanc + p50/p95 des 5 chemins critiques vs budget."""
-    asyncio.run(_run_report(db, config))
+    """Rapport TRACER : tirs à blanc + p50/p95 des 5 chemins critiques vs budget.
+
+    Code de sortie 0 si le critère de vitesse M1 est tenu, 1 sinon, 2 si la
+    base ne porte aucune mesure. Un script de livraison peut donc s'y fier.
+    """
+    raise typer.Exit(code=asyncio.run(_run_report(db, config, days, json_out)))
 
 
-async def _run_report(db_path: Path, config_path: Path) -> None:
+async def _run_report(
+    db_path: Path,
+    config_path: Path,
+    days: float | None = None,
+    json_out: Path | None = None,
+) -> int:
     cfg = load_config(config_path)
+    since = None
+    if days is not None:
+        since = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+
     store = StateStore(db_path)
     await store.open()
     try:
-        total = await store.count_shadow_intents()
-        by_prio = await store.shadow_intents_by_priority()
-        stats_by_path = await store.latency_stats_all()
-        failures = await store.failure_summary()
+        total = await store.count_shadow_intents(since)
+        by_prio = await store.shadow_intents_by_priority(since)
+        stats_by_path = await store.latency_stats_all(since)
+        failures = await store.failure_summary(since)
+
+        if not stats_by_path:
+            # The runbook trap: `delta0 report` without `--db` read
+            # `data/delta0.db`, a journal abandoned days before the campaign,
+            # and announced "critère NON satisfait" about the wrong database.
+            # Naming the path and refusing beats rendering a verdict on
+            # nothing.
+            console.print(
+                f"[bold red]REFUS[/bold red] : aucune mesure dans [bold]{db_path}[/bold]"
+                + (f" sur les {days:g} derniers jours." if days else ".")
+                + " Vérifier le chemin de la base : un rapport sur une base vide "
+                "n'est pas un rapport.",
+            )
+            return 2
+
+        factor = cfg.watchdog.latency_budget_factor
+        verdicts = evaluate_all(stats_by_path, budget_factor=factor)
+        met = m1_acceptance_met(verdicts)
+
+        # The stamp travels with the journal it describes, so a report about
+        # another campaign cannot unlock this one. Read by the LIVE gate.
+        await store.kv_set(M1_REPORT_STAMP_KEY, datetime.now(UTC).isoformat())
+        await store.kv_set(M1_REPORT_STATUS_KEY, "OK" if met else "ECHEC")
     finally:
         await store.close()
 
-    factor = cfg.watchdog.latency_budget_factor
-    verdicts = evaluate_all(stats_by_path, budget_factor=factor)
-
+    _render_window(db_path, days, stats_by_path)
     _render_shadow_intents(total, by_prio)
     _render_failures(failures)
     _render_critical_paths(verdicts, factor)
     _render_raw_latencies(stats_by_path)
     _render_m1_verdict(verdicts, factor)
+
+    if json_out is not None:
+        _write_json_report(json_out, db_path, days, verdicts, stats_by_path, met)
+        console.print(f"Artefact JSON écrit : [bold]{json_out}[/bold]")
+    return 0 if met else 1
+
+
+def _render_window(db_path: Path, days: float | None, stats: dict[str, dict[str, float]]) -> None:
+    """Say which journal and which window the numbers describe, always."""
+    samples = int(sum(s["count"] for s in stats.values()))
+    window = f"{days:g} derniers jours" if days is not None else "tout le journal"
+    console.print(f"Base : [bold]{db_path}[/bold] — {window} — {samples:,} échantillons.")
+
+
+def _write_json_report(
+    path: Path,
+    db_path: Path,
+    days: float | None,
+    verdicts: list[PathVerdict],
+    stats: dict[str, dict[str, float]],
+    met: bool,
+) -> None:
+    """The report as data, for a gate or a diff between two campaigns."""
+    payload = {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "database": str(db_path),
+        "window_days": days,
+        "m1_speed_criterion_met": met,
+        "critical_paths": [
+            {
+                "key": v.path.key,
+                "label": v.path.label,
+                "samples": v.samples,
+                "p50_ms": v.p50_ms,
+                "p95_ms": v.p95_ms,
+                "budget_ms": v.path.budget_ms,
+                "budget_ratio": v.budget_ratio,
+                "verdict": v.verdict,
+                "missing_legs": list(v.missing),
+                "unmeasured_legs": list(v.path.unmeasured),
+            }
+            for v in verdicts
+        ],
+        "raw_paths": stats,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 _MS_PER_S = 1_000.0

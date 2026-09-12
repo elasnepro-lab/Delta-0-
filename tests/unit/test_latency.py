@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -12,10 +13,12 @@ from delta0.latency import (
     elapsed_ms,
     evaluate_all,
     evaluate_path,
+    live_gate_refusal,
     m1_acceptance_met,
     needs_prudent_mode,
     now_perf,
     path_meets_m1,
+    report_age_days,
 )
 
 _FACTOR = 1.5
@@ -262,3 +265,57 @@ def test_an_unmeasurable_leg_does_not_excuse_being_over_budget() -> None:
     assert p4.p95_ms > p4.path.budget_ms
     assert not path_meets_m1(p4)
     assert not m1_acceptance_met(verdicts)
+
+
+# --- La porte LIVE (README §14, chantier 4.9) --------------------------------
+
+
+def test_no_report_at_all_is_named_apart() -> None:
+    """Three refusals, three messages.
+
+    An operator told "no report" goes and runs one; one told "report failed"
+    goes and reads it. A single message would send both to the wrong place.
+    """
+    refusal = live_gate_refusal(None, None)
+    assert refusal is not None
+    assert "aucun rapport" in refusal
+
+
+def test_a_fresh_passing_report_opens_the_gate() -> None:
+    now = datetime(2026, 9, 12, 12, 0, tzinfo=UTC)
+    stamp = (now - timedelta(days=3)).isoformat()
+    assert live_gate_refusal(stamp, "OK", now=now) is None
+
+
+def test_a_report_older_than_thirty_days_is_refused() -> None:
+    now = datetime(2026, 9, 12, 12, 0, tzinfo=UTC)
+    stamp = (now - timedelta(days=31)).isoformat()
+    refusal = live_gate_refusal(stamp, "OK", now=now)
+    assert refusal is not None
+    assert "31 jours" in refusal
+
+
+def test_the_boundary_day_is_still_accepted() -> None:
+    now = datetime(2026, 9, 12, 12, 0, tzinfo=UTC)
+    stamp = (now - timedelta(days=30)).isoformat()
+    assert live_gate_refusal(stamp, "OK", now=now) is None
+
+
+def test_a_recent_but_failing_report_is_refused() -> None:
+    now = datetime(2026, 9, 12, 12, 0, tzinfo=UTC)
+    stamp = (now - timedelta(hours=1)).isoformat()
+    refusal = live_gate_refusal(stamp, "ECHEC", now=now)
+    assert refusal is not None
+    assert "ECHEC" in refusal
+
+
+def test_an_unreadable_stamp_counts_as_no_report() -> None:
+    """A corrupted stamp must not read as a valid one."""
+    refusal = live_gate_refusal("pas une date", "OK")
+    assert refusal is not None
+    assert "aucun rapport" in refusal
+
+
+def test_a_naive_timestamp_is_read_as_utc() -> None:
+    now = datetime(2026, 9, 12, 12, 0, tzinfo=UTC)
+    assert report_age_days("2026-09-11T12:00:00", now=now) == pytest.approx(1.0)
