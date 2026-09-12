@@ -153,10 +153,19 @@ systemd il se fixe avec `--root`. Voir `deploy/README.md`.
 ## 5. Lire le rapport
 
 ```bash
-uv run delta0 report
+uv run delta0 report --db data/m1_run.db --days 7
 ```
 
-Trois tableaux : les tirs à blanc par priorité, les 5 chemins critiques
+**Toujours passer `--db`.** Sans lui la commande lit `data/delta0.db`, qui n'est
+pas la base de la campagne. Le rapport nomme désormais la base et la fenêtre sur
+sa première ligne, et refuse de rendre un verdict sur une base sans mesure.
+`--days` borne la lecture : une base ayant servi à plusieurs sessions les
+mélange, et les maxima viennent alors d'une autre campagne.
+
+Le code de sortie vaut 0 si le critère de vitesse est tenu, 1 sinon, 2 si la
+base est vide. `--json <fichier>` écrit le même rapport en données.
+
+Quatre tableaux : les tirs à blanc par priorité, les 5 chemins critiques
 (p95 vs budget README §7), les latences brutes par micro-op.
 
 | Verdict | Sens | Action |
