@@ -18,6 +18,7 @@ from contextvars import ContextVar
 from typing import Any, cast
 
 import structlog
+from structlog.types import Processor
 
 from delta0.config import RuntimeMode
 
@@ -57,8 +58,19 @@ def set_intent_id(intent_id: str) -> None:
     _intent_id_var.set(intent_id)
 
 
-def configure_logging(mode: RuntimeMode, level: str = "INFO") -> None:
-    """Wire structlog once at startup. Idempotent."""
+def configure_logging(
+    mode: RuntimeMode,
+    level: str = "INFO",
+    alert_processor: Processor | None = None,
+) -> None:
+    """Wire structlog once at startup. Idempotent.
+
+    `alert_processor` is inserted just before the renderer: after the level,
+    the timestamp and the run context have been attached, and before the dict
+    becomes a string. That position is the whole reason alerts live here
+    rather than at the call sites — no `log.error` anywhere in the codebase
+    can forget to raise the alarm.
+    """
     numeric_level = getattr(logging, level.upper(), logging.INFO)
     logging.basicConfig(
         format="%(message)s",
@@ -74,6 +86,9 @@ def configure_logging(mode: RuntimeMode, level: str = "INFO") -> None:
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
     ]
+
+    if alert_processor is not None:
+        processors.append(alert_processor)
 
     if mode is RuntimeMode.DRY_RUN:
         processors.append(structlog.dev.ConsoleRenderer(colors=True))

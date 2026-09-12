@@ -192,7 +192,49 @@ sudo systemctl restart systemd-journald
 Quatre-vingt-dix jours couvrent le délai d'un post-mortem et la durée de vie
 d'un agent Hyperliquid, qui expire au bout de 90 jours lui aussi.
 
-## 7. Mesurer avant de faire confiance
+## 7. Les alertes, avant d'allumer le service
+
+Sans elles, une panne ne se signale nulle part. C'est ce qui a laissé la jambe
+Aave morte 60 heures pendant la marche à blanc, avec 128 échecs journalisés que
+personne n'a lus. Deux valeurs à obtenir, une fois.
+
+**Le jeton du bot.** Dans Telegram, écrire à `@BotFather`, envoyer `/newbot`,
+choisir un nom et un identifiant. Il répond avec un jeton de la forme
+`123456789:AA...`. C'est un secret : il permet d'écrire au nom du bot.
+
+**L'identifiant de conversation.** Ouvrir une conversation avec le bot que l'on
+vient de créer et lui envoyer n'importe quoi, sinon il n'a pas le droit de
+parler le premier. Puis :
+
+```bash
+curl -s "https://api.telegram.org/bot<JETON>/getUpdates"   | python3 -c "import json,sys; print(json.load(sys.stdin)['result'][0]['message']['chat']['id'])"
+```
+
+Les deux vont dans `.env`, à côté des autres :
+
+```
+TG_TOKEN=123456789:AA...
+TG_CHAT=987654321
+```
+
+Au démarrage, le traceur annonce lequel des deux états s'applique :
+
+```
+Alertes Telegram actives (WARN et CRITICAL).
+ALERTES DÉSACTIVÉES : TG_TOKEN ou TG_CHAT absent du .env.
+```
+
+Ce n'est pas décoratif. Un réglage déclaré sans consommateur donne l'illusion
+d'un filet, et `TG_TOKEN` a passé tout M1 dans cet état. La ligne au démarrage
+est la garantie qu'on ne se raconte plus d'histoire.
+
+Ce qui part : les niveaux WARN et CRITICAL du README §12. Ce qui ne part pas
+encore : le digest quotidien, qui *est* le tableau d'exactitude et attend les
+dimensions comptables. Les répétitions se regroupent sur une fenêtre de quinze
+minutes — la première alerte sort tout de suite, les suivantes reviennent en un
+résumé, pour que 86 échecs identiques ne produisent pas 86 messages.
+
+## 8. Mesurer avant de faire confiance
 
 Dix minutes d'observation, puis comparaison avec la référence mesurée à la
 maison pendant la marche à blanc : snapshot p95 à 950 ms.

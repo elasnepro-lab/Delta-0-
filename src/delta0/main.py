@@ -24,6 +24,7 @@ from rich.table import Table
 from web3 import AsyncWeb3
 
 from delta0 import __version__
+from delta0.alerts import AlertSink, build_sink, make_alert_processor
 from delta0.config import Config, load_config
 from delta0.decision import target_state
 from delta0.executor import AaveTraceExecutor
@@ -391,7 +392,16 @@ def tracer(
     _check_execution_flags(cfg, live_micro_ops=live_micro_ops, rehearse=rehearse)
 
     settings = load_settings()
-    configure_logging(cfg.mode)
+
+    # Le puits d'alertes se construit avant la journalisation, puisqu'il en
+    # devient un processeur. `build_sink` rend None quand le canal n'est pas
+    # configure, et on l'annonce a l'ecran : un filet dont on ignore s'il est
+    # arme n'est pas un filet. C'est le sens du chantier 5.1.
+    alert_sink = build_sink(cfg, settings)
+    configure_logging(
+        cfg.mode,
+        alert_processor=make_alert_processor(alert_sink) if alert_sink else None,
+    )
     log = get_logger("tracer")
     run_id = new_run_id()
     duration_s = _parse_duration(duration) if duration else None
@@ -416,6 +426,14 @@ def tracer(
     # printed at boot so a wrong root is caught before it matters, not during
     # the incident it was supposed to stop.
     console.print(f"Arrêt propre : créer [bold]{project_root / 'KILL'}[/bold]")
+    if alert_sink is None:
+        console.print(
+            "[bold yellow]ALERTES DÉSACTIVÉES[/bold yellow] : TG_TOKEN ou TG_CHAT "
+            "absent du .env. Une panne ne sera signalée nulle part — c'est ce "
+            "qui a laissé la jambe Aave morte 60 h pendant la marche à blanc.",
+        )
+    else:
+        console.print("Alertes Telegram [bold green]actives[/bold green] (WARN et CRITICAL).")
     if rehearse:
         console.print(
             "[bold yellow]RÉPÉTITION[/bold yellow] : executors câblés, "
@@ -435,6 +453,7 @@ def tracer(
             use_ws=not no_ws,
             rehearse=rehearse,
             project_root=project_root,
+            alert_sink=alert_sink,
         ),
     )
 
@@ -477,8 +496,11 @@ async def _run_tracer(
     use_ws: bool,
     rehearse: bool = False,
     project_root: Path | None = None,
+    alert_sink: AlertSink | None = None,
 ) -> None:
     root = resolve_root(project_root)
+    if alert_sink is not None:
+        await alert_sink.start()
     store = StateStore(db_path)
     await store.open()
 
@@ -538,6 +560,10 @@ async def _run_tracer(
         if stream is not None:
             stream.stop()
         await store.close()
+        # En dernier, pour que les alertes levees pendant la fermeture des
+        # autres ressources aient encore un canal ouvert pour sortir.
+        if alert_sink is not None:
+            await alert_sink.stop()
     console.print(f"[bold green]TRACER terminé[/bold green] — {n} tirs à blanc journalisés.")
     console.print("Rapport : [bold]delta0 report[/bold]")
 
