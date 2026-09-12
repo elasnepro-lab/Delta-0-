@@ -144,7 +144,8 @@ Prévues, pas découvertes :
   bug `signed.rawTransaction` (web3 v6 → v7) a survécu aux trois premiers
   niveaux et n'est tombé qu'au premier tir réel. Faire tourner
   `AaveTraceExecutor` lui-même contre anvil, avec une clé jetable.
-- **Les 4 apports restés sur la branche locale `side-commit`** : porte LIVE du
-  README §14 (refus de passer LIVE sans rapport M1 de moins de 30 jours), fenêtre
-  `--days` sur le rapport, artefact JSON, code de sortie non nul. À porter dans
-  le design de `main`, puis supprimer la branche.
+- ~~**Les 4 apports restés sur la branche locale `side-commit`**~~ — **fait**
+  au chantier 4.9 (`0f72aa5`) : porte LIVE du README §14, fenêtre `--days`,
+  artefact JSON, code de sortie non nul. La branche n'a pas été fusionnée mais
+  réécrite : elle partait d'avant la correction de la définition de P1/P2 et
+  aurait ramené la mauvaise. Branche supprimée le 2026-09-12.
