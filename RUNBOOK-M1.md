@@ -165,8 +165,11 @@ mélange, et les maxima viennent alors d'une autre campagne.
 Le code de sortie vaut 0 si le critère de vitesse est tenu, 1 sinon, 2 si la
 base est vide. `--json <fichier>` écrit le même rapport en données.
 
-Quatre tableaux : les tirs à blanc par priorité, les 5 chemins critiques
-(p95 vs budget README §7), les latences brutes par micro-op.
+Quatre tableaux : les tirs à blanc par priorité, **les intentions en échec
+groupées par cause**, les 5 chemins critiques (p95 vs budget README §7), et les
+latences brutes par micro-op. Le tableau des échecs vient avant les latences :
+une jambe qui a cessé de tirer deux jours avant la fin n'est pas une jambe
+rapide, et le rapport n'avait aucun endroit pour le dire.
 
 | Verdict | Sens | Action |
 |---|---|---|
