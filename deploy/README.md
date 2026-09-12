@@ -52,20 +52,46 @@ elle n'a rien à faire dans un dossier synchronisé ni dans un dépôt git.
 
 ## 2. Installation
 
+Debian 12 n'a ni `git` ni `uv`. L'outillage d'abord :
+
+```bash
+sudo apt update && sudo apt install -y git curl ca-certificates
+curl -LsSf https://astral.sh/uv/install.sh | sudo env UV_INSTALL_DIR=/usr/local/bin sh
+uv --version
+```
+
+`uv` va dans `/usr/local/bin` pour être visible de tous les comptes, y compris
+celui du service. Il gère aussi sa propre version de Python, donc le 3.11 de
+Debian ne contraint rien.
+
+Puis le compte, les répertoires et le dépôt :
+
 ```bash
 sudo useradd --system --home /opt/delta0 --shell /usr/sbin/nologin delta0
 sudo install -d -o delta0 -g delta0 /opt/delta0 /var/lib/delta0
 
-# Le dépôt, puis les dépendances
-sudo -u delta0 git clone <url> /opt/delta0
-cd /opt/delta0 && sudo -u delta0 uv sync
+sudo -u delta0 git clone -b phase0-verites-onchain \
+    https://github.com/elasnepro-lab/Delta-0-.git /opt/delta0
+cd /opt/delta0 && sudo -u delta0 env HOME=/opt/delta0 uv sync
 
 # La config et les secrets
 sudo -u delta0 cp config.yaml.example config.yaml   # puis ajuster
 sudo -u delta0 install -m 600 /dev/null .env        # puis remplir
 ```
 
-`.env` reste en 600 et appartient à `delta0` : il porte la clé maître.
+`HOME=/opt/delta0` est nécessaire parce que le compte est `--system` et que
+`uv` a besoin d'un répertoire personnel inscriptible pour son cache.
+
+`.env` reste en 600 et appartient à `delta0`. À ce stade il ne contient que
+`ARBITRUM_RPC_PRIMARY` et `BOT_MASTER_ADDRESS`, qui sont les deux seuls
+réglages obligatoires — l'adresse est publique. **Ne pas y mettre la clé
+maître**, voir la dernière section.
+
+Vérifier que le binaire attendu par l'unité systemd existe :
+
+```bash
+/opt/delta0/.venv/bin/delta0 version
+```
 
 ## 3. L'horloge, avant tout le reste
 
@@ -117,6 +143,37 @@ sudo systemctl restart systemd-journald
 
 Quatre-vingt-dix jours couvrent le délai d'un post-mortem et la durée de vie
 d'un agent Hyperliquid, qui expire au bout de 90 jours lui aussi.
+
+## 6. Mesurer avant de faire confiance
+
+Dix minutes d'observation, puis comparaison avec la référence mesurée à la
+maison pendant la marche à blanc : snapshot p95 à 950 ms.
+
+```bash
+sudo -u delta0 /opt/delta0/.venv/bin/delta0 tracer \
+    --root /opt/delta0 --db /var/lib/delta0/probe.db -d 10m --cadence 5
+sudo -u delta0 /opt/delta0/.venv/bin/delta0 report --db /var/lib/delta0/probe.db
+```
+
+Plus lent que chez soi veut dire que la machine ou son fournisseur RPC est le
+mauvais choix, et il vaut mieux le savoir avant d'y installer la boucle. La
+distance, elle, ne se voit pas : l'aller-retour réseau vaut 22 ms vers
+Hyperliquid contre 237 ms de traitement chez eux. Le levier de vitesse est la
+cadence et le regroupement des lectures RPC, pas la géographie.
+
+## La clé maître n'a rien à faire ici pour l'instant
+
+Le traceur en DRY_RUN ne signe rien : il lui suffit de l'URL du RPC et de
+l'adresse maître, qui est publique. C'est tout ce dont la phase 3 a besoin pour
+être écrite et validée, puisque ce qu'on vient chercher sur cette machine est
+un Linux où `add_signal_handler` existe.
+
+La clé arrive avec le chantier 5.3, quand il y aura deux signataires : un agent
+Hyperliquid sur le serveur, qui peut passer des ordres mais ne peut ni
+transférer ni retirer, et la clé maître ailleurs pour le pont et l'écrémage.
+Cette frontière est une contrainte de la place, mesurée en phase 0, pas une
+bonne pratique optionnelle. Provisionner maintenant et signer plus tard n'est
+donc pas un compromis, c'est l'ordre juste.
 
 ## Ce qui n'est pas fait ici
 
