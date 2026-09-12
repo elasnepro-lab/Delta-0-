@@ -9,7 +9,7 @@ import pytest
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-from delta0.main import _parse_duration, app
+from delta0.main import _parse_duration, app, resolve_root, resolve_under_root
 from delta0.settings import load_settings
 from delta0.state import StateStore
 
@@ -148,3 +148,40 @@ def test_unit_suite_cannot_see_the_operator_env() -> None:
     """
     with pytest.raises(ValidationError):
         load_settings()
+
+
+def test_root_defaults_to_the_working_directory() -> None:
+    assert resolve_root(None) == Path.cwd().resolve()
+
+
+def test_root_is_made_absolute(tmp_path: Path) -> None:
+    """A relative --root under systemd would reintroduce the cwd dependency."""
+    nested = tmp_path / "checkout" / ".." / "checkout"
+    (tmp_path / "checkout").mkdir()
+    resolved = resolve_root(nested)
+    assert resolved.is_absolute()
+    assert ".." not in resolved.parts
+
+
+def test_relative_paths_resolve_under_the_root(tmp_path: Path) -> None:
+    assert resolve_under_root(Path("data/x.db"), tmp_path) == tmp_path / "data/x.db"
+
+
+def test_absolute_paths_ignore_the_root(tmp_path: Path) -> None:
+    absolute = (tmp_path / "elsewhere.db").resolve()
+    assert resolve_under_root(absolute, Path("/other")) == absolute
+
+
+def test_tracer_refuses_a_root_that_does_not_exist(tmp_path: Path) -> None:
+    """Caught before the config is even read: a wrong root invalidates everything.
+
+    Under systemd a typo in WorkingDirectory used to mean the KILL file was
+    looked for in a directory nobody would ever write to, in silence.
+    """
+    missing = tmp_path / "not-a-checkout"
+    result = runner.invoke(
+        app,
+        ["tracer", "--root", str(missing), "-c", "config.yaml.example", "-d", "1s"],
+    )
+    assert result.exit_code == 7
+    assert "racine introuvable" in result.stdout

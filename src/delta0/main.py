@@ -62,6 +62,30 @@ _DEFAULT_CONFIG = Path("config.yaml")
 _DEFAULT_DB = Path("data/delta0.db")
 
 
+def resolve_root(root: Path | None) -> Path:
+    """Absolute project root: where the KILL files are looked for.
+
+    `Path.cwd()` was the implicit answer until now, which is correct when the
+    operator runs the bot from a shell sitting in the checkout, and silently
+    wrong under systemd if `WorkingDirectory` is not the checkout. A KILL file
+    looked for in the wrong directory is an emergency stop that does nothing
+    and says nothing, so the root becomes an explicit option, is resolved to
+    an absolute path, and is printed at boot.
+    """
+    return (root or Path.cwd()).resolve()
+
+
+def resolve_under_root(path: Path, root: Path) -> Path:
+    """Resolve a relative path against the project root, leave absolute alone.
+
+    Keeps `--root` a single lever: pointing it at the checkout moves the
+    config, the database and the KILL files together. With no `--root` the
+    root is the working directory, so relative defaults resolve exactly as
+    they did before.
+    """
+    return path if path.is_absolute() else root / path
+
+
 def _parse_duration(spec: str) -> float:
     """Parse durations like '30s', '10m', '2h', '7d' into seconds."""
     spec = spec.strip().lower()
@@ -337,8 +361,27 @@ def tracer(
             ),
         ),
     ] = False,
+    root: Annotated[
+        Path | None,
+        typer.Option(
+            "--root",
+            help=(
+                "Racine du projet : où les fichiers KILL sont cherchés et où "
+                "les chemins relatifs de --config et --db sont résolus. "
+                "Défaut : le répertoire courant. À fixer explicitement sous "
+                "systemd."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """M1 marche à blanc — observe, décide, journalise (aucune exécution par défaut)."""
+    project_root = resolve_root(root)
+    if not project_root.is_dir():
+        console.print(f"[bold red]REFUS[/bold red]: racine introuvable: {project_root}")
+        raise typer.Exit(code=7)
+    config = resolve_under_root(config, project_root)
+    db = resolve_under_root(db, project_root)
+
     cfg = load_config(config)
 
     # Coherence of the execution flags against the config is checked FIRST,
@@ -364,7 +407,15 @@ def tracer(
         rehearse=rehearse,
         confirmed_kinds=confirmed_kinds,
         ws_enabled=not no_ws,
+        project_root=str(project_root),
+        kill_file=str(project_root / "KILL"),
+        db_path=str(db),
+        config_path=str(config),
     )
+    # The operator's only emergency brake is a file. Its absolute path is
+    # printed at boot so a wrong root is caught before it matters, not during
+    # the incident it was supposed to stop.
+    console.print(f"Arrêt propre : créer [bold]{project_root / 'KILL'}[/bold]")
     if rehearse:
         console.print(
             "[bold yellow]RÉPÉTITION[/bold yellow] : executors câblés, "
@@ -383,6 +434,7 @@ def tracer(
             confirmed_kinds,
             use_ws=not no_ws,
             rehearse=rehearse,
+            project_root=project_root,
         ),
     )
 
@@ -424,7 +476,9 @@ async def _run_tracer(
     confirmed_kinds: list[str],
     use_ws: bool,
     rehearse: bool = False,
+    project_root: Path | None = None,
 ) -> None:
+    root = resolve_root(project_root)
     store = StateStore(db_path)
     await store.open()
 
@@ -437,7 +491,7 @@ async def _run_tracer(
         user_address=settings.bot_master_address,
     )
     hl = HyperliquidReader(cfg.venues.hl_api, user_address=settings.bot_master_address)
-    watchdog = Watchdog(config=cfg.watchdog, project_root=Path.cwd())
+    watchdog = Watchdog(config=cfg.watchdog, project_root=root)
 
     # WS feed: fresher mark price than REST polling, and the only source of
     # HL liquidation events (P1). A WS that refuses to start degrades the
@@ -465,6 +519,7 @@ async def _run_tracer(
                 w3=w3,
                 confirmed_kinds=confirmed_kinds,
                 rehearse=rehearse,
+                project_root=root,
             )
 
         loop = TracerLoop(
@@ -571,6 +626,7 @@ def _wire_micro_op_executors(
     w3: AsyncWeb3,  # type: ignore[type-arg]
     confirmed_kinds: list[str],
     rehearse: bool,
+    project_root: Path,
 ) -> tuple[AaveTraceExecutor, HLTraceExecutor, BridgeExecutor]:
     """Instantiate the three micro-op executors.
 
@@ -602,7 +658,7 @@ def _wire_micro_op_executors(
             )
             raise typer.Exit(code=3)
 
-    guard = MicroOpsGuard(config=cfg.tracer, project_root=Path.cwd())
+    guard = MicroOpsGuard(config=cfg.tracer, project_root=project_root)
     for kind in confirmed_kinds:
         if kind not in ALLOWED_OP_KINDS:
             console.print(f"[bold red]REFUS[/bold red]: op_kind inconnu: {kind!r}")

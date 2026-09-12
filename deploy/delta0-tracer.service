@@ -1,0 +1,57 @@
+[Unit]
+Description=Delta-0- TRACER (marche a blanc M1)
+Documentation=file:///opt/delta0/RUNBOOK-M1.md
+# Le bot ne fait rien d'utile sans reseau ni horloge juste : les signatures
+# Hyperliquid sont horodatees et un decalage les fait refuser.
+After=network-online.target chronyd.service
+Wants=network-online.target chronyd.service
+
+[Service]
+Type=simple
+User=delta0
+Group=delta0
+
+# WorkingDirectory sert encore a une chose : `.env` est lu relativement au
+# repertoire courant (pydantic-settings, `env_file=".env"`). Si ce chemin est
+# faux le bot refuse de demarrer avec le code 3, donc l'erreur est bruyante.
+WorkingDirectory=/opt/delta0
+
+# --root est la protection contre l'erreur SILENCIEUSE : c'est la racine ou les
+# fichiers KILL sont cherches. Sans elle la racine etait `Path.cwd()`, donc un
+# WorkingDirectory inattendu faisait chercher le frein d'urgence dans un
+# repertoire ou personne n'ecrirait jamais, sans un mot.
+# La base sort du depot : voir BACKLOG-M2 §5, une base SQLite en WAL n'a rien a
+# faire dans un dossier synchronise, ni dans un depot git.
+ExecStart=/usr/local/bin/uv run delta0 tracer \
+    --root /opt/delta0 \
+    --config /opt/delta0/config.yaml \
+    --db /var/lib/delta0/m1_run.db \
+    --cadence 5
+
+# Redemarrage systematique, mais pas en boucle serree : un RPC injoignable ou
+# un .env casse se repareraient a la main, pas en 200 relances par minute.
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Les journaux sont la seule source du post-mortem (README §16).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=delta0
+
+# Arret propre. Le fichier KILL reste la voie normale : il laisse la boucle
+# sortir au cycle suivant plutot qu'au milieu d'un cycle Aave.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+# Surface reduite : le bot lit le depot, ecrit la base et rien d'autre.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/delta0
+ReadOnlyPaths=/opt/delta0
+
+[Install]
+WantedBy=multi-user.target

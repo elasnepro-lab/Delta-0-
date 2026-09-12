@@ -145,6 +145,11 @@ transaction contre un état qu'on n'a pas pu vérifier.
 Arrêt propre à tout moment : créer un fichier `KILL` à la racine. Le guard
 refuse alors toute nouvelle micro-op et la boucle sort au cycle suivant.
 
+« À la racine » veut dire à la racine que le tracer a affichée au démarrage, pas
+au répertoire courant du terminal où l'on tape la commande. Le chemin absolu du
+fichier attendu est écrit dans le journal de boot et affiché à l'écran ; sous
+systemd il se fixe avec `--root`. Voir `deploy/README.md`.
+
 ## 5. Lire le rapport
 
 ```bash
