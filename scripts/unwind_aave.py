@@ -13,9 +13,18 @@ unless `--execute` is passed, and simulates every step with `eth_call` first —
 a step that would revert is reported instead of paid for.
 
 Steps, each skipped when unnecessary:
-  1. approve(Pool, debt + 1 USDC buffer)  — headroom for interest accrued
-  2. repay(USDC, MAX_UINT256, mode=2)     — closes debt AND accrued interest
-  3. withdraw(USDC, MAX_UINT256)          — rounding-proof, see aave_findings.md
+  1. withdraw(USDC, shortfall)            — only when the wallet cannot fund the repay
+  2. approve(Pool, debt + 1 USDC buffer)  — headroom for interest accrued
+  3. repay(USDC, MAX_UINT256, mode=2)     — closes debt AND accrued interest
+  4. withdraw(USDC, MAX_UINT256)          — rounding-proof, see aave_findings.md
+
+Step 1 exists because the M1 marche à blanc produced the case the original
+three-step plan could not handle: the tracer deposited 5 USDC per cycle without
+ever taking them back, so the wallet ended poorer than the debt (2,97 against
+35,01) and `repay` reverted on `ERC20: transfer amount exceeds balance`. The
+collateral is the only source of USDC, so some of it has to come back first.
+How much can safely come back is derived from the liquidation threshold read
+on-chain, never from a constant.
 
 Gas limits carry the same margin as the executors (`delta0.gas`): the revert
 that created this mess is the reason that margin exists.
@@ -116,11 +125,81 @@ _DATA_PROVIDER_ABI: list[dict[str, Any]] = [
             {"name": "usageAsCollateralEnabled", "type": "bool"},
         ],
     },
+    {
+        "name": "getReserveConfigurationData",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [{"name": "asset", "type": "address"}],
+        "outputs": [
+            {"name": "decimals", "type": "uint256"},
+            {"name": "ltv", "type": "uint256"},
+            {"name": "liquidationThreshold", "type": "uint256"},
+            {"name": "liquidationBonus", "type": "uint256"},
+            {"name": "reserveFactor", "type": "uint256"},
+            {"name": "usageAsCollateralEnabled", "type": "bool"},
+            {"name": "borrowingEnabled", "type": "bool"},
+            {"name": "stableBorrowRateEnabled", "type": "bool"},
+            {"name": "isActive", "type": "bool"},
+            {"name": "isFrozen", "type": "bool"},
+        ],
+    },
 ]
+
+# Health factor the pre-withdraw must leave standing. The withdraw only has to
+# survive the seconds until the repay lands, but a position at HF 1.01 between
+# two transactions is not a position we want to own, so ask for a wide margin.
+_MIN_HF_AFTER_PREWITHDRAW = 2.0
+
+# Interest keeps accruing between the pre-withdraw and the repay. Same buffer
+# the approve already carries, for the same reason.
+_REPAY_BUFFER = 10**USDC_DECIMALS
 
 
 def _usdc(raw: int) -> str:
     return f"{raw / 10**USDC_DECIMALS:.6f}"
+
+
+def plan_prewithdraw(
+    *,
+    wallet: int,
+    debt: int,
+    collateral: int,
+    lt_bps: int,
+) -> tuple[int, str | None]:
+    """How much collateral must come back before the repay can be funded.
+
+    Returns `(amount, refusal)`. `amount` is 0 when the wallet already covers
+    the debt plus its buffer. `refusal` is a printable reason when no safe
+    amount exists, in which case the caller must not send anything: taking the
+    position below the liquidation threshold to close it would be worse than
+    leaving it open.
+    """
+    needed = debt + _REPAY_BUFFER
+    if wallet >= needed:
+        return 0, None
+
+    shortfall = needed - wallet
+    if collateral == 0:
+        return 0, (
+            f"il manque {_usdc(shortfall)} USDC pour rembourser et il n'y a "
+            f"aucun collateral a retirer"
+        )
+    if lt_bps == 0:
+        return 0, (
+            "le seuil de liquidation lu on-chain vaut 0 : impossible de borner "
+            "un retrait sur, refus"
+        )
+
+    # collateral_after * LT >= debt * HF_target, LT en points de base.
+    required_after = -(-debt * int(_MIN_HF_AFTER_PREWITHDRAW * 10_000) // lt_bps)
+    withdrawable = collateral - required_after
+    if shortfall > withdrawable:
+        return 0, (
+            f"il manque {_usdc(shortfall)} USDC pour rembourser, et seuls "
+            f"{_usdc(max(0, withdrawable))} sont retirables en gardant "
+            f"HF >= {_MIN_HF_AFTER_PREWITHDRAW:g} (LT {lt_bps / 100:.2f} %)"
+        )
+    return shortfall, None
 
 
 async def _send(
@@ -193,17 +272,35 @@ async def main() -> int:
     collateral, _stable_debt, debt = data[0], data[1], data[2]
     wallet = await usdc.functions.balanceOf(user).call()
     allowance = await usdc.functions.allowance(user, pool_addr).call()
+    reserve = await provider.functions.getReserveConfigurationData(usdc_addr).call()
+    lt_bps = int(reserve[2])
 
     print(f"wallet     : {user}")
     print(f"USDC libre : {_usdc(wallet)}")
     print(f"collateral : {_usdc(collateral)}")
     print(f"dette      : {_usdc(debt)}")
     print(f"allowance  : {_usdc(allowance)}")
+    print(f"LT on-chain: {lt_bps / 100:.2f} %")
     print()
 
     if collateral == 0 and debt == 0:
         print("Rien a deboucler — position deja fermee.")
         return 0
+
+    prewithdraw, refusal = plan_prewithdraw(
+        wallet=wallet,
+        debt=debt,
+        collateral=collateral,
+        lt_bps=lt_bps,
+    )
+    if refusal is not None:
+        print(f"REFUS: {refusal}")
+        return 4
+    if prewithdraw > 0:
+        print(
+            f"Le portefeuille ne finance pas le repay : retrait prealable de "
+            f"{_usdc(prewithdraw)} USDC de collateral.\n",
+        )
 
     if not execute:
         print("MODE SIMULATION — aucune transaction ne sera envoyee.\n")
@@ -226,6 +323,7 @@ async def main() -> int:
         debt=debt,
         collateral=collateral,
         allowance=allowance,
+        prewithdraw=prewithdraw,
     ):
         return 1
 
@@ -245,8 +343,15 @@ async def _unwind(
     debt: int,
     collateral: int,
     allowance: int,
+    prewithdraw: int = 0,
 ) -> bool:
-    """Run approve -> repay -> withdraw, skipping what is already unnecessary."""
+    """Run withdraw -> approve -> repay -> withdraw, skipping the unnecessary."""
+    if prewithdraw > 0 and not await step(
+        f"withdraw(USDC, {_usdc(prewithdraw)}) — financer le repay",
+        pool.functions.withdraw(usdc_addr, prewithdraw, user),
+    ):
+        return False
+
     if debt > 0:
         headroom = debt + 10**USDC_DECIMALS  # dette + 1 USDC pour les interets
         if allowance >= headroom:
