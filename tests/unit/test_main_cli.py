@@ -185,3 +185,60 @@ def test_tracer_refuses_a_root_that_does_not_exist(tmp_path: Path) -> None:
     )
     assert result.exit_code == 7
     assert "racine introuvable" in result.stdout
+
+
+async def _seed_failures(db: Path, rows: list[tuple[str, str, str | None]]) -> None:
+    store = StateStore(db)
+    await store.open()
+    try:
+        for i, (action, created_at, cause) in enumerate(rows):
+            async with store.transaction() as conn:
+                await conn.execute(
+                    """INSERT INTO intents
+                       (id, created_at, action, priority, params_json, reason,
+                        status, updated_at)
+                       VALUES (?, ?, ?, 3, '{}', 'micro-op M1-B2', 'failed', ?)""",
+                    (f"i{i}", created_at, action, created_at),
+                )
+            if cause is not None:
+                await store.record_intent_failure(f"i{i}", cause)
+    finally:
+        await store.close()
+
+
+def test_report_says_so_when_nothing_failed(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["report", "--db", str(tmp_path / "clean.db"), "-c", "config.yaml.example"],
+    )
+    assert result.exit_code == 0
+    assert "Aucune intention en échec" in result.stdout
+
+
+def test_report_groups_failures_by_cause(tmp_path: Path) -> None:
+    """The repeating cause must not bury the distinct ones.
+
+    Shape taken from the real campaign: one defect repeating every cycle plus
+    a couple of isolated failures. Ordered by count, the repeat comes first and
+    its last occurrence dates the end of the outage.
+    """
+    db = tmp_path / "failed.db"
+    asyncio.run(
+        _seed_failures(
+            db,
+            [
+                ("aave_supply", "2026-09-10T08:00:00+00:00", "revert_gas | tx=0x1"),
+                ("aave_supply", "2026-09-10T08:30:00+00:00", "revert_gas | tx=0x2"),
+                ("aave_supply", "2026-09-11T08:14:59+00:00", "revert_gas | tx=0x3"),
+                ("hl_post_only_cancel", "2026-09-05T08:33:37+00:00", None),
+            ],
+        ),
+    )
+    result = runner.invoke(app, ["report", "--db", str(db), "-c", "config.yaml.example"])
+    assert result.exit_code == 0
+    assert "total: 4" in result.stdout
+    assert "revert_gas" in result.stdout
+    # An unrecorded cause is named as such, never rendered as a blank.
+    assert "non enregistrée" in result.stdout
+    # Grouped, so the three identical ones are one row carrying a count.
+    assert "aave_supply" in result.stdout

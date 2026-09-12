@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from delta0 import failure
 from delta0.config import Config
 from delta0.hl_api import ensure_ok
 from delta0.latency import elapsed_ms, measurement_path, now_perf
@@ -272,12 +273,13 @@ class HLTraceExecutor:
                 cancel_started = now_perf()
                 await self._call_exchange_cancel(exchange, self._coin, order_id)
                 cancel_ms = elapsed_ms(cancel_started)
-        except Exception:
-            await self._mark_intent_status(intent_id, "failed", None)
+        except Exception as e:
+            entry = await self._journal_failure(intent_id, e)
             log.exception(
                 "hl_op_failed",
                 message="hl_post_only_cancel: échec du round-trip",
                 intent_id=intent_id,
+                failure=entry,
             )
             raise
 
@@ -388,6 +390,20 @@ class HLTraceExecutor:
             (intent_id, now, json.dumps(params, sort_keys=True, default=str), now),
         )
         await self._store._conn.commit()
+
+    async def _journal_failure(self, intent_id: str, exc: BaseException) -> str:
+        """Mark the intent failed AND record why, then hand back the entry.
+
+        Hyperliquid nests a refusal inside a `status: ok` envelope, so
+        `ensure_ok` turns it into an exception whose message already carries
+        the venue's own words (voir memory/hl_findings.md). The two writes
+        belong together: a failed intent without its cause is what left the M1
+        campaign unreadable.
+        """
+        entry = failure.from_exception(exc).journal_entry()
+        await self._mark_intent_status(intent_id, "failed", None)
+        await self._store.record_intent_failure(intent_id, entry)
+        return entry
 
     async def _mark_intent_status(
         self,

@@ -30,6 +30,7 @@ from typing import Any, Literal
 from eth_typing import ChecksumAddress
 from web3 import AsyncWeb3
 
+from delta0 import failure
 from delta0.config import Config
 from delta0.gas import with_gas_margin
 from delta0.latency import elapsed_ms, measurement_path, now_perf
@@ -424,12 +425,15 @@ class AaveTraceExecutor:
             signed = self._w3.eth.account.sign_transaction(tx, private_key=self._pkey())
             tx_hash = await self._w3.eth.send_raw_transaction(signed.raw_transaction)
             receipt = await self._w3.eth.wait_for_transaction_receipt(tx_hash)
-        except Exception:
+        except Exception as e:
+            cause = failure.from_exception(e)
             await self._mark_intent_status(intent_id, "failed", None)
+            await self._store.record_intent_failure(intent_id, cause.journal_entry())
             log.exception(
                 "op_send_failed",
                 message=f"{op_kind}: envoi ou attente de reçu en échec",
                 intent_id=intent_id,
+                failure=cause.journal_entry(),
             )
             raise
 
@@ -438,12 +442,22 @@ class AaveTraceExecutor:
         gas_used = int(receipt.get("gasUsed", 0))
         status = int(receipt.get("status", 0))
         if status != 1:
+            cause = await failure.diagnose_revert(
+                call=call,
+                receipt=receipt,
+                tx_hash=tx_hash.hex(),
+                sender=self._master,
+                gas_used=gas_used,
+                gas_limit=int(tx["gas"]),
+            )
             await self._mark_intent_status(intent_id, "failed", [tx_hash.hex()])
+            await self._store.record_intent_failure(intent_id, cause.journal_entry())
             log.error(
                 "op_reverted",
-                message=f"{op_kind}: transaction reverted",
+                message=f"{op_kind}: transaction reverted — {cause.journal_entry()}",
                 intent_id=intent_id,
                 tx_hash=tx_hash.hex(),
+                failure=cause.journal_entry(),
             )
             return OpResult(
                 intent_id=intent_id,

@@ -36,6 +36,7 @@ from typing import Any, Literal
 from eth_typing import ChecksumAddress
 from web3 import AsyncWeb3
 
+from delta0 import failure
 from delta0.config import Config
 from delta0.gas import with_gas_margin
 from delta0.hl_api import ensure_ok, is_ok, response_detail
@@ -206,12 +207,15 @@ class BridgeExecutor:
             # `bridge_in_submit` latency recorded for a withdrawal the venue
             # declined to perform.
             ensure_ok(result, "retrait du pont")
-        except Exception:
+        except Exception as e:
+            cause = failure.from_exception(e)
             await self._mark_intent_status(intent_id, "failed", None)
+            await self._store.record_intent_failure(intent_id, cause.journal_entry())
             log.exception(
                 "bridge_in_failed",
                 message="bridge_in: échec du retrait HL",
                 intent_id=intent_id,
+                failure=cause.journal_entry(),
             )
             raise
 
@@ -388,12 +392,15 @@ class BridgeExecutor:
             signed = self._w3.eth.account.sign_transaction(tx, private_key=self._pkey())
             tx_hash = await self._w3.eth.send_raw_transaction(signed.raw_transaction)
             receipt = await self._w3.eth.wait_for_transaction_receipt(tx_hash)
-        except Exception:
+        except Exception as e:
+            cause = failure.from_exception(e)
             await self._mark_intent_status(intent_id, "failed", None)
+            await self._store.record_intent_failure(intent_id, cause.journal_entry())
             log.exception(
                 f"{op_kind}_failed",
                 message=f"{op_kind}: envoi ou attente de reçu en échec",
                 intent_id=intent_id,
+                failure=cause.journal_entry(),
             )
             raise
 
@@ -401,11 +408,21 @@ class BridgeExecutor:
         await self._store.record_latency(f"path.{op_kind}_submit", duration_ms)
         status_int = int(receipt.get("status", 0))
         if status_int != 1:
+            cause = await failure.diagnose_revert(
+                call=call,
+                receipt=receipt,
+                tx_hash=tx_hash.hex(),
+                sender=self._master,
+                gas_used=int(receipt.get("gasUsed", 0)),
+                gas_limit=int(tx["gas"]),
+            )
             await self._mark_intent_status(intent_id, "failed", [tx_hash.hex()])
+            await self._store.record_intent_failure(intent_id, cause.journal_entry())
             log.error(
                 f"{op_kind}_reverted",
-                message=f"{op_kind}: transaction reverted",
+                message=f"{op_kind}: transaction reverted — {cause.journal_entry()}",
                 intent_id=intent_id,
+                failure=cause.journal_entry(),
             )
             return BridgeLegResult(
                 intent_id=intent_id,

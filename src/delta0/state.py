@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS intents (
     reason       TEXT NOT NULL,
     status       TEXT NOT NULL CHECK (status IN ('pending','sent','confirmed','failed')),
     tx_hashes    TEXT,
-    updated_at   TEXT NOT NULL
+    updated_at   TEXT NOT NULL,
+    failure      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_intents_status ON intents(status);
 CREATE INDEX IF NOT EXISTS idx_intents_created ON intents(created_at);
@@ -125,11 +126,71 @@ class StateStore:
         await self._conn.execute("PRAGMA synchronous=NORMAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._conn.executescript(_SCHEMA_SQL)
+        await self._add_missing_columns()
         await self._conn.execute(
             "INSERT OR IGNORE INTO schema_meta (version, applied_at) VALUES (?, ?)",
             (SCHEMA_VERSION, datetime.now(UTC).isoformat()),
         )
         await self._conn.commit()
+
+    async def _add_missing_columns(self) -> None:
+        """Add nullable columns that a database created earlier does not have.
+
+        `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so a new
+        column never reaches a journal that already holds a campaign — and the
+        journals we most want to read are exactly the old ones. A real
+        migration runner with `SCHEMA_VERSION` honoured is chantier 4.6; until
+        then, adding a nullable column is idempotent and cannot lose a row.
+        """
+        assert self._conn is not None, "StateStore not opened"
+        async with self._conn.execute("PRAGMA table_info(intents)") as cur:
+            existing = {str(row[1]) async for row in cur}
+        if "failure" not in existing:
+            await self._conn.execute("ALTER TABLE intents ADD COLUMN failure TEXT")
+
+    async def record_intent_failure(self, intent_id: str, cause: str) -> None:
+        """Attach the cause of a failure to an intent already marked failed.
+
+        Kept out of `_mark_intent_status` on purpose: that helper is duplicated
+        across the three executors and chantier 4.1 is going to collapse them.
+        One method here means that refactor cannot drop the cause on the way.
+        """
+        assert self._conn is not None, "StateStore not opened"
+        await self._conn.execute(
+            "UPDATE intents SET failure = ?, updated_at = ? WHERE id = ?",
+            (cause, datetime.now(UTC).isoformat(), intent_id),
+        )
+        await self._conn.commit()
+
+    async def failure_summary(self) -> list[tuple[str, str, int, str]]:
+        """Failed intents grouped by action and cause, newest example first.
+
+        Grouped on purpose. The M1 campaign held 128 failures of which 123 were
+        the same cause repeating every thirty minutes: a flat list buries the
+        five that were distinct, which are the ones worth reading.
+        """
+        assert self._conn is not None, "StateStore not opened"
+        async with self._conn.execute(
+            """SELECT action,
+                      COALESCE(failure, 'cause non enregistrée'),
+                      COUNT(*)   AS n,
+                      MAX(created_at) AS last_seen
+                 FROM intents
+                WHERE status = 'failed'
+             GROUP BY action, COALESCE(failure, 'cause non enregistrée')
+             ORDER BY n DESC, last_seen DESC""",
+        ) as cur:
+            return [(str(r[0]), str(r[1]), int(r[2]), str(r[3])) async for r in cur]
+
+    async def intent_failure(self, intent_id: str) -> str | None:
+        """The recorded cause, or None when the intent did not fail."""
+        assert self._conn is not None, "StateStore not opened"
+        async with self._conn.execute(
+            "SELECT failure FROM intents WHERE id = ?",
+            (intent_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return None if row is None or row[0] is None else str(row[0])
 
     async def close(self) -> None:
         if self._conn is not None:

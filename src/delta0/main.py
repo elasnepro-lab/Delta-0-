@@ -746,6 +746,7 @@ async def _run_report(db_path: Path, config_path: Path) -> None:
         total = await store.count_shadow_intents()
         by_prio = await store.shadow_intents_by_priority()
         stats_by_path = await store.latency_stats_all()
+        failures = await store.failure_summary()
     finally:
         await store.close()
 
@@ -753,6 +754,7 @@ async def _run_report(db_path: Path, config_path: Path) -> None:
     verdicts = evaluate_all(stats_by_path, budget_factor=factor)
 
     _render_shadow_intents(total, by_prio)
+    _render_failures(failures)
     _render_critical_paths(verdicts, factor)
     _render_raw_latencies(stats_by_path)
     _render_m1_verdict(verdicts, factor)
@@ -795,6 +797,27 @@ def _render_shadow_intents(total: int, by_prio: dict[int, int]) -> None:
         table.add_row(f"P{prio_val}", str(by_prio[prio_val]))
     if not by_prio:
         table.add_row("—", "0")
+    console.print(table)
+
+
+def _render_failures(failures: list[tuple[str, str, int, str]]) -> None:
+    """Failed intents with their cause — silence here is the good outcome.
+
+    Rendered right after the shadow intents so that a campaign's failures are
+    read before its latencies. A fast path that stopped firing two days before
+    the end is not a fast path, and the previous report had no place to say so.
+    """
+    if not failures:
+        console.print("[green]Aucune intention en échec.[/green]")
+        return
+    total = sum(n for _, _, n, _ in failures)
+    table = Table(title=f"Intentions en échec par cause (total: {total})")
+    table.add_column("Action")
+    table.add_column("Cause enregistrée", overflow="fold")
+    table.add_column("Compte", justify="right")
+    table.add_column("Dernière", justify="right")
+    for action, cause, count, last_seen in failures:
+        table.add_row(action, cause, str(count), last_seen[:19])
     console.print(table)
 
 
