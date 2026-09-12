@@ -50,7 +50,50 @@ La base sort du dépôt exprès. `BACKLOG-M2.md` §5 le demande : une base SQLit
 en mode WAL tient trois fichiers qui doivent rester mutuellement cohérents, et
 elle n'a rien à faire dans un dossier synchronisé ni dans un dépôt git.
 
-## 2. Installation
+## 2. Premier accès et durcissement SSH
+
+Le parcours de commande OVH n'expose pas toujours de champ pour une clé
+publique. Quand c'est le cas, la machine est livrée en authentification par mot
+de passe et la clé se pose au premier accès.
+
+```bash
+# Depuis le poste, avec le mot de passe recu par courriel
+ssh-copy-id -i ~/.ssh/id_ed25519.pub <compte>@<ip>
+```
+
+**Puis vérifier que la clé fonctionne dans une SECONDE session, en gardant la
+première ouverte.** C'est l'ordre qui compte : couper les mots de passe avant
+d'avoir prouvé que la clé marche est la façon classique de s'enfermer dehors,
+et la seule sortie est alors la console de secours de l'hébergeur.
+
+```bash
+ssh -o PreferredAuthentications=publickey <compte>@<ip> 'echo cle ok'
+```
+
+Une fois cette preuve obtenue, et pas avant :
+
+```bash
+sudo tee /etc/ssh/sshd_config.d/durcissement.conf >/dev/null <<'EOF'
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin prohibit-password
+EOF
+sudo sshd -t && sudo systemctl reload ssh
+```
+
+`sshd -t` valide la configuration avant le rechargement : une faute de frappe
+refusée maintenant vaut mieux qu'un service SSH qui ne redémarre pas.
+
+Une IP publique reçoit des tentatives de connexion en permanence. Avec les mots
+de passe coupés elles ne peuvent plus aboutir, mais elles remplissent les
+journaux, ceux dont on vient de fixer la rétention :
+
+```bash
+sudo apt install -y fail2ban
+sudo systemctl enable --now fail2ban
+```
+
+## 3. Installation
 
 **Debian 13 (Trixie)**, la version stable actuelle. Rien dans ce qui suit n'est
 propre à une version : `apt`, `systemd`, `journald` et `chrony` sont identiques
@@ -98,7 +141,7 @@ Vérifier que le binaire attendu par l'unité systemd existe :
 /opt/delta0/.venv/bin/delta0 version
 ```
 
-## 3. L'horloge, avant tout le reste
+## 4. L'horloge, avant tout le reste
 
 ```bash
 sudo apt install chrony
@@ -110,7 +153,7 @@ chronyc tracking          # 'System time' doit rester sous 50 ms
 lectures, elle casse les écritures, et elle les casse en silence côté client :
 c'est la place qui refuse.
 
-## 4. Le service
+## 5. Le service
 
 ```bash
 sudo cp /opt/delta0/deploy/delta0-tracer.service /etc/systemd/system/
@@ -133,7 +176,7 @@ journalctl -u delta0 -f          # le guard refuse toute nouvelle micro-op
 sudo rm /opt/delta0/KILL
 ```
 
-## 5. Rétention des journaux
+## 6. Rétention des journaux
 
 ```bash
 sudo mkdir -p /etc/systemd/journald.conf.d
@@ -149,7 +192,7 @@ sudo systemctl restart systemd-journald
 Quatre-vingt-dix jours couvrent le délai d'un post-mortem et la durée de vie
 d'un agent Hyperliquid, qui expire au bout de 90 jours lui aussi.
 
-## 6. Mesurer avant de faire confiance
+## 7. Mesurer avant de faire confiance
 
 Dix minutes d'observation, puis comparaison avec la référence mesurée à la
 maison pendant la marche à blanc : snapshot p95 à 950 ms.
