@@ -532,6 +532,7 @@ async def _run_tracer(
         web3=w3,
         pool_address=cfg.venues.aave_pool,
         user_address=settings.bot_master_address,
+        multicall_address=cfg.venues.multicall3_address,
     )
     hl = HyperliquidReader(cfg.venues.hl_api, user_address=settings.bot_master_address)
     watchdog = Watchdog(config=cfg.watchdog, project_root=root)

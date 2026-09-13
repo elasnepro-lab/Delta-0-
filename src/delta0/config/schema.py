@@ -192,6 +192,11 @@ class VenuesConfig(BaseModel):
     # Hyperliquid Bridge2 contract on Arbitrum — recipient of USDC transfers
     # for HL account funding. See README §9.3.
     hl_bridge2: str = "0x2Df1c51E09aECF9cacB7bc98cB1742757f163dF7"
+    # Multicall3, deployed at the same address on every EVM chain. The Aave leg
+    # of a snapshot goes through it as ONE eth_call instead of eleven: the
+    # 2026-09-13 quota alert showed the M1 run alone had spent ~80 % of the
+    # free RPC allowance, and a LIVE cadence would need five times that.
+    multicall3_address: str = "0xcA11bde05977b3631167028862bE2a173976CA11"
 
     @field_validator(
         "usdc_address",
@@ -200,6 +205,7 @@ class VenuesConfig(BaseModel):
         "aave_pool",
         "aave_data_provider",
         "hl_bridge2",
+        "multicall3_address",
     )
     @classmethod
     def _check_eth_address(cls, v: str) -> str:

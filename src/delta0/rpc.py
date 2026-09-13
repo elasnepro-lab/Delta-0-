@@ -55,6 +55,8 @@ DEFAULT_COOLDOWN_S = 180.0
 # Methods that must never be replayed on another endpoint — see module docstring.
 NON_FAILOVER_METHODS: frozenset[str] = frozenset({"eth_sendRawTransaction"})
 
+_CHAIN_ID = RPCEndpoint("eth_chainId")
+
 
 @dataclass
 class _Endpoint:
@@ -96,6 +98,12 @@ class FailoverProvider(AsyncBaseProvider):
         self._endpoints = [
             _Endpoint(url=u, provider=AsyncHTTPProvider(u)) for u in dict.fromkeys(kept)
         ]
+        # web3's validation middleware asks for the chain id before EVERY
+        # eth_call. Measured on 2026-09-13: 22 of the 34 requests of one Aave
+        # snapshot were eth_chainId. The answer cannot change for a chain, so
+        # the first successful one is kept. web3 has its own request cache, but
+        # it lives in the child provider's decorator, which this class bypasses.
+        self._chain_id_response: RPCResponse | None = None
 
     @property
     def endpoint_uri(self) -> str:
@@ -131,6 +139,14 @@ class FailoverProvider(AsyncBaseProvider):
         )
 
     async def make_request(self, method: RPCEndpoint, params: Any) -> RPCResponse:
+        if method == _CHAIN_ID and self._chain_id_response is not None:
+            return self._chain_id_response
+        response = await self._route(method, params)
+        if method == _CHAIN_ID and "result" in response:
+            self._chain_id_response = response
+        return response
+
+    async def _route(self, method: RPCEndpoint, params: Any) -> RPCResponse:
         start = self._current_index()
         order = [self._endpoints[start]]
         if str(method) not in NON_FAILOVER_METHODS:

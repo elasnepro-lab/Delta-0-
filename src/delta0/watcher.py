@@ -61,16 +61,12 @@ class LiveWatcher:
         # the two dictates wall time instead of their sum. `return_exceptions`
         # lets us record per-venue outcomes distinctly (README §11 needs
         # BLIND state per venue, not a single global fail flag).
-        aave_task = asyncio.gather(
-            self.aave.read_account_data(),
-            self.aave.read_token_balances(self.config.venues.wsteth_address),
-            self.aave.read_token_balances(self.config.venues.usdc_address),
-            self.aave.read_reserve_rates(self.config.venues.usdc_address),
-            self.aave.read_gas_balance_eth(),
-            self.aave.read_oracle_prices(
-                self.config.venues.wsteth_address,
-                self.config.venues.weth_address,
-            ),
+        # The Aave leg is a single Multicall3 eth_call: one request per cycle
+        # instead of eleven, and every number read at the same block.
+        aave_task = self.aave.read_snapshot(
+            wsteth_address=self.config.venues.wsteth_address,
+            usdc_address=self.config.venues.usdc_address,
+            weth_address=self.config.venues.weth_address,
         )
         hl_task = asyncio.gather(
             self.hl.read_market_meta(self.coin),
@@ -94,7 +90,12 @@ class LiveWatcher:
                 error=repr(aave_result),
             )
             raise aave_result
-        account, wsteth, usdc, usdc_rates, gas, oracle = aave_result
+        account = aave_result.account
+        wsteth = aave_result.wsteth
+        usdc = aave_result.usdc
+        usdc_rates = aave_result.usdc_rates
+        gas = aave_result.gas_eth
+        oracle = aave_result.oracle
         self.watchdog.mark_aave_ok(now=now_mono)
 
         # --- HL outcome -------------------------------------------------------

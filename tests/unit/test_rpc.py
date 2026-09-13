@@ -17,6 +17,7 @@ from delta0.rpc import FailoverProvider
 _OK = {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
 _BLOCK_NUMBER = RPCEndpoint("eth_blockNumber")
 _SEND_RAW = RPCEndpoint("eth_sendRawTransaction")
+_CHAIN_ID = RPCEndpoint("eth_chainId")
 
 
 class _FakeChild:
@@ -167,6 +168,39 @@ def test_an_empty_fallback_is_ignored() -> None:
 def test_no_url_at_all_is_refused() -> None:
     with pytest.raises(ValueError, match="aucune URL RPC"):
         FailoverProvider(["", ""])
+
+
+@pytest.mark.asyncio
+async def test_the_chain_id_is_asked_once() -> None:
+    """web3 asks for it before every eth_call: 22 of 34 requests of a snapshot."""
+    child = _FakeChild()
+    p = _provider(child)
+
+    first = await p.make_request(_CHAIN_ID, [])
+    for _ in range(5):
+        assert await p.make_request(_CHAIN_ID, []) == first
+
+    assert child.calls == ["eth_chainId"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_chain_id_is_not_remembered() -> None:
+    """Caching an error would pin it for the life of the process."""
+
+    class _ErrorsOnce(_FakeChild):
+        async def make_request(self, method: RPCEndpoint, params: object) -> dict[str, object]:
+            self.calls.append(str(method))
+            if len(self.calls) == 1:
+                return {"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "busy"}}
+            return dict(_OK)
+
+    child = _ErrorsOnce()
+    p = _provider(child)
+
+    assert "error" in await p.make_request(_CHAIN_ID, [])
+    assert await p.make_request(_CHAIN_ID, []) == _OK
+    assert await p.make_request(_CHAIN_ID, []) == _OK
+    assert child.calls == ["eth_chainId", "eth_chainId"]
 
 
 def test_the_api_key_never_reaches_a_log_line() -> None:
