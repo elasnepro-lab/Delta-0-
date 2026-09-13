@@ -292,7 +292,7 @@ Tout changement d'exposition se fait par tranches de 25 % de l'écart, une tranc
 - Serveur : VPS dédié, accès SSH par clé, mises à jour automatiques, horloge NTP (les signatures HL sont sensibles au temps).
 - RPC : fournisseur payant + fallback public, bascule automatique.
 - Kill-file : la présence d'un fichier `KILL` à la racine met le bot en pause propre (aucune nouvelle action, positions inchangées) ; `KILL_DEFLATE` déclenche SAFE_DEFLATE.
-- Aucune interface web exposée. Contrôle par CLI locale et Telegram (lecture seule + commandes limitées : pause, resume, deflate, status).
+- Aucune interface web exposée. Contrôle par CLI et fichiers KILL, sur le serveur via SSH, y compris depuis un téléphone. Telegram est un canal d'alertes sortant : le bot n'y lit rien, pour qu'un compte Telegram compromis ne donne aucun levier sur le capital.
 
 ---
 
@@ -420,7 +420,7 @@ Testnet Hyperliquid pour la jambe perp ; fork Arbitrum (anvil) pour la jambe Aav
 
 - Démarrer : en service systemd selon `deploy/README.md` ; en local, `delta0 --help` liste les commandes. Le bot démarre toujours en réconciliation, puis reprend l'état persistant.
 - Pause propre : créer le fichier `KILL`. Reprise : le supprimer puis commande `resume`.
-- Dégonflage d'urgence manuel : `KILL_DEFLATE` ou commande Telegram `deflate`.
+- Dégonflage d'urgence manuel : `KILL_DEFLATE`.
 - Intervention manuelle sur les positions : mettre en pause d'abord, TOUJOURS. Le bot réconciliera au resume.
 - Chaque CRITICAL exige un post-mortem écrit dans `incidents/` avant tout retour en LIVE.
 
@@ -436,7 +436,7 @@ Décisions figées (ne pas rouvrir pendant l'implémentation) :
 5. Le bot ne modifie jamais ses propres seuils ; tout changement de config exige un redémarrage explicite.
 6. Clés sur le serveur du bot, capital plafonné en conséquence.
 
-Non-objectifs v1 : multi-venue (y compris Lighter, réévalué seulement en cas de campagne de points confirmée), routage de funding, LRT en collatéral, interface web, optimisation fiscale, toute forme de prise de position directionnelle.
+Non-objectifs v1 : multi-venue (y compris Lighter, réévalué seulement en cas de campagne de points confirmée), routage de funding, LRT en collatéral, interface web, commandes par Telegram (les urgences n'attendent pas un humain, et SSH couvre l'intervention à distance), optimisation fiscale, toute forme de prise de position directionnelle.
 
 ---
 
