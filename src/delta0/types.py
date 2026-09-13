@@ -160,7 +160,33 @@ class Snapshot:
 
     @property
     def equity(self) -> float:
-        return self.collateral_usd + self.isolated_margin_usd - self.debt_usd
+        return equity_usd(
+            collateral_usd=self.collateral_usd,
+            isolated_margin_usd=self.isolated_margin_usd,
+            wallet_usdc=self.usdc_wallet_balance,
+            hl_free_usdc=self.hl_free_usdc,
+            debt_usd=self.debt_usd,
+        )
+
+
+def equity_usd(
+    *,
+    collateral_usd: float,
+    isolated_margin_usd: float,
+    wallet_usdc: float,
+    hl_free_usdc: float,
+    debt_usd: float,
+) -> float:
+    """What the machine is worth, in one place — README §5.
+
+    The free balances count: they are dollars owned. The status panel added
+    them after announcing "equity 0.00 $" with 169.80 $ on hand, while
+    `Snapshot.equity` kept the older formula, so the panel and the engine
+    disagreed on the number the solver sizes everything from. The HL free
+    balance is also where the reserve lives: leaving it out would make the
+    solver's own fixed point unreachable.
+    """
+    return collateral_usd + isolated_margin_usd + wallet_usdc + hl_free_usdc - debt_usd
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +196,7 @@ class TargetState:
     spot_target_usd: float
     notional_target_usd: float
     margin_target_usd: float
+    reserve_target_usd: float  # free USDC on HL, what P2 pours into the margin
     debt_target_usd: float
 
 

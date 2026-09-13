@@ -85,6 +85,10 @@ class Chassis:
         return FUNDING_APR * self.spot + STAKING_APR * self.spot - BORROW_APR * self.debt
 
 
+# Same formula on both sides, so any gap beyond float noise is a real disagreement.
+_MAX_DRIFT = 1e-9
+
+
 def solve(config: Config, *, lt: float, target_ltv: float | None = None) -> Chassis:
     """Build the chassis the bot would actually hold, config in hand."""
     target_ltv = config.target_ltv if target_ltv is None else target_ltv
@@ -205,6 +209,14 @@ def main() -> None:
     solved = target_state(equity=chassis.capital, config=config, cushion_usd=chassis.cushion)
     drift = abs(solved.spot_target_usd - chassis.spot) / chassis.spot
     print(f"\n  point fixe contre target_state : écart {100 * drift:.4f} %")
+    # Printing the gap was not enough: it read 7.06 % for days, because the
+    # solver ignored the HL reserve, and nothing failed. A classeur that
+    # disagrees with the code it describes must say so with its exit code.
+    if drift > _MAX_DRIFT:
+        raise SystemExit(
+            f"ÉCHEC : le solveur du bot et ce classeur divergent de {100 * drift:.4f} % "
+            "— l'un des deux est faux, ne rien décider sur ces chiffres."
+        )
 
 
 if __name__ == "__main__":

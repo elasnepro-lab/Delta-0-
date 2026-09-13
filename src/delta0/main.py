@@ -46,6 +46,7 @@ from delta0.safety import ALLOWED_OP_KINDS, MicroOpsGuard
 from delta0.settings import Settings, load_settings
 from delta0.state import StateStore
 from delta0.tracer import TracerLoop
+from delta0.types import equity_usd
 from delta0.venues.aave import AaveReader
 from delta0.venues.bridge import BridgeExecutor
 from delta0.venues.hl_stream import HyperliquidStream
@@ -199,12 +200,12 @@ async def _gather_status(cfg: Config, settings: Settings) -> dict[str, object]:
     # possede. Les omettre faisait annoncer « equite 0,00 $ » au lendemain de
     # la cloture de la campagne, avec 143 USDC sur Arbitrum et 26,79 sur
     # Hyperliquid.
-    equity = (
-        account.total_collateral_usd
-        + (position.isolated_margin_usd if position else 0.0)
-        + usdc_bal.wallet_balance
-        + hl_free
-        - account.total_debt_usd
+    equity = equity_usd(
+        collateral_usd=account.total_collateral_usd,
+        isolated_margin_usd=position.isolated_margin_usd if position else 0.0,
+        wallet_usdc=usdc_bal.wallet_balance,
+        hl_free_usdc=hl_free,
+        debt_usd=account.total_debt_usd,
     )
     # The cushion is the USDC sitting as Aave collateral — reserve, not fuel.
     cushion_usd = usdc_bal.atoken_balance
@@ -249,6 +250,7 @@ async def _gather_status(cfg: Config, settings: Settings) -> dict[str, object]:
                 "spot_target_usd": targets.spot_target_usd,
                 "notional_target_usd": targets.notional_target_usd,
                 "margin_target_usd": targets.margin_target_usd,
+                "reserve_target_usd": targets.reserve_target_usd,
                 "debt_target_usd": targets.debt_target_usd,
             }
             if targets
@@ -307,6 +309,7 @@ def _render_status(cfg: Config, data: dict[str, object]) -> None:
         t_table.add_row("Spot", f"${targets['spot_target_usd']:,.2f}")
         t_table.add_row("Notionnel", f"${targets['notional_target_usd']:,.2f}")
         t_table.add_row("Marge", f"${targets['margin_target_usd']:,.2f}")
+        t_table.add_row("Réserve HL", f"${targets['reserve_target_usd']:,.2f}")
         t_table.add_row("Dette", f"${targets['debt_target_usd']:,.2f}")
         console.print(t_table)
     else:

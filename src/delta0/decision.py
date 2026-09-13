@@ -63,11 +63,20 @@ class OperationalContext:
 def target_state(equity: float, config: Config, *, cushion_usd: float) -> TargetState:
     """Solve for the target state given current equity.
 
-    README section 3:
-        spot_target     = deployable * exposure_mult
+    README section 3, with m = exposure_mult and r = emergency.hl_reserve_pct:
+        spot_target     = m * deployable / (1 + m * r)
         notional_target = spot_target
         margin_target   = spot_target * target_margin_ratio
+        reserve_target  = spot_target * r
         debt_target     = target_ltv * spot_target
+
+    The HL reserve is capital held idle, like the cushion, so it cannot also be
+    leveraged. It is sized on the notional, which depends on what is deployed,
+    which depends on the reserve — hence the division rather than a subtraction.
+    Leaving it out built a spot 7 % larger than `scripts/classeur.py` (44 706 $
+    against 41 758 $ on 20 000 $) and kept nothing aside for P2, the only fast
+    defence of the up flank. The classeur showed the gap on every run; nothing
+    failed on it.
 
     `deployable` is equity MINUS the cushion. The cushion is emergency reserve:
     leveraging it would mean borrowing against the very money kept aside to
@@ -94,15 +103,19 @@ def target_state(equity: float, config: Config, *, cushion_usd: float) -> Target
     if deployable <= 0.0:
         raise ValueError(f"cushion {cushion_usd} leaves no deployable equity out of {equity}")
 
-    spot_target = deployable * config.exposure_mult
+    mult = config.exposure_mult
+    reserve_pct = config.emergency.hl_reserve_pct
+    spot_target = mult * deployable / (1.0 + mult * reserve_pct)
     notional_target = spot_target
     margin_target = spot_target * config.target_margin_ratio
+    reserve_target = spot_target * reserve_pct
     debt_target = config.target_ltv * spot_target
 
     return TargetState(
         spot_target_usd=spot_target,
         notional_target_usd=notional_target,
         margin_target_usd=margin_target,
+        reserve_target_usd=reserve_target,
         debt_target_usd=debt_target,
     )
 

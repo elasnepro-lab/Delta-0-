@@ -106,5 +106,12 @@ def test_delta_pct_zero_when_no_spot() -> None:
 
 def test_equity_reconstruction() -> None:
     s = _make_snapshot()
-    # collateral 51 000 + margin 5 000 - debt 35 000 = 21 000
-    assert s.equity == pytest.approx(21_000.0)
+    # collateral 51 000 + margin 5 000 + wallet 0 + HL free 1 000 - debt 35 000
+    assert s.equity == pytest.approx(22_000.0)
+
+
+def test_free_balances_count_in_equity() -> None:
+    """Dollars sitting free are owned: the engine and `status` must agree."""
+    base = _make_snapshot(usdc_wallet_balance=0.0, hl_free_usdc=0.0)
+    funded = _make_snapshot(usdc_wallet_balance=143.0, hl_free_usdc=26.79)
+    assert funded.equity - base.equity == pytest.approx(169.79)
