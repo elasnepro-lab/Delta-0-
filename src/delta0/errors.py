@@ -22,3 +22,11 @@ class Delta0Error(Exception):
 
 class VenueError(Delta0Error):
     """A venue answered, and the answer is not one the bot can act on."""
+
+
+class BootRefused(Delta0Error):  # noqa: N818 - mirrors SafetyRefused naming
+    """The boot checks found a state the bot must not start on.
+
+    Raised instead of a bare ValueError so the CLI can refuse with a readable
+    message and an exit code, not a traceback.
+    """

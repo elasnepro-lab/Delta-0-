@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from delta0.config import Config
 from delta0.decision import bands_incoherence, derive_bands
+from delta0.errors import BootRefused
 from delta0.logging import get_logger
 from delta0.state import StateStore
 from delta0.types import Snapshot
@@ -60,7 +61,7 @@ async def reconcile_at_boot(
             message=f"bandes d'urgence inutilisables — démarrage refusé : {problem}",
             lt=snapshot.aave_lt_wsteth,
         )
-        raise ValueError(f"emergency bands unusable against the on-chain LT: {problem}")
+        raise BootRefused(f"bandes d'urgence inutilisables face au LT on-chain : {problem}")
 
     bands = derive_bands(snapshot.aave_lt_wsteth, config)
     log.info(

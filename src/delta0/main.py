@@ -27,6 +27,7 @@ from delta0 import __version__
 from delta0.alerts import AlertSink, build_sink, make_alert_processor
 from delta0.config import Config, RuntimeMode, load_config
 from delta0.decision import target_state
+from delta0.errors import BootRefused
 from delta0.executor import AaveTraceExecutor
 from delta0.failure import OPERATIONAL_ERRORS
 from delta0.hl_client import make_exchange, make_info
@@ -538,6 +539,7 @@ async def _run_tracer(
         pool_address=cfg.venues.aave_pool,
         user_address=settings.bot_master_address,
         multicall_address=cfg.venues.multicall3_address,
+        data_provider_address=cfg.venues.aave_data_provider,
     )
     hl = HyperliquidReader(cfg.venues.hl_api, user_address=settings.bot_master_address)
     watchdog = Watchdog(config=cfg.watchdog, project_root=root)
@@ -669,7 +671,13 @@ async def _reconcile_boot(store: StateStore, watcher: LiveWatcher, *, strict: bo
         )
         return True
 
-    report: ReconcileReport = await reconcile_at_boot(store, snap, watcher.config)
+    try:
+        report: ReconcileReport = await reconcile_at_boot(store, snap, watcher.config)
+    except BootRefused as refusal:
+        # In every mode: bands that cannot hold are not a warning to observe
+        # through, they make every emergency decision meaningless.
+        console.print(f"[bold red]REFUS[/bold red]: {refusal}")
+        return False
     _render_reconcile(report)
     if report.warnings and strict:
         console.print(

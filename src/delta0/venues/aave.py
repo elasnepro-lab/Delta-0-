@@ -17,7 +17,7 @@ No writes. No approvals. No mutations. That is the point of M0.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from eth_abi.abi import decode as abi_decode
@@ -175,6 +175,28 @@ _MULTICALL3_ABI: list[dict[str, Any]] = [
         "outputs": [{"name": "balance", "type": "uint256"}],
     },
 ]
+# ProtocolDataProvider: a reserve's own risk parameters, which do not depend on
+# whether this account holds anything yet.
+_DATA_PROVIDER_ABI: list[dict[str, Any]] = [
+    {
+        "name": "getReserveConfigurationData",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [{"name": "asset", "type": "address"}],
+        "outputs": [
+            {"name": "decimals", "type": "uint256"},
+            {"name": "ltv", "type": "uint256"},
+            {"name": "liquidationThreshold", "type": "uint256"},
+            {"name": "liquidationBonus", "type": "uint256"},
+            {"name": "reserveFactor", "type": "uint256"},
+            {"name": "usageAsCollateralEnabled", "type": "bool"},
+            {"name": "borrowingEnabled", "type": "bool"},
+            {"name": "stableBorrowRateEnabled", "type": "bool"},
+            {"name": "isActive", "type": "bool"},
+            {"name": "isFrozen", "type": "bool"},
+        ],
+    },
+]
 _AGGREGATE3_SELECTOR = function_signature_to_4byte_selector("aggregate3((address,bool,bytes)[])")
 
 
@@ -280,6 +302,25 @@ def _account_data(account_tuple: tuple[int, ...], emode: int) -> AaveAccountData
     )
 
 
+def _with_reserve_threshold(
+    account: AaveAccountData, reserve_config: tuple[Any, ...]
+) -> AaveAccountData:
+    """An empty account's LT and LTV max, taken from the wstETH reserve itself.
+
+    Aave reports both as 0 for an account without collateral: they are averages
+    weighted by the collateral held, and there is none. The bands check rightly
+    refused a threshold of 0, which kept the bot from starting at all on an
+    empty account — the operator's, since the M1 position was closed. The
+    reserve's own parameters are what will apply from the first deposit.
+    Positions 1 and 2 of `getReserveConfigurationData`, in basis points.
+    """
+    return replace(
+        account,
+        liquidation_threshold=reserve_config[2] / 10_000.0,
+        ltv_max=reserve_config[1] / 10_000.0,
+    )
+
+
 def _token_balances(meta: _TokenMeta, atoken: int, debt: int, wallet: int) -> AaveTokenBalances:
     return AaveTokenBalances(
         atoken_balance=atoken / 10**meta.atoken_decimals,
@@ -310,8 +351,12 @@ class AaveReader:
         user_address: str,
         *,
         multicall_address: str | None = None,
+        data_provider_address: str | None = None,
     ) -> None:
         self._w3 = web3
+        self._data_provider: ChecksumAddress | None = (
+            AsyncWeb3.to_checksum_address(data_provider_address) if data_provider_address else None
+        )
         self._user: ChecksumAddress = AsyncWeb3.to_checksum_address(user_address)
         self._pool: AsyncContract = web3.eth.contract(
             address=AsyncWeb3.to_checksum_address(pool_address),
@@ -350,6 +395,10 @@ class AaveReader:
 
         The immutable metadata (token addresses, decimals, oracle) is fetched
         with single calls on the first cycle and cached, as before.
+
+        With a data provider configured, the wstETH reserve's risk parameters
+        ride in the same batch, and stand in for the account's when the account
+        holds no collateral (see `_with_reserve_threshold`). Still one request.
         """
         multicall = self._multicall
         if multicall is None:
@@ -379,6 +428,18 @@ class AaveReader:
             _call("prix oracle WETH", oracle.address, _ORACLE_ABI, "getAssetPrice", weth),
             _call("solde ETH (gaz)", multicall, _MULTICALL3_ABI, "getEthBalance", user),
         ]
+        data_provider = self._data_provider
+        if data_provider is not None:
+            calls.append(
+                _call(
+                    "configuration réserve wstETH",
+                    data_provider,
+                    _DATA_PROVIDER_ABI,
+                    "getReserveConfigurationData",
+                    wsteth,
+                )
+            )
+        results = await self._aggregate(multicall, calls)
         (
             account_tuple,
             (emode,),
@@ -392,9 +453,12 @@ class AaveReader:
             (wsteth_price,),
             (weth_price,),
             (gas_wei,),
-        ) = await self._aggregate(multicall, calls)
+        ) = results[:12]
+        account = _account_data(account_tuple, emode)
+        if data_provider is not None and account.total_collateral_usd == 0.0:
+            account = _with_reserve_threshold(account, results[12])
         return AaveSnapshotReads(
-            account=_account_data(account_tuple, emode),
+            account=account,
             wsteth=_token_balances(wsteth_meta, wsteth_atoken, wsteth_debt, wsteth_wallet),
             usdc=_token_balances(usdc_meta, usdc_atoken, usdc_debt, usdc_wallet),
             usdc_rates=_reserve_rates(usdc_reserve),

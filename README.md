@@ -276,6 +276,7 @@ Tout changement d'exposition se fait par tranches de 25 % de l'écart, une tranc
 - E-mode : désactivé, vérifié au boot (l'e-mode ETH interdirait l'emprunt USDC).
 - Approvals ERC-20 (USDC et wstETH vers le Pool, USDC vers le pont HL) : posées une fois au setup, montant plafonné, re-vérifiées au boot. Le chemin critique doit toujours être UNE transaction.
 - HF et LTV : toujours lus on-chain, jamais recalculés localement pour les décisions P1-P6 (le calcul local sert de contrôle de cohérence).
+- LT et LTV max : ceux du compte (`getUserAccountData`) dès qu'il porte du collatéral, puisque ce sont eux qui décident d'une liquidation. Sur un compte vide, Aave les rend à 0 : le bot prend alors ceux de la réserve wstETH (`ProtocolDataProvider.getReserveConfigurationData`), qui s'appliqueront dès le premier dépôt. Un LT qui reste illisible refuse le démarrage, avec un message et un code de sortie.
 - Montants envoyés on-chain : convertis en unités natives avec un arrondi explicite par opération. Vers le bas pour ce qui dépense ou crée de la dette (supply, borrow, withdraw, dépôt au pont), vers le haut pour une autorisation ou un remboursement (approve, repay, qu'Aave plafonne à la dette). Jamais `int(montant × 10**décimales)`, qui tronque vers zéro un montant USDC à six décimales sur 65. Les observations et les ratios de décision restent en flottants.
 
 ### 9.3 Pont

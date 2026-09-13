@@ -38,10 +38,6 @@ AWAITING_READER: dict[str, str] = {
     "regime.hysteresis_days": "8.6 — porte de régime",
     "slippage_max_bps": "8.1 — agrégateur de swap",
     "order_style": "8.3 — ordres maker puis traversée du spread",
-    "venues.aave_data_provider": (
-        "8.4 — LT de la réserve lu avant toute position : getUserAccountData rend 0 "
-        "sur un compte vide"
-    ),
     "live_small_cap_pct": "8.4 — plafond de capital en LIVE_SMALL",
     "env.hl_agent_address": "5.3 — deux signataires ; M1 signe avec la clé maître",
     "env.hl_agent_private_key": "5.3 — deux signataires ; M1 signe avec la clé maître",

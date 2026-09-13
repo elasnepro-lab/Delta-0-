@@ -21,6 +21,7 @@ from web3.types import RPCEndpoint, RPCResponse
 
 from delta0.venues.aave import (
     _ADDRESSES_PROVIDER_ABI,
+    _DATA_PROVIDER_ABI,
     _ERC20_BALANCE_ABI,
     _MULTICALL3_ABI,
     _ORACLE_ABI,
@@ -41,6 +42,7 @@ _A_USDC = "0x0000000000000000000000000000000000000A02"
 _D_USDC = "0x0000000000000000000000000000000000000D02"
 _PROVIDER = "0x0000000000000000000000000000000000000B01"
 _ORACLE = "0x0000000000000000000000000000000000000C01"
+_DATA_PROVIDER = "0x0000000000000000000000000000000000000E01"
 
 _AGGREGATE3 = function_signature_to_4byte_selector("aggregate3((address,bool,bytes)[])")
 _RAY = 10**27
@@ -100,6 +102,13 @@ class _Chain:
                 ),
             ),
             (_MULTICALL, _MULTICALL3_ABI, "getEthBalance", lambda _u: (self.gas_wei,)),
+            (
+                # Arbitrum's real wstETH reserve, read on-chain: LTV max 0.75, LT 0.79.
+                _DATA_PROVIDER,
+                _DATA_PROVIDER_ABI,
+                "getReserveConfigurationData",
+                lambda _asset: (18, 7_500, 7_900, 10_720, 1_500, True, False, False, True, False),
+            ),
         ]
         balances = {
             _A_WSTETH: (18, 16 * 10**18),
@@ -182,10 +191,19 @@ class _FakeProvider(AsyncBaseProvider):
 
 
 def _reader(
-    chain: _Chain, *, multicall: str | None = _MULTICALL
+    chain: _Chain,
+    *,
+    multicall: str | None = _MULTICALL,
+    data_provider: str | None = _DATA_PROVIDER,
 ) -> tuple[AaveReader, _FakeProvider]:
     provider = _FakeProvider(chain)
-    reader = AaveReader(AsyncWeb3(provider), _POOL, _USER, multicall_address=multicall)
+    reader = AaveReader(
+        AsyncWeb3(provider),
+        _POOL,
+        _USER,
+        multicall_address=multicall,
+        data_provider_address=data_provider,
+    )
     return reader, provider
 
 
@@ -272,3 +290,51 @@ async def test_a_reader_without_multicall_refuses_the_batch() -> None:
     with pytest.raises(MulticallError, match="aucune adresse Multicall3"):
         await _snapshot(reader)
     assert provider.requests == []
+
+
+# --- The liquidation threshold of an empty account ----------------------------------
+#
+# Aave reports LT 0 for an account without collateral. The bands check refused
+# that — rightly — which kept `delta0 tracer` from starting at all on the
+# operator's account, empty since the M1 position was closed (2026-09-14).
+
+
+def _empty_account(chain: _Chain) -> None:
+    max_uint = 2**256 - 1  # Aave's health factor for an account without debt
+    chain.on(_POOL, _POOL_ABI, "getUserAccountData", lambda _u: (0, 0, 0, 0, 0, max_uint))
+
+
+@pytest.mark.asyncio
+async def test_an_empty_account_takes_the_reserve_threshold() -> None:
+    chain = _Chain()
+    _empty_account(chain)
+    reader, _ = _reader(chain)
+    reads = await _snapshot(reader)
+    assert reads.account.liquidation_threshold == pytest.approx(0.79)
+    assert reads.account.ltv_max == pytest.approx(0.75)
+
+
+@pytest.mark.asyncio
+async def test_an_open_position_keeps_the_account_threshold() -> None:
+    """The account's LT is collateral-weighted (the USDC cushion counts): it wins."""
+    chain = _Chain()
+    chain.on(
+        _POOL,
+        _POOL_ABI,
+        "getUserAccountData",
+        lambda _u: (51_000 * 10**8, 35_000 * 10**8, 0, 7_880, 7_480, 1_148_000_000_000_000_000),
+    )
+    reader, _ = _reader(chain)
+    reads = await _snapshot(reader)
+    assert reads.account.liquidation_threshold == pytest.approx(0.788)
+    assert reads.account.ltv_max == pytest.approx(0.748)
+
+
+@pytest.mark.asyncio
+async def test_without_a_data_provider_an_empty_account_still_reads_zero() -> None:
+    """No silent default: the boot check then refuses, with a message."""
+    chain = _Chain()
+    _empty_account(chain)
+    reader, _ = _reader(chain, data_provider=None)
+    reads = await _snapshot(reader)
+    assert reads.account.liquidation_threshold == 0.0
