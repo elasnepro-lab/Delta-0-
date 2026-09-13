@@ -53,8 +53,9 @@ class Snapshot:
 
     Produced by the watcher, consumed by the pure decision engine.
     All amounts are in USD unless the field name says otherwise.
-    Balances are in native token units (Decimal-ish) — kept as float for now,
-    to be tightened to Decimal in M1 once the shape is stable.
+    Balances are in token units as floats: precise enough to observe and to
+    decide on ratios. Amounts only become exact where they are sent on-chain,
+    through `delta0.units.to_raw` and an explicit rounding (chantier 6.5).
     """
 
     ts: datetime

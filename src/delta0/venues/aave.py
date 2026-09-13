@@ -132,7 +132,7 @@ class AaveAccountData:
 
 @dataclass(frozen=True, slots=True)
 class AaveTokenBalances:
-    atoken_balance: float  # native units (float, tight to Decimal in M1)
+    atoken_balance: float  # token units; exactness is units.to_raw's job, on the way out
     variable_debt_balance: float
     wallet_balance: float  # free in the wallet — what an operation spends
 

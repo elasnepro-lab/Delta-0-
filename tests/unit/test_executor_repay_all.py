@@ -189,3 +189,55 @@ async def test_withdraw_all_notional_hint_respects_the_amount_cap(
         )
         with pytest.raises(SafetyRefused):
             await executor.withdraw_all(USDC, 50.0)
+
+
+@pytest.mark.parametrize(
+    ("amount", "repay_raw", "withdraw_raw"),
+    [
+        (8.12, 8_120_000, 8_120_000),  # int(8.12 * 10**6) used to send 8 119 999
+        (1.0000001, 1_000_001, 1_000_000),  # under a unit: repay rounds up, withdraw down
+    ],
+)
+@pytest.mark.asyncio
+async def test_amounts_reach_the_pool_rounded_the_way_each_operation_needs(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+    amount: float,
+    repay_raw: int,
+    withdraw_raw: int,
+) -> None:
+    """Chantier 6.5, end to end: what the Pool call is actually built with."""
+    cfg = config.model_copy(
+        update={
+            "tracer": config.tracer.model_copy(
+                update={"dry_run": True, "require_first_use_confirmation": False},
+            ),
+        },
+    )
+    guard = MicroOpsGuard(config=cfg.tracer, project_root=tmp_path)
+    for kind in ("aave_repay", "aave_withdraw"):
+        guard.confirm_kind(kind)
+    w3 = MagicMock()
+    fake_eth = _FakeEth(cfg.venues.aave_pool)
+    w3.eth = fake_eth
+
+    with patch("delta0.executor.AsyncWeb3") as async_web3_mock:
+        async_web3_mock.to_checksum_address.side_effect = lambda a: a
+        executor = AaveTraceExecutor(
+            web3=w3,
+            config=cfg,
+            store=store,
+            guard=guard,
+            master_address="0x000000000000000000000000000000000000dEaD",
+            chain_id=42161,
+        )
+        await executor.repay(USDC, amount)
+        await executor.withdraw(USDC, amount)
+
+    repay_args = fake_eth._pool_functions.last_repay_args
+    withdraw_args = fake_eth._pool_functions.last_withdraw_args
+    assert repay_args is not None
+    assert withdraw_args is not None
+    assert repay_args[1] == repay_raw  # (asset, amount, rate_mode, on_behalf_of)
+    assert withdraw_args[1] == withdraw_raw  # (asset, amount, to)

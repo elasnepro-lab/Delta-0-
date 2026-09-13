@@ -44,6 +44,7 @@ from delta0.latency import elapsed_ms, measurement_path, now_perf
 from delta0.logging import get_logger
 from delta0.safety import MicroOpsGuard
 from delta0.state import StateStore, deterministic_id
+from delta0.units import Rounding, to_raw
 
 log = get_logger(__name__)
 
@@ -341,7 +342,8 @@ class BridgeExecutor:
         amount_usdc: float,
     ) -> BridgeLegResult:
         decimals: int = await self._usdc_contract.functions.decimals().call()
-        raw_amount = int(amount_usdc * (10**decimals))
+        # A transfer never sends more than asked (chantier 6.5).
+        raw_amount = to_raw(amount_usdc, decimals, Rounding.DOWN)
 
         intent_id = deterministic_id(
             op_kind,

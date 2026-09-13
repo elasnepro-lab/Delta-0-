@@ -276,6 +276,7 @@ Tout changement d'exposition se fait par tranches de 25 % de l'écart, une tranc
 - E-mode : désactivé, vérifié au boot (l'e-mode ETH interdirait l'emprunt USDC).
 - Approvals ERC-20 (USDC et wstETH vers le Pool, USDC vers le pont HL) : posées une fois au setup, montant plafonné, re-vérifiées au boot. Le chemin critique doit toujours être UNE transaction.
 - HF et LTV : toujours lus on-chain, jamais recalculés localement pour les décisions P1-P6 (le calcul local sert de contrôle de cohérence).
+- Montants envoyés on-chain : convertis en unités natives avec un arrondi explicite par opération. Vers le bas pour ce qui dépense ou crée de la dette (supply, borrow, withdraw, dépôt au pont), vers le haut pour une autorisation ou un remboursement (approve, repay, qu'Aave plafonne à la dette). Jamais `int(montant × 10**décimales)`, qui tronque vers zéro un montant USDC à six décimales sur 65. Les observations et les ratios de décision restent en flottants.
 
 ### 9.3 Pont
 - Aller (Arbitrum -> HL) : transfert USDC natif vers Bridge2, crédité après finalité (~1 à 3 min). Surveiller le crédit via l'API avant toute étape suivante.

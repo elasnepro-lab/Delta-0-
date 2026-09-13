@@ -37,6 +37,7 @@ from delta0.latency import elapsed_ms, measurement_path, now_perf
 from delta0.logging import get_logger
 from delta0.safety import InsufficientBalance, MicroOpsGuard
 from delta0.state import StateStore, deterministic_id
+from delta0.units import Rounding, to_raw
 from delta0.venues.aave import AaveTokenBalances
 
 log = get_logger(__name__)
@@ -155,6 +156,19 @@ class OpResult:
     status: Literal["confirmed", "failed", "dry_run"]
     duration_ms: float
     gas_used: int | None
+
+
+# The one rounding each operation may apply when its amount becomes native units
+# (chantier 6.5). What spends or creates debt never exceeds the amount asked;
+# what authorizes or pays back never falls short of it. Aave caps a repay at the
+# outstanding debt, so rounding a repay up cannot overpay.
+_ROUNDING: dict[str, Rounding] = {
+    "aave_approve": Rounding.UP,
+    "aave_supply": Rounding.DOWN,
+    "aave_borrow": Rounding.DOWN,
+    "aave_repay": Rounding.UP,
+    "aave_withdraw": Rounding.DOWN,
+}
 
 
 class AaveTraceExecutor:
@@ -353,7 +367,7 @@ class AaveTraceExecutor:
             abi=_ERC20_MUT_ABI,
         )
         decimals: int = await contract.functions.decimals().call()
-        raw_amount = int(amount_native * (10**decimals))
+        raw_amount = to_raw(amount_native, decimals, _ROUNDING[op_kind])
         call = build_call(contract, raw_amount)
         return await self._journal_and_send(
             op_kind=op_kind,
@@ -376,7 +390,7 @@ class AaveTraceExecutor:
             abi=_ERC20_MUT_ABI,
         )
         decimals: int = await token.functions.decimals().call()
-        raw_amount = int(amount_native * (10**decimals))
+        raw_amount = to_raw(amount_native, decimals, _ROUNDING[op_kind])
         call = build_call(raw_amount)
         return await self._journal_and_send(
             op_kind=op_kind,
