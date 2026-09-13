@@ -358,10 +358,12 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def _check_recenter_bands(self) -> Config:
-        # Recenter must fire before pump (asymmetric bands, README section 1).
-        # Up flank: recenter_up < margin_ratio_pump translated to price? We keep it simple:
-        # recenter thresholds must be strictly positive and below the emergency thresholds
-        # measured in price space; the mapping is documented in the decision table.
+        # Only positivity is checked. Nothing verifies that recentering fires
+        # before the pumps: that ordering lives in price space, where it depends
+        # on the liquidation threshold read on-chain and on the margin ratio, so
+        # it cannot be settled from this file alone. `scripts/classeur.py` prints
+        # the down-flank bands in price moves; compare `recenter_down` to them by
+        # hand. The cushion floor is checked here for lack of a better home.
         if self.recenter_up <= 0 or self.recenter_down <= 0:
             raise ValueError("recenter thresholds must be strictly positive.")
         if self.cushion_floor_pct >= self.cushion_pct:
@@ -371,8 +373,9 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def _check_ltv_below_liquidation(self) -> Config:
         # The thresholds themselves depend on the on-chain LT, so they cannot be
-        # checked here — `derive_bands` builds them and `check_bands` refuses the
-        # boot when they collapse onto the target. What IS checkable without the
+        # checked here — `derive_bands` builds them, and `bands_incoherence`, run
+        # by `reconcile_at_boot`, raises and refuses the boot in every mode when
+        # they collapse onto the target or the LT reads 0. What IS checkable without the
         # chain: the widest margin must still leave the pump above the target,
         # whatever plausible LT we face. With LT >= target + widest margin the
         # pump sits above target by construction; below that the config can

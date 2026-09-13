@@ -179,7 +179,7 @@ Règles d'état :
 
 ## 7. Table de décision (ordre de priorité strict)
 
-Le moteur évalue de haut en bas et retourne la première action déclenchée. Latence max = budget d'exécution, mesuré par le watchdog. L'échelle des déclencheurs traduite en mouvement de prix, pour la config et le LT en vigueur, est publiée par `scripts/classeur.py`. Côté haut l'ordre est re-centrage, pompe, marge d'urgence, liquidation ; côté bas re-centrage, pompe, coussin, désendettement, liquidation.
+Le moteur évalue de haut en bas et retourne la première action déclenchée. Latence max = budget d'exécution, mesuré par le watchdog. Côté haut l'ordre est re-centrage, pompe, marge d'urgence, liquidation ; côté bas re-centrage, pompe, coussin, désendettement, liquidation. Pour le flanc bas, `scripts/classeur.py` traduit en baisse de prix les seuils de pompe, de coussin, de désendettement et la liquidation, pour la config et le LT en vigueur ; le re-centrage et le flanc haut n'y figurent pas, et rien ne vérifie automatiquement que le re-centrage tire avant les pompes.
 
 | P | Condition | Action | Chemin | Latence max |
 |---|---|---|---|---|
