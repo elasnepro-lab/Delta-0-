@@ -265,12 +265,15 @@ résumé, pour que 86 échecs identiques ne produisent pas 86 messages.
 
 ## 8. Mesurer avant de faire confiance
 
-Dix minutes d'observation, puis comparaison avec la référence mesurée à la
-maison pendant la marche à blanc : snapshot p95 à 950 ms.
+Quarante-huit heures d'observation en lecture seule, pour voir les heures
+chargées et pas seulement dix minutes calmes, puis comparaison avec une
+référence prise sur le poste **avec le même code**. Les 950 ms de p95 mesurés
+pendant la marche à blanc ne servent plus de référence : ils comptaient 34
+requêtes par snapshot, Multicall3 n'en envoie qu'une.
 
 ```bash
 sudo -u delta0 /opt/delta0/.venv/bin/delta0 tracer \
-    --root /opt/delta0 --db /var/lib/delta0/probe.db -d 10m --cadence 5
+    --root /opt/delta0 --db /var/lib/delta0/probe.db -d 2d --cadence 5
 sudo -u delta0 /opt/delta0/.venv/bin/delta0 report --db /var/lib/delta0/probe.db
 ```
 
