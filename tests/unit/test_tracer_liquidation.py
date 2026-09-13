@@ -16,33 +16,11 @@ from delta0.tracer import TracerLoop
 from delta0.types import Snapshot
 from delta0.venues.hl_stream import HyperliquidStream, UserEvent
 from delta0.watchdog import Watchdog
+from tests.world import reference_snapshot
 
 
 def _base_snap() -> Snapshot:
-    return Snapshot(
-        ts=datetime.now(UTC),
-        wsteth_atoken_balance=16.0,
-        wsteth_price_usd=3_125.0,
-        wsteth_eth_ratio=1.25,
-        usdc_atoken_balance=1_000.0,
-        usdc_variable_debt_balance=35_000.0,
-        usdc_wallet_balance=0.0,
-        hf=1.5,
-        aave_lt_wsteth=0.83,
-        aave_ltv_max_wsteth=0.80,
-        aave_emode=0,
-        mark_price=2_500.0,
-        short_size_eth=20.0,
-        isolated_margin_usd=5_000.0,
-        hl_free_usdc=1_000.0,
-        hl_maintenance_margin=0.02,
-        funding_last_hour=1.25e-5,
-        funding_30d_annualized=0.11,
-        borrow_apr=0.05,
-        gas_eth=0.01,
-        ws_last_tick_age_s=1.0,
-        rpc_ok=True,
-    )
+    return reference_snapshot(ts=datetime.now(UTC))
 
 
 @dataclass(slots=True)

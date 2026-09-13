@@ -213,6 +213,7 @@ class AaveTraceExecutor:
 
     async def approve(self, asset: str, amount_native: float) -> OpResult:
         """Approve the Aave Pool to pull `amount_native` of `asset`."""
+        self._guard.check("aave_approve", self._estimate_notional(asset, amount_native))
         return await self._erc20_write(
             op_kind="aave_approve",
             asset=asset,
@@ -224,6 +225,7 @@ class AaveTraceExecutor:
         )
 
     async def supply(self, asset: str, amount_native: float) -> OpResult:
+        self._guard.check("aave_supply", self._estimate_notional(asset, amount_native))
         await self._refuse_if_underfunded("aave_supply", asset, needed=amount_native)
         return await self._pool_write(
             op_kind="aave_supply",
@@ -238,6 +240,7 @@ class AaveTraceExecutor:
         )
 
     async def borrow(self, asset: str, amount_native: float) -> OpResult:
+        self._guard.check("aave_borrow", self._estimate_notional(asset, amount_native))
         return await self._pool_write(
             op_kind="aave_borrow",
             asset=asset,
@@ -252,6 +255,7 @@ class AaveTraceExecutor:
         )
 
     async def repay(self, asset: str, amount_native: float) -> OpResult:
+        self._guard.check("aave_repay", self._estimate_notional(asset, amount_native))
         return await self._pool_write(
             op_kind="aave_repay",
             asset=asset,
@@ -306,6 +310,7 @@ class AaveTraceExecutor:
         at deposit time — which is why the same sequence passes one day and
         reverts the next. See memory/aave_findings.md.
         """
+        self._guard.check("aave_withdraw", self._estimate_notional(asset, amount_native))
         return await self._pool_write(
             op_kind="aave_withdraw",
             asset=asset,
@@ -453,12 +458,10 @@ class AaveTraceExecutor:
         amount_native: float,
         call: Any,
     ) -> OpResult:
-        # For M1 TRACER, we treat notional in USD as == amount for stables (USDC)
-        # and use a conservative overestimate for volatile tokens. This is only
-        # for the safety cap; it does not need to be precise.
-        notional_estimate = self._estimate_notional(asset, amount_native)
-        self._guard.check(op_kind, notional_estimate)
-
+        # No guard check here: every public method passes the guard once, first,
+        # before any network read (its contract). Checking again here counted
+        # each MAX_UINT256 operation twice against the hourly limit — the second
+        # time with a notional of 0, which no cap could ever refuse.
         intent_id = deterministic_id(
             op_kind,
             asset,

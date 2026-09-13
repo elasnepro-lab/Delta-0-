@@ -11,6 +11,7 @@ from delta0.config import Config, load_config
 from delta0.decision import BlindState, OperationalContext
 from delta0.settings import Settings
 from delta0.types import Snapshot
+from tests.world import reference_snapshot
 
 # Every env var `Settings` knows about. Cleared for the whole unit suite.
 _SETTINGS_ENV_VARS = (
@@ -69,31 +70,8 @@ def anchor_price() -> float:
 
 @pytest.fixture
 def stable_snapshot(now: datetime) -> Snapshot:
-    """A snapshot exactly at target: nothing should trigger."""
-    return Snapshot(
-        ts=now,
-        wsteth_atoken_balance=16.0,
-        wsteth_price_usd=3_125.0,
-        wsteth_eth_ratio=1.25,
-        usdc_atoken_balance=1_000.0,
-        usdc_variable_debt_balance=35_000.0,
-        usdc_wallet_balance=0.0,
-        hf=1.1511,  # 0.79 x 51 000 / 35 000
-        aave_lt_wsteth=0.79,
-        aave_ltv_max_wsteth=0.80,
-        aave_emode=0,
-        mark_price=2_500.0,
-        short_size_eth=20.0,
-        isolated_margin_usd=5_000.0,
-        hl_free_usdc=1_000.0,
-        hl_maintenance_margin=0.02,
-        funding_last_hour=1.25e-5,
-        funding_30d_annualized=0.11,
-        borrow_apr=0.05,
-        gas_eth=0.01,
-        ws_last_tick_age_s=1.0,
-        rpc_ok=True,
-    )
+    """A snapshot exactly at target: nothing should trigger (see tests/world.py)."""
+    return reference_snapshot(ts=now)
 
 
 @pytest.fixture

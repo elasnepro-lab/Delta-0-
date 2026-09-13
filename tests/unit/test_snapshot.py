@@ -2,40 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 import pytest
 
 from delta0.types import Snapshot
+from tests.world import reference_snapshot
 
 
 def _make_snapshot(**overrides: float | int | bool) -> Snapshot:
-    base = {
-        "ts": datetime.now(UTC),
-        "wsteth_atoken_balance": 16.0,  # 16 wstETH a 3 125 $ = 50 000 $
-        "wsteth_price_usd": 3_125.0,
-        "wsteth_eth_ratio": 1.25,
-        "usdc_atoken_balance": 1_000.0,
-        "usdc_variable_debt_balance": 35_000.0,
-        "usdc_wallet_balance": 0.0,
-        "hf": 1.5,
-        "aave_lt_wsteth": 0.83,
-        "aave_ltv_max_wsteth": 0.80,
-        "aave_emode": 0,
-        "mark_price": 2_500.0,
-        "short_size_eth": 20.0,
-        "isolated_margin_usd": 5_000.0,
-        "hl_free_usdc": 1_000.0,
-        "hl_maintenance_margin": 0.02,
-        "funding_last_hour": 1.25e-5,
-        "funding_30d_annualized": 0.11,
-        "borrow_apr": 0.05,
-        "gas_eth": 0.01,
-        "ws_last_tick_age_s": 1.0,
-        "rpc_ok": True,
-    }
-    base.update(overrides)
-    return Snapshot(**base)  # type: ignore[arg-type]
+    # 16 wstETH a 3 125 $ = 50 000 $ de spot : le monde de tests/world.py.
+    return reference_snapshot(**overrides)
 
 
 def test_spot_notional_delta_zero_at_target() -> None:
