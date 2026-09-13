@@ -202,19 +202,47 @@ personne n'a lus. Deux valeurs à obtenir, une fois.
 choisir un nom et un identifiant. Il répond avec un jeton de la forme
 `123456789:AA...`. C'est un secret : il permet d'écrire au nom du bot.
 
-**L'identifiant de conversation.** Ouvrir une conversation avec le bot que l'on
-vient de créer et lui envoyer n'importe quoi, sinon il n'a pas le droit de
-parler le premier. Puis :
+**L'identifiant de conversation.** Les alertes partent vers un **groupe**, pas
+vers une conversation privée : chaque membre les reçoit, et ajouter quelqu'un
+se fait en l'invitant, sans toucher au serveur ni redémarrer le service.
+
+1. Créer le groupe, y ajouter les personnes qui doivent être prévenues, puis le
+   bot.
+2. Écrire dans le groupe `/start@<identifiant_du_bot>`. En groupe, un bot ne
+   voit par défaut que les commandes qui lui sont adressées : un message
+   ordinaire ne lui parvient pas et `getUpdates` resterait vide.
+3. Lister les conversations que le bot connaît :
 
 ```bash
-curl -s "https://api.telegram.org/bot<JETON>/getUpdates"   | python3 -c "import json,sys; print(json.load(sys.stdin)['result'][0]['message']['chat']['id'])"
+curl -s "https://api.telegram.org/bot<JETON>/getUpdates" | python3 -c '
+import json, sys
+seen = {}
+for update in json.load(sys.stdin)["result"]:
+    for kind in ("message", "my_chat_member"):
+        chat = update.get(kind, {}).get("chat")
+        if chat:
+            seen[chat["id"]] = (chat["type"], chat.get("title") or chat.get("first_name"))
+for chat_id, (kind, name) in seen.items():
+    print(chat_id, kind, name)
+'
 ```
+
+Garder la ligne de type `group` ou `supergroup`. Son identifiant est
+**négatif**, et c'est normal. La commande d'origine lisait
+`result[0]["message"]` et plantait en groupe : le premier événement reçu y est
+souvent l'ajout du bot (`my_chat_member`), qui n'a pas de champ `message`.
+
+Un piège : si le groupe devient un « supergroupe », par exemple quand on rend
+l'historique visible aux nouveaux membres, **son identifiant change** (il
+prend la forme `-100…`). L'ancien est alors refusé par Telegram avec
+`group chat was upgraded to a supergroup chat`. Relancer la commande
+ci-dessus et remplacer `TG_CHAT`.
 
 Les deux vont dans `.env`, à côté des autres :
 
 ```
 TG_TOKEN=123456789:AA...
-TG_CHAT=987654321
+TG_CHAT=-1001234567890
 ```
 
 Au démarrage, le traceur annonce lequel des deux états s'applique :

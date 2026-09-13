@@ -77,6 +77,12 @@ def configure_logging(
         stream=sys.stdout,
         level=numeric_level,
     )
+    # httpx logs every request at INFO with its full URL, and the Telegram Bot
+    # API carries the token IN the URL: each alert sent wrote the secret to
+    # stdout, hence to journald for 90 days. Seen on 2026-09-13 before the
+    # channel was ever armed. Their warnings still come through.
+    for chatty in ("httpx", "httpcore"):
+        logging.getLogger(chatty).setLevel(max(numeric_level, logging.WARNING))
 
     processors: list[structlog.types.Processor] = [
         structlog.contextvars.merge_contextvars,
