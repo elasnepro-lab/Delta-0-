@@ -87,6 +87,35 @@ def test_the_solver_and_the_classeur_agree(config: Config) -> None:
         assert ts.reserve_target_usd == pytest.approx(chassis.reserve, rel=tolerance)
 
 
+def test_the_classeur_runs_on_an_explored_target_and_a_rounded_config(
+    config: Config, example_config_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Found in the 2026-09-14 review: two ways the fixed-point check refused a valid run.
+
+    `--target-ltv` explores a target the config does not hold, so the bot's
+    solver has nothing to be compared against; and the schema accepts
+    `exposure_mult` within 1e-6 of its formula, which the classeur then
+    recomputed exactly and called a divergence.
+    """
+    classeur = _load_classeur()
+
+    monkeypatch.setattr(
+        sys, "argv", ["classeur", "--config", str(example_config_path), "--target-ltv", "0.65"]
+    )
+    classeur.main()  # must not raise SystemExit
+
+    rounded = tmp_path / "rounded.yaml"
+    rounded.write_text(
+        example_config_path.read_text(encoding="utf-8").replace(
+            f"exposure_mult: {config.exposure_mult}", "exposure_mult: 2.352941"
+        ),
+        encoding="utf-8",
+    )
+    assert "exposure_mult: 2.352941" in rounded.read_text(encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["classeur", "--config", str(rounded)])
+    classeur.main()  # must not raise SystemExit
+
+
 def test_the_reserve_is_not_leveraged(config: Config) -> None:
     """Idle capital cannot also be deployed: the reserve shrinks the machine."""
     assert config.emergency.hl_reserve_pct > 0.0

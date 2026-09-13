@@ -29,6 +29,7 @@ journal already handles exactly that case.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -39,6 +40,7 @@ from web3.providers.async_base import AsyncBaseProvider
 from web3.providers.rpc import AsyncHTTPProvider
 from web3.types import RPCEndpoint, RPCResponse
 
+from delta0.errors import RpcResponseError
 from delta0.logging import get_logger
 
 log = get_logger(__name__)
@@ -161,10 +163,18 @@ class FailoverProvider(AsyncBaseProvider):
             except TimeoutError as e:
                 last_error = e
                 self._bench(ep, f"pas de réponse en {self._timeout_s:.0f} s sur {method}")
-            except (OSError, aiohttp.ClientError, Web3Exception) as e:
-                # Transport failures bench the endpoint. A bug in this class or
-                # in web3 propagates instead: benching every endpoint for it
-                # would read as an outage and hide the traceback.
+            except (
+                OSError,
+                aiohttp.ClientError,
+                Web3Exception,
+                json.JSONDecodeError,
+                UnicodeDecodeError,
+            ) as e:
+                # Transport failures bench the endpoint, and so does a body that
+                # is not JSON (a proxy's HTML page): web3 raises JSONDecodeError
+                # for it, a ValueError. Any other error — a bug in this class or
+                # in web3 — propagates: benching every endpoint for it would read
+                # as an outage and hide the traceback.
                 last_error = e
                 self._bench(ep, f"{type(e).__name__} sur {method}")
             else:
@@ -178,6 +188,12 @@ class FailoverProvider(AsyncBaseProvider):
                 return response
 
         assert last_error is not None
+        if isinstance(last_error, (json.JSONDecodeError, UnicodeDecodeError)):
+            # Survivable, like any other outage: the loop must not read an
+            # unreadable provider as a bug in its own code.
+            raise RpcResponseError(
+                f"aucun RPC n'a rendu de réponse lisible pour {method}"
+            ) from last_error
         raise last_error
 
     async def is_connected(self, show_traceback: bool = False) -> bool:

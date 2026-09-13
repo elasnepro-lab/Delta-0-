@@ -4,7 +4,9 @@ The decision table is the first line of defence; the invariants are the second,
 the one that catches what the first let through. The incident of 2026-09-08 is
 the case in point: a repay reverted, nothing replayed it, and the Aave leg sat
 broken for 60 hours. I2 — never at the cushion threshold for more than five
-minutes without P3 — is exactly the check that would have spoken on the sixth.
+minutes without a down-flank defence (P3 or P4) in those last five minutes —
+would have spoken on the sixth, and kept speaking however many repays had
+been emitted and reverted: a defence counts only while it keeps firing.
 
 `check_invariants` is pure, like `decide()`. What it cannot read from a snapshot
 (how long a threshold has been crossed, when P2 or P3 last fired, what is in
@@ -56,9 +58,12 @@ class InvariantContext:
     # RUNNING, nothing in flight, no emergency: the steady state I1-I3 describe.
     cruising: bool
     cushion_breach_since: datetime | None = None  # HF at or under the cushion threshold
-    last_p3_at: datetime | None = None
+    # Last down-flank defence emitted, P3 or P4: when the cushion is spent the
+    # table answers with P4, and that answer must count.
+    last_down_defence_at: datetime | None = None
     margin_breach_since: datetime | None = None  # margin ratio at or under P2's threshold
-    last_p2_at: datetime | None = None
+    # Last up-flank defence emitted, P2 or P1: a liquidation event preempts P2.
+    last_up_defence_at: datetime | None = None
     transfers_in_flight: tuple[TransferInFlight, ...] = ()
     executions_in_flight: int = 0
     just_recomposed: bool = False  # a skim-recompose completed since the last check
@@ -116,10 +121,16 @@ def _unanswered(
     now: datetime,
     grace: timedelta,
 ) -> bool:
-    """A breach older than its grace, and no defence fired since it began."""
+    """A breach older than its grace, and no defence fired within that grace.
+
+    A defence emitted once at the start of a breach does not silence the
+    invariant for the rest of it: if the repay it sent reverted, the breach
+    goes on and so must the alarm. Only a defence inside the last grace window
+    — and after the breach began — counts as an answer.
+    """
     if since is None or now - since <= grace:
         return False
-    return last_fired is None or last_fired < since
+    return last_fired is None or last_fired < max(since, now - grace)
 
 
 # --- One generator per invariant --------------------------------------------------
@@ -146,14 +157,14 @@ def _i2_ltv(snapshot: Snapshot, config: Config, ctx: InvariantContext) -> Iterat
     if (
         since is not None
         and cushion_breached(snapshot, config)
-        and _unanswered(since, ctx.last_p3_at, ctx.now, grace)
+        and _unanswered(since, ctx.last_down_defence_at, ctx.now, grace)
     ):
         held_min = (ctx.now - since).total_seconds() / 60
         yield Violation(
             "I2",
             Severity.CRITICAL,
             f"HF {snapshot.hf:.4f} au seuil du coussin depuis {held_min:.0f} min "
-            "sans remboursement P3",
+            "sans défense P3 ou P4 récente",
         )
 
 
@@ -170,14 +181,14 @@ def _i3_margin(snapshot: Snapshot, config: Config, ctx: InvariantContext) -> Ite
     if (
         since is not None
         and margin_breached(snapshot, config)
-        and _unanswered(since, ctx.last_p2_at, ctx.now, grace)
+        and _unanswered(since, ctx.last_up_defence_at, ctx.now, grace)
     ):
         held_s = (ctx.now - since).total_seconds()
         yield Violation(
             "I3",
             Severity.CRITICAL,
             f"margin ratio {snapshot.margin_ratio:.4f} au seuil de P2 depuis {held_s:.0f} s "
-            "sans marge d'urgence",
+            "sans défense P2 ou P1 récente",
         )
 
 

@@ -3,8 +3,10 @@
 Every business parameter of the bot lives here — README section 4.
 Cross-field validators enforce the invariants that the classeur Model C guarantees:
 - exposure_mult == 1 / (1 - target_ltv + 1 / short_leverage)
-- Threshold monotonicity on both flanks (recenter < pump < reduce < liquidation).
-- LTV thresholds are strictly ordered (pump < cushion < deleverage < LT).
+- Upper flank ordering (reduce < pump); the recenter bands are not compared to
+  the emergency thresholds (see `_check_recenter_bands`).
+- Down-flank margins strictly ordered (pump > cushion > deleverage); the bands
+  they give are checked against the on-chain LT at boot, not here.
 
 If any invariant fails, the bot refuses to boot — that is by design.
 """
@@ -136,9 +138,11 @@ class InvariantsConfig(BaseModel):
 
     cruise_ltv_headroom: _Ratio = 0.02  # I2: LTV at most target_ltv + this, at rest
     cruise_margin_floor: _Ratio = 0.07  # I3: margin ratio at least this, at rest
-    p3_grace_s: _PositiveFloat = 300.0  # I2: cushion threshold held this long without P3
+    # I2: cushion threshold held this long without a P3 or P4 inside the window.
+    p3_grace_s: _PositiveFloat = 300.0
     # I3: P2's budget is 2 s and the loop cycles every 5 s — one full cycle plus
-    # the budget, rounded up, before a missing P2 counts as a failed defence.
+    # the budget, rounded up, before no P2 or P1 inside the window counts as a
+    # failed defence.
     p2_grace_s: _PositiveFloat = 10.0
     transfer_warn_s: _PositiveFloat = 900.0  # I6 and §9.3: 15 min
     transfer_critical_s: _PositiveFloat = 3600.0  # §9.3: 60 min, dependent operations frozen
@@ -374,8 +378,10 @@ class Config(BaseModel):
     def _check_ltv_below_liquidation(self) -> Config:
         # The thresholds themselves depend on the on-chain LT, so they cannot be
         # checked here — `derive_bands` builds them, and `bands_incoherence`, run
-        # by `reconcile_at_boot`, raises and refuses the boot in every mode when
-        # they collapse onto the target or the LT reads 0. What IS checkable without the
+        # by `reconcile_at_boot`, refuses the boot in every mode when they
+        # collapse onto the target or the LT reads 0. Two gaps remain: in
+        # observation mode a failed boot snapshot skips the reconciliation, and
+        # nothing re-checks the LT during a run. What IS checkable without the
         # chain: the widest margin must still leave the pump above the target,
         # whatever plausible LT we face. With LT >= target + widest margin the
         # pump sits above target by construction; below that the config can

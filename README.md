@@ -21,7 +21,7 @@ Le bot n'est PAS un trader : il ne prend aucune décision directionnelle. Ses se
 
 Principe cardinal de sécurité : **le pont sert au confort, jamais à la survie.** Toute action de survie doit passer par un chemin local exécutable en secondes.
 
-Particularité du châssis choisi : les bandes de liquidation sont volontairement asymétriques. Le flanc étroit (hausse, fixé par le levier du short) est celui qui dispose des défenses les plus rapides (ajout de marge depuis la réserve HL, local, ~1 s) ; le flanc large (baisse, fixé par le LT Aave lu on-chain et la LTV cible) est celui dont la pompe est lente (pont retour, plusieurs minutes). Les largeurs exactes, coussin plein et coussin vide, sont publiées par `scripts/classeur.py`. Cette asymétrie est un choix de conception, pas un accident : ne pas la "corriger".
+Particularité du châssis choisi : les bandes de liquidation sont volontairement asymétriques. Le flanc étroit (hausse, fixé par le levier du short) est celui qui dispose des défenses les plus rapides (ajout de marge depuis la réserve HL, local, ~1 s) ; le flanc large (baisse, fixé par le LT Aave lu on-chain et la LTV cible) est celui dont la pompe est lente (pont retour, plusieurs minutes). Les largeurs exactes du flanc bas, coussin plein et coussin vide, sont publiées par `scripts/classeur.py` ; celle du flanc haut n'y figure pas encore. Cette asymétrie est un choix de conception, pas un accident : ne pas la "corriger".
 
 La performance vient de l'exécution, pas de l'idée : le rendement est un fait de marché non prédictible, le métier du bot est l'exactitude. L'exactitude se mesure sur cinq dimensions (justesse, fidélité, vitesse, robustesse, coût), définies en section 12 et testées en section 15.
 
@@ -60,13 +60,18 @@ src/delta0/
   decision.py     # moteur de décision PUR (aucun I/O) : état observé -> action typée ou NOOP.
                   # Contient le solveur d'état cible et les bandes dérivées du LT. Testable à 100 %.
   executor.py     # exécution Aave : tx signées, journal avant envoi, idempotence
-  hl_executor.py  # exécution Hyperliquid : ordres, marge isolée
+  hl_executor.py  # exécution Hyperliquid : ordres (à ce jour post-only et annulation), marge isolée
   safety.py       # garde-fous vérifiés AVANT tout appel réseau (plafonds, soldes, KILL)
   watchdog.py     # fraîcheur des venues, état BLIND, fichiers KILL
   latency.py      # p50/p95 des chemins critiques contre leurs budgets (§7), mode prudent
-  reconcile.py    # réconciliation au démarrage : chaîne et API contre le journal
+  reconcile.py    # réconciliation au démarrage : bandes, ancre, dette et HF contre le journal
+  invariants.py   # invariants I1 à I8 (§11) : violations, sévérité, escalade
+  units.py        # conversion en unités natives, arrondi explicite par opération (§9.2)
   failure.py      # cause de chaque échec, et la liste unique des échecs que la boucle peut survivre
   errors.py       # hiérarchie d'exceptions : tout ce que le bot lève exprès dérive de Delta0Error
+  redaction.py    # masque les secrets portés par les URL (clé RPC, jeton Telegram) partout où l'on écrit
+  logging.py      # journalisation structurée, branchement des alertes
+  settings.py     # secrets et URL lus depuis .env
   state.py        # persistance SQLite : intentions, état, transferts, mesures
   alerts.py       # alertes Telegram, branchées sur la journalisation
   rpc.py          # bascule entre endpoints RPC, délai dur par requête
@@ -74,18 +79,18 @@ src/delta0/
   hl_client.py    # seul module autorisé à importer le SDK HL : clients, et refus décodés
                   # aux deux niveaux (renvoyés au lieu d'être levés, parfois nichés dans status ok)
   tracer.py       # boucle du mode TRACER (marche à blanc)
-  main.py         # CLI et câblage : status, tracer, report, config-check ; modes DRY_RUN / LIVE_SMALL / LIVE
+  main.py         # CLI et câblage : version, status, tracer, report, config-check ; modes DRY_RUN / LIVE_SMALL / LIVE
   config/         # schéma de config.yaml, invariants vérifiés au chargement
   venues/
     aave.py         # lectures Aave v3 : Pool, oracle, aTokens, jeton de dette
     hyperliquid.py  # lectures HL (SDK officiel)
     hl_stream.py    # flux WS : mark price, événements de liquidation
     bridge.py       # dépôt Bridge2, retrait via API HL, suivi de crédit
-    swap.py         # agrégateur (Odos ou 1inch), garde-fou slippage
+    swap.py         # agrégateur (Odos ou 1inch), garde-fou slippage — squelette, pas encore écrit
 config.yaml.example
 scripts/          # classeur, simulations, lecture des paramètres Aave, débouclage manuel
 tests/
-backtest/         # rejeu court (M2) et backtest long (M2b) : données, splicing, rapports
+backtest/         # à créer : rejeu court (M2) et backtest long (M2b), données, splicing, rapports
 deploy/           # unité systemd, chrony, journald, procédure d'installation du serveur
 ```
 
@@ -97,15 +102,15 @@ Solveur d'état cible : une fonction unique `target_state(equity, config, cushio
 
 ## 4. Paramètres de configuration
 
-Tous les paramètres vivent dans `config.yaml`, dont `config.yaml.example` est la liste canonique et commentée ; ce README ne la recopie pas. Aucune constante métier en dur dans le code. Les paramètres de risque Aave (LT, LTV max) sont LUS on-chain à chaque cycle. Une config qui viole une règle ci-dessous est refusée au chargement.
+Tous les paramètres vivent dans `config.yaml`, dont `config.yaml.example` est la liste canonique et commentée ; ce README ne la recopie pas. Aucune constante métier en dur dans le code. Les paramètres de risque Aave (LT, LTV max) sont LUS on-chain à chaque cycle. Une config qui viole une règle ci-dessous est refusée au chargement, ou au démarrage quand la règle dépend d'une valeur lue on-chain.
 
 Groupes : capital et levier (`capital_usd`, `short_leverage`, `target_ltv`, `target_margin_ratio`, `exposure_mult`, `exposure_mult_half`) ; coussin (`cushion_pct`, `cushion_floor_pct`) ; re-centrage et delta (`recenter_up`, `recenter_down`, `delta_tolerance`) ; écrémage (`skim_*`) ; porte de régime (`regime.*`) ; exécution (`slippage_max_bps`, `order_style`, `gas_min_eth`) ; urgences (`emergency.*`) ; `watchdog.*` ; invariants (`invariants.*`, seuils du §11) ; `venues.*` (adresses, dont USDC NATIF uniquement, jamais USDC.e) ; `alerts.*` ; `mode` et `live_small_cap_pct`.
 
 Règles de dérivation :
 - `target_margin_ratio = 1 / short_leverage` et `exposure_mult = 1 / (1 − target_ltv + 1 / short_leverage)`.
 - **Flanc bas : pas de LTV absolue.** Les seuils sont des marges sous le LT lu on-chain (`emergency.ltv_margin_pump > ltv_margin_cushion > ltv_margin_deleverage`). Seuil en LTV = LT − marge, comparé en HF : HF_seuil = LT / (LT − marge). Un seuil absolu écrit dans un fichier devient faux dès que la gouvernance Aave déplace le LT, ou quand on change de chaîne. Le démarrage est refusé si le seuil de pompe tombe au niveau de `target_ltv` ou dessous.
-- **Flanc haut : seuils en margin ratio**, `margin_ratio_pump > margin_ratio_reduce`, tous deux au-dessus de la maintenance lue via l'API.
-- **Capital immobilisé** : le coussin (`cushion_pct` du capital) et la réserve HL (`emergency.hl_reserve_pct` du notionnel) sortent de l'équité déployable (solveur, §3).
+- **Flanc haut : seuils en margin ratio**, `margin_ratio_pump > margin_ratio_reduce`, tous deux au-dessus de la maintenance lue via l'API (cette dernière comparaison n'est pas encore écrite).
+- **Capital immobilisé** : le coussin (`cushion_pct` du capital) et la réserve HL (`emergency.hl_reserve_pct` du notionnel) sortent de l'équité déployable (solveur, §3). `exposure_mult` n'est donc plus l'exposition construite mais le coefficient brut du solveur : l'exposition réelle, spot / équité, est plus basse. Toute comparaison à une exposition observée (porte de régime, §8.9) doit le prendre en compte.
 
 ### Bilan de référence après BUILD (assertions des tests M3)
 
@@ -121,7 +126,7 @@ Les valeurs cibles sont la sortie de `scripts/classeur.py` pour la config en vig
 | LTV | cible ± 0,5 pt (le LTV observé est sous `target_ltv`, le coussin comptant comme collatéral) |
 | Margin ratio | `target_margin_ratio` ± 0,5 pt |
 | Coussin USDC (supply Aave) | ± 1 % |
-| Bandes de liquidation | recalculées depuis le LT lu on-chain, coussin plein et coussin vide |
+| Bandes de liquidation | flanc bas recalculé depuis le LT lu on-chain, coussin plein et coussin vide |
 
 Hypothèses économiques (simulations et module comptable, jamais les décisions) : celles de `scripts/classeur.py` et `scripts/simulate.py`.
 
@@ -129,7 +134,7 @@ Hypothèses économiques (simulations et module comptable, jamais les décisions
 
 ## 5. Grandeurs calculées et formules
 
-Le watcher produit un snapshot unique et daté. Toutes les formules ci-dessous sont implémentées dans `decision.py` et testées unitairement.
+Le watcher produit un snapshot unique et daté. Les formules ci-dessous sont calculées à la lecture (`types.py`, `venues/`) et testées unitairement ; `decision.py` ne fait que les consommer.
 
 ```
 wsteth_price_usd = getAssetPrice(wstETH) de l'oracle Aave           # jamais le mark du perp
@@ -268,7 +273,7 @@ Tout changement d'exposition se fait par tranches de 25 % de l'écart, une tranc
 - Ordres : maker (ALO) avec timeout 60 s puis traversée du spread pour les opérations planifiées ; IOC pour P1/P2. Gérer les fills partiels : re-coter le reliquat, jamais considérer un ordre comme atomique.
 - Funding : endpoint funding history pour la moyenne 30 j ; crédité chaque heure dans la marge, aucun traitement requis à part le suivi comptable.
 - Clé : wallet dédié au bot. Les ordres et la marge isolée passent par un agent wallet (clé séparée). Un agent ne peut ni transférer ni retirer : les retraits, transferts et traversées du pont exigent la signature du wallet maître. Un agent expire au bout de 90 jours : rotation planifiée, et démarrage refusé à moins de 7 jours de l'expiration. Les deux clés en variables d'environnement, jamais dans le code ni le journal.
-- Compte unifié : le solde spot USDC est la marge mobilisable et la réserve HL. `withdrawable` et `accountValue` ne la mesurent pas (ils valent 0 pendant qu'un retrait aboutit) et ne servent à aucune décision.
+- Compte unifié : le solde spot USDC est la marge mobilisable et la réserve HL. `withdrawable` et `accountValue` ne la mesurent pas (le premier vaut 0 pendant qu'un retrait aboutit, le second vaut 0 sans position ouverte) et ne servent à aucune décision.
 - Contraintes : dépôt minimum 5 USDC, retrait minimum 2 USDC, frais de retrait 1 USDC, notionnel minimum ~10 $ par ordre, USDC natif Arbitrum uniquement.
 
 ### 9.2 Aave v3 (Arbitrum)
@@ -276,7 +281,7 @@ Tout changement d'exposition se fait par tranches de 25 % de l'écart, une tranc
 - E-mode : désactivé, vérifié au boot (l'e-mode ETH interdirait l'emprunt USDC).
 - Approvals ERC-20 (USDC et wstETH vers le Pool, USDC vers le pont HL) : posées une fois au setup, montant plafonné, re-vérifiées au boot. Le chemin critique doit toujours être UNE transaction.
 - HF et LTV : toujours lus on-chain, jamais recalculés localement pour les décisions P1-P6 (le calcul local sert de contrôle de cohérence).
-- LT et LTV max : ceux du compte (`getUserAccountData`) dès qu'il porte du collatéral, puisque ce sont eux qui décident d'une liquidation. Sur un compte vide, Aave les rend à 0 : le bot prend alors ceux de la réserve wstETH (`ProtocolDataProvider.getReserveConfigurationData`), qui s'appliqueront dès le premier dépôt. Un LT qui reste illisible refuse le démarrage, avec un message et un code de sortie.
+- LT et LTV max : ceux du compte (`getUserAccountData`) dès qu'il porte du collatéral, puisque ce sont eux qui décident d'une liquidation. Sur un compte vide, Aave les rend à 0 : le bot prend alors ceux de la réserve wstETH (`ProtocolDataProvider.getReserveConfigurationData`), qui s'appliqueront dès le premier dépôt. Un LT qui reste illisible refuse le démarrage, avec un message et un code de sortie. Limite : si la lecture de démarrage échoue elle-même, le mode observation saute la réconciliation et ce contrôle avec elle (armé, `--live-micro-ops` refuse le démarrage), et rien ne revérifie le LT en cours de route.
 - Montants envoyés on-chain : convertis en unités natives avec un arrondi explicite par opération. Vers le bas pour ce qui dépense ou crée de la dette (supply, borrow, withdraw, dépôt au pont), vers le haut pour une autorisation ou un remboursement (approve, repay, qu'Aave plafonne à la dette). Jamais `int(montant × 10**décimales)`, qui tronque vers zéro un montant USDC à six décimales sur 65. Les observations et les ratios de décision restent en flottants.
 
 ### 9.3 Pont
@@ -311,8 +316,8 @@ Tout changement d'exposition se fait par tranches de 25 % de l'écart, une tranc
 ### Invariants (vérifiés à chaque snapshot, violation = alerte + action de la table)
 ```
 I1  abs(delta_pct) <= delta_tolerance en croisière
-I2  ltv <= target_ltv + 0.02 en croisière ; jamais HF <= seuil coussin plus de 5 min sans action P3 déclenchée
-I3  margin_ratio >= 0.07 en croisière ; jamais <= margin_ratio_reduce plus de 10 s sans action P2 déclenchée
+I2  ltv <= target_ltv + 0.02 en croisière ; jamais HF <= seuil coussin plus de 5 min sans défense P3 ou P4 dans ces 5 min
+I3  margin_ratio >= 0.07 en croisière ; jamais <= margin_ratio_reduce plus de 10 s sans défense P2 ou P1 dans ces 10 s
 I4  cushion_usd >= cushion_floor_pct * capital courant (sinon reconstitution prioritaire au prochain écrémage)
 I5  gas_eth >= gas_min_eth (sinon blocage des opérations non critiques + alerte)
 I6  aucun transfert en transit > 15 min sans alerte ; > 60 min : CRITICAL (§9.3)

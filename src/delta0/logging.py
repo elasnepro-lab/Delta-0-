@@ -21,6 +21,7 @@ import structlog
 from structlog.types import Processor
 
 from delta0.config import RuntimeMode
+from delta0.redaction import redact_event
 
 _run_id_var: ContextVar[str] = ContextVar("run_id", default="")
 _cycle_id_var: ContextVar[str] = ContextVar("cycle_id", default="")
@@ -91,6 +92,9 @@ def configure_logging(
         _add_context,
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
+        # After the traceback is rendered, before alerts and the renderer: an
+        # RPC error names its URL, and the provider's API key is in that URL.
+        redact_event,
     ]
 
     if alert_processor is not None:

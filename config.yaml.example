@@ -1,6 +1,6 @@
 # Delta-0- config — bot Montage C.
-# Values sourced from the classeur `montage_C_delta_neutre.xlsx` sheet "Model C",
-# validated by the operator on 2026-08-25. See README section 4.
+# Valeurs validées par l'opérateur le 2026-08-25. Le bilan et les bandes qu'elles
+# donnent sont publiés par `scripts/classeur.py` ; règles de dérivation : README §4.
 #
 # Copy to `config.yaml` and adjust locally. Never commit `config.yaml`.
 
@@ -13,8 +13,8 @@ exposure_mult_half: 1.5      # lu par aucun code avant le chantier 8.6 (porte de
 maintenance_margin: 0.02     # lu par aucun code avant 8.4 : la comparaison à l'API n'existe pas encore
 cushion_pct: 0.05            # 5% of capital held as USDC supply on Aave = 1000$
 cushion_floor_pct: 0.025     # invariant I4 (évalué dès la phase 3) ; reconstitution à l'écrémage en 8.5
-recenter_up: 0.045           # +8% band is narrow; recenter earlier
-recenter_down: 0.06          # -15.7% band is wide; recenter later
+recenter_up: 0.045           # flanc haut étroit (levier du short) : re-centrer tôt
+recenter_down: 0.06          # flanc bas large (bandes : scripts/classeur.py) : re-centrer plus tard
 delta_tolerance: 0.02        # |delta| / spot max before short retrue
 skim_cron: "SUN 12:00 UTC"
 skim_min_usd: 200
@@ -33,15 +33,15 @@ order_style: maker_then_cross  # 8.3 (ordres maker puis traversée)
 
 emergency:
   margin_ratio_pump: 0.05    # ~+5% price move: pump up
-  margin_ratio_reduce: 0.035 # ~+6.5% price move: emergency reduce (2s)
+  margin_ratio_reduce: 0.035 # seuil de P2 (2 s) : réserve HL versée en marge, réduction du short en repli
   reduce_fraction: 0.30
   hl_reserve_pct: 0.03        # couvre un squeeze de +9 %/min (harnais 1.6)
   # Marges SOUS le seuil de liquidation lu on-chain, en points de LTV.
   # Les seuils absolus ont ete retires : ils dependaient d'un LT de 0,81
   # (Ethereum) alors qu'Arbitrum applique 0,79, ce qui placait le coussin
   # pile sur la liquidation et le desendettement deux points au-dela.
-  # Avec LT = 0,79 ces marges donnent 0,75 / 0,765 / 0,775,
-  # soit -6,7 % / -8,5 % / -9,7 % de mouvement de prix depuis LTV 0,70.
+  # Avec LT = 0,79 ces marges donnent 0,75 / 0,765 / 0,775 ; les mouvements de
+  # prix correspondants depuis la cible, coussin plein et vide : scripts/classeur.py.
   ltv_margin_pump: 0.040       # pompe descendante, la plus precoce
   ltv_margin_cushion: 0.025    # remboursement depuis le coussin
   ltv_margin_deleverage: 0.015 # desendettement par etapes, dernier recours
@@ -58,8 +58,8 @@ watchdog:
 invariants:
   cruise_ltv_headroom: 0.02     # I2 : LTV au plus target_ltv + 0,02 en croisière
   cruise_margin_floor: 0.07     # I3 : margin ratio au moins 0,07 en croisière
-  p3_grace_s: 300               # I2 : seuil du coussin tenu 5 min sans P3 -> CRITICAL et dégonflage
-  p2_grace_s: 10                # I3 : seuil de marge tenu 10 s sans P2 -> CRITICAL et dégonflage
+  p3_grace_s: 300               # I2 : seuil du coussin tenu 5 min sans P3 ni P4 dans ces 5 min -> CRITICAL et dégonflage
+  p2_grace_s: 10                # I3 : seuil de marge tenu 10 s sans P2 ni P1 dans ces 10 s -> CRITICAL et dégonflage
   transfer_warn_s: 900          # I6 : traversée de plus de 15 min -> WARN
   transfer_critical_s: 3600     # I6 : plus d'une heure -> CRITICAL, opérations non critiques gelées
   recompose_tolerance: 0.005    # I8 : ratios à ±0,5 pt des cibles après recomposition

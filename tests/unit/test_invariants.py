@@ -100,7 +100,10 @@ def test_i2_holds_while_p3_answered_or_within_grace(
     since = now - timedelta(minutes=6)
 
     answered = InvariantContext(
-        now=now, cruising=False, cushion_breach_since=since, last_p3_at=since + timedelta(minutes=1)
+        now=now,
+        cruising=False,
+        cushion_breach_since=since,
+        last_down_defence_at=now - timedelta(minutes=2),
     )
     assert check_invariants(breached, config, answered) == []
 
@@ -116,9 +119,32 @@ def test_i2_a_p3_from_an_earlier_breach_does_not_count(
     breached = replace(stable_snapshot, hf=1.02)
     since = now - timedelta(minutes=6)
     stale = InvariantContext(
-        now=now, cruising=False, cushion_breach_since=since, last_p3_at=since - timedelta(hours=2)
+        now=now,
+        cruising=False,
+        cushion_breach_since=since,
+        last_down_defence_at=since - timedelta(hours=2),
     )
     assert _codes(check_invariants(breached, config, stale)) == [("I2", Severity.CRITICAL)]
+
+
+def test_i2_a_defence_fired_once_does_not_silence_a_breach_that_goes_on(
+    stable_snapshot: Snapshot, config: Config, now: datetime
+) -> None:
+    """The 2026-09-08 shape: a repay emitted, reverted, and the breach still there.
+
+    A first version counted any defence since the breach began, so a single P3
+    at minute one silenced I2 for hours. Only a defence within the last grace
+    window answers the breach.
+    """
+    breached = replace(stable_snapshot, hf=1.02)
+    since = now - timedelta(minutes=20)
+    once = InvariantContext(
+        now=now,
+        cruising=False,
+        cushion_breach_since=since,
+        last_down_defence_at=since + timedelta(minutes=1),
+    )
+    assert _codes(check_invariants(breached, config, once)) == [("I2", Severity.CRITICAL)]
 
 
 def test_a_position_without_debt_cannot_breach_the_cushion(
@@ -152,7 +178,10 @@ def test_i3_turns_critical_and_deflates_when_p2_never_answers(
     assert assess(violations).deflate
 
     answered = InvariantContext(
-        now=now, cruising=False, margin_breach_since=since, last_p2_at=now - timedelta(seconds=5)
+        now=now,
+        cruising=False,
+        margin_breach_since=since,
+        last_up_defence_at=now - timedelta(seconds=5),
     )
     assert check_invariants(breached, config, answered) == []
 

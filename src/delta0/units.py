@@ -38,6 +38,11 @@ def to_raw(amount: float | int | Decimal | str, decimals: int, rounding: Roundin
 
     Floats are denoised to their 15 reliable significant digits before the
     rounding; `Decimal`, `int` and `str` inputs are taken exactly.
+
+    Limit: a float cannot carry an 18-decimal balance. Passing a balance read
+    back as a float (`raw / 10**18`) with DOWN can exceed that balance by a few
+    hundred million wei, and a withdraw of it reverts. An amount derived from
+    an on-chain balance must stay an integer from the read to the send.
     """
     if decimals < 0:
         raise ValueError(f"décimales négatives : {decimals}")

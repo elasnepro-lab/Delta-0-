@@ -165,7 +165,7 @@ sudo systemctl enable --now delta0-tracer
 Au démarrage, la première chose à lire est la racine :
 
 ```bash
-journalctl -u delta0 -n 20 | grep -i kill
+journalctl -t delta0 -n 20 | grep -i kill
 # doit afficher /opt/delta0/KILL
 ```
 
@@ -173,9 +173,15 @@ Puis vérifier que le frein fonctionne, une fois, avant d'en avoir besoin :
 
 ```bash
 sudo -u delta0 touch /opt/delta0/KILL
-journalctl -u delta0 -f          # le guard refuse toute nouvelle micro-op
+journalctl -t delta0 -f          # tracer_kill : le traceur s'arrête proprement
 sudo rm /opt/delta0/KILL
+sudo systemctl reset-failed delta0-tracer
+sudo systemctl start delta0-tracer
 ```
+
+Tant que `KILL` existe, systemd relance le traceur et celui-ci ressort aussitôt ;
+après cinq relances en cinq minutes, systemd abandonne. D'où les deux dernières
+lignes : sans elles, le service reste arrêté une fois le fichier retiré.
 
 ## 6. Rétention des journaux
 
@@ -209,9 +215,10 @@ se fait en l'invitant, sans toucher au serveur ni redémarrer le service.
 
 1. Créer le groupe, y ajouter les personnes qui doivent être prévenues, puis le
    bot.
-2. Écrire dans le groupe `/start@<identifiant_du_bot>`. En groupe, un bot ne
-   voit par défaut que les commandes qui lui sont adressées : un message
-   ordinaire ne lui parvient pas et `getUpdates` resterait vide.
+2. Écrire dans le groupe `/start@<identifiant_du_bot>`. L'ajout du bot suffit
+   en principe à faire apparaître le groupe (événement `my_chat_member`), mais
+   Telegram ne garde les événements que 24 heures, et un message ordinaire ne
+   parvient pas au bot : la commande qui lui est adressée en garantit un frais.
 3. Lister les conversations que le bot connaît :
 
 ```bash
@@ -268,13 +275,15 @@ résumé, pour que 86 échecs identiques ne produisent pas 86 messages.
 Quarante-huit heures d'observation en lecture seule, pour voir les heures
 chargées et pas seulement dix minutes calmes, puis comparaison avec une
 référence prise sur le poste **avec le même code**. Les 950 ms de p95 mesurés
-pendant la marche à blanc ne servent plus de référence : ils comptaient 34
-requêtes par snapshot, Multicall3 n'en envoie qu'une.
+pendant la marche à blanc ne servent plus de référence : la lecture Aave y
+coûtait 34 requêtes RPC, Multicall3 n'en envoie qu'une (les cinq appels REST
+Hyperliquid ne changent pas).
 
 ```bash
-sudo -u delta0 /opt/delta0/.venv/bin/delta0 tracer \
+sudo -u delta0 /opt/delta0/.venv/bin/delta0 tracer --config /opt/delta0/config.yaml \
     --root /opt/delta0 --db /var/lib/delta0/probe.db -d 2d --cadence 5
-sudo -u delta0 /opt/delta0/.venv/bin/delta0 report --db /var/lib/delta0/probe.db
+sudo -u delta0 /opt/delta0/.venv/bin/delta0 report --config /opt/delta0/config.yaml \
+    --db /var/lib/delta0/probe.db
 ```
 
 Plus lent que chez soi veut dire que la machine ou son fournisseur RPC est le

@@ -334,8 +334,10 @@ class AaveTraceExecutor:
         USDC collateral, not just this cycle's deposit. That is correct for the
         M1 tracer, which is the only supplier during the marche a blanc. Once
         the real USDC cushion exists (M2), a cycle must withdraw its own
-        deposit only — read the aToken balance and pass it to `withdraw`, which
-        is safe in that direction because the balance only grows with interest.
+        deposit only — read the aToken balance and withdraw it, which is safe in
+        that direction because the balance only grows with interest. Not as a
+        float, though: a float cannot carry an 18-decimal balance, and rounding
+        it can ask for more than is held (see `units.to_raw`).
 
         `notional_hint` is what the guard sees: MAX_UINT256 as a notional would
         blow the `max_op_usd` cap on every call, so callers pass the amount

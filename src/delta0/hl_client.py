@@ -51,6 +51,16 @@ class HLActionRefused(VenueError):  # noqa: N818 - mirrors SafetyRefused naming
     """Hyperliquid accepted the request and declined to perform it."""
 
 
+class HLReadError(VenueError):
+    """A Hyperliquid read came back in a shape the bot cannot use.
+
+    The SDK does not raise on a body it cannot parse: it RETURNS
+    `{"error": "Could not parse JSON: ..."}`, and the readers then failed on a
+    missing key. A KeyError is a programming error to the loop, which stops the
+    process on it; an unreadable venue answer is an outage, which it survives.
+    """
+
+
 # --- Clients ------------------------------------------------------------------
 
 

@@ -99,7 +99,13 @@ def solve(config: Config, *, lt: float, target_ltv: float | None = None) -> Chas
     # Re-derived here rather than calling target_state so an alternative
     # target_ltv can be explored without mutating a frozen Config.
     leverage = config.short_leverage
-    exposure_mult = 1.0 / (1.0 - target_ltv + 1.0 / leverage)
+    # The config's own coefficient when the target is the config's: the schema
+    # accepts it within 1e-6 of the formula, and recomputing it here would make
+    # the fixed-point check below fail on a config the bot loads.
+    if target_ltv == config.target_ltv:
+        exposure_mult = config.exposure_mult
+    else:
+        exposure_mult = 1.0 / (1.0 - target_ltv + 1.0 / leverage)
 
     # The HL reserve is capital held idle, exactly like the cushion, so it comes
     # out of what gets deployed. It is sized as a fraction of the notional,
@@ -204,6 +210,12 @@ def main() -> None:
 
     chassis = solve(config, lt=args.lt, target_ltv=args.target_ltv)
     print_sheet(chassis, config)
+
+    if args.target_ltv is not None and args.target_ltv != config.target_ltv:
+        # Exploring a target the config does not hold: the bot's solver runs on
+        # the config's target, so there is nothing to compare against.
+        print("\n  point fixe non vérifié : cible explorée différente de celle de la config")
+        return
 
     # A workbook that cannot contradict the code is the whole point; check it.
     solved = target_state(equity=chassis.capital, config=config, cushion_usd=chassis.cushion)

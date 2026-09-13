@@ -40,6 +40,7 @@ from web3.exceptions import Web3Exception
 
 from delta0.errors import Delta0Error
 from delta0.hl_client import HL_TRANSPORT_ERRORS
+from delta0.redaction import redact_secrets
 
 # The failures the bot may survive — and nothing else (chantier 6.4). A loop,
 # an optional read or a diagnostic catches THIS, never `Exception`: a bug
@@ -102,7 +103,9 @@ class FailureCause:
 
 
 def _truncate(text: str) -> str:
-    flat = " ".join(text.split())
+    # Every recorded detail passes here, so the redaction does too: an RPC
+    # error message carries the provider URL, and its API key with it.
+    flat = " ".join(redact_secrets(text).split())
     return flat if len(flat) <= _MAX_DETAIL else flat[: _MAX_DETAIL - 1] + "…"
 
 

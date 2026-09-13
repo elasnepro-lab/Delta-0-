@@ -8,10 +8,13 @@ refused a request, so nothing keyed on exceptions would have reacted.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from web3.types import RPCEndpoint
 
+from delta0.errors import RpcResponseError
+from delta0.failure import OPERATIONAL_ERRORS
 from delta0.rpc import FailoverProvider
 
 _OK = {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
@@ -168,6 +171,34 @@ def test_an_empty_fallback_is_ignored() -> None:
 def test_no_url_at_all_is_refused() -> None:
     with pytest.raises(ValueError, match="aucune URL RPC"):
         FailoverProvider(["", ""])
+
+
+class _GarbageChild(_FakeChild):
+    """An endpoint behind a proxy that answers 200 with an HTML page."""
+
+    async def make_request(self, method: RPCEndpoint, params: object) -> dict[str, object]:
+        _ = params
+        self.calls.append(str(method))
+        raise json.JSONDecodeError("Expecting value", "<html>502 Bad Gateway</html>", 0)
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_body_fails_over_instead_of_crashing() -> None:
+    """Found in the 2026-09-14 review: a JSONDecodeError is a ValueError, and it
+    skipped the failover entirely once the catch-all was narrowed."""
+    primary, backup = _GarbageChild(), _FakeChild()
+    p = _provider(primary, backup)
+
+    assert await p.make_request(_BLOCK_NUMBER, []) == _OK
+    assert backup.calls == ["eth_blockNumber"]
+
+
+@pytest.mark.asyncio
+async def test_all_bodies_unreadable_is_a_survivable_venue_error() -> None:
+    p = _provider(_GarbageChild(), _GarbageChild())
+    with pytest.raises(RpcResponseError) as excinfo:
+        await p.make_request(_BLOCK_NUMBER, [])
+    assert issubclass(excinfo.type, OPERATIONAL_ERRORS)
 
 
 @pytest.mark.asyncio
