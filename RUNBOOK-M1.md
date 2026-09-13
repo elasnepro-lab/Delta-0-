@@ -215,7 +215,8 @@ rapport qui passe en taisant ce qu'il a excusé serait pire qu'un rapport qui
 ## 6. Limites connues à la clôture de M1-B2
 
 Ces limites, plus les manques révélés par la marche à blanc elle-même, sont
-reprises et détaillées dans `BACKLOG-M2.md`.
+portées par le plan de travail « Route vers LIVE_SMALL » (chantiers 8.1, 8.6,
+8.7 et 8.8). Ce runbook décrit une campagne close et n'est plus mis à jour.
 
 
 - `venues/swap.py` est un stub : P4 n'est mesurable qu'en partie. Le

@@ -2,7 +2,9 @@
 
 Spécification complète pour implémentation. Ce document est la source de vérité : toute décision de code qui contredit ce document est un bug. Langue du code : identifiants et commentaires en anglais, logs et alertes en français.
 
-Paramètres sources : classeur `montage_C_delta_neutre.xlsx`, feuille "Model C", validé par l'opérateur le 25/08/2026. Toute divergence entre ce README et le classeur se résout en faveur du classeur, puis ce README est mis à jour.
+Paramètres : `config.yaml.example` en est la liste canonique et commentée. Le bilan de référence, les bandes de sécurité et le carry se **dérivent** de la config par `scripts/classeur.py` : ce README énonce les règles de dérivation, jamais les chiffres qui en sortent, pour que les deux ne puissent pas se contredire. Le classeur `montage_C_delta_neutre.xlsx` d'origine (validé le 25/08/2026) n'est plus la référence : il supposait le LT du wstETH sur Ethereum (0,81), alors qu'Arbitrum applique 0,79.
+
+**Ce document dit quoi et pourquoi, jamais quand.** L'ordre de réalisation, l'état d'avancement, les estimations et les mesures qui ont motivé chaque révision vivent dans le plan de travail « Route vers LIVE_SMALL », tenu hors du dépôt. Chaque chantier du plan réalise une section d'ici ; une exigence d'ici qu'aucun chantier ne porte est un oubli à signaler. L'installation et l'exploitation du serveur sont dans `deploy/README.md`.
 
 ---
 
@@ -13,13 +15,13 @@ Le bot exploite une position delta-neutre : du wstETH en collatéral sur Aave v3
 Le bot n'est PAS un trader : il ne prend aucune décision directionnelle. Ses seules missions :
 1. Construire et déconstruire la position selon la "porte de régime" (moyenne 30 jours du funding).
 2. Maintenir les ratios cibles quand le prix bouge (re-centrage).
-3. Empêcher toute liquidation, sur les deux flancs (pompe, coussin, réduction d'urgence).
+3. Empêcher toute liquidation, sur les deux flancs (pompe, coussin, marge d'urgence).
 4. Écrémer le funding accumulé selon la politique de distribution (v1 : recomposition, voir 8.5).
 5. Tout journaliser et s'arrêter proprement quand il est aveugle.
 
 Principe cardinal de sécurité : **le pont sert au confort, jamais à la survie.** Toute action de survie doit passer par un chemin local exécutable en secondes.
 
-Particularité du châssis choisi : les bandes de liquidation sont volontairement asymétriques (−15,7 % / +8,0 %). Le flanc étroit (hausse) est celui qui dispose des défenses les plus rapides (pompe montante ~2 min, réduction ~2 s) ; le flanc large (baisse) est celui dont la pompe est lente (~6 min). Cette asymétrie est un choix de conception, pas un accident : ne pas la "corriger".
+Particularité du châssis choisi : les bandes de liquidation sont volontairement asymétriques. Le flanc étroit (hausse, fixé par le levier du short) est celui qui dispose des défenses les plus rapides (ajout de marge depuis la réserve HL, local, ~1 s) ; le flanc large (baisse, fixé par le LT Aave lu on-chain et la LTV cible) est celui dont la pompe est lente (pont retour, plusieurs minutes). Les largeurs exactes, coussin plein et coussin vide, sont publiées par `scripts/classeur.py`. Cette asymétrie est un choix de conception, pas un accident : ne pas la "corriger".
 
 La performance vient de l'exécution, pas de l'idée : le rendement est un fait de marché non prédictible, le métier du bot est l'exactitude. L'exactitude se mesure sur cinq dimensions (justesse, fidélité, vitesse, robustesse, coût), définies en section 12 et testées en section 15.
 
@@ -31,17 +33,18 @@ La performance vient de l'exécution, pas de l'idée : le rendement est un fait 
 |---|---|
 | Notionnel | Taille du short × prix mark, en USD. Base de calcul du funding. |
 | Delta | Valeur spot (wstETH en USD) moins notionnel du short. Cible : 0. |
-| LTV | Dette totale USD / collatéral total USD sur Aave. Cible : 70 %. |
+| LTV | Dette totale USD / collatéral total USD sur Aave. Cible : `target_ltv` (décision n° 3, §17). |
 | HF (health factor) | (Collatéral × seuil de liquidation) / dette, lu on-chain via Aave. Liquidation si HF < 1. |
 | Margin ratio | Marge isolée / notionnel du short sur Hyperliquid. Cible : 10 % (levier 10x). |
 | Anchor | Prix ETH du dernier re-centrage. Référence des seuils de re-centrage. |
 | Re-centrage | Remise des ratios à leur cible après un mouvement de prix au-delà du seuil (asymétrique, voir config). |
 | Pompe | Transfert de collatéral entre Aave et Hyperliquid via le pont (2 min aller, 6 min retour). |
 | Coussin | USDC déposé en supply sur Aave, réserve de secours à 5 secondes. |
-| Réduction | Fermeture partielle du short en urgence (2 secondes, sans pont). |
+| Réduction | Fermeture partielle du short (IOC, sans pont). Repli de P2 quand la réserve HL est épuisée : elle limite la perte d'une liquidation sans en éloigner le prix. |
+| Réserve HL | USDC libre sur le compte Hyperliquid (compte unifié : le solde spot est la marge mobilisable), dimensionnée à `emergency.hl_reserve_pct` du notionnel. Seule défense rapide du flanc haut : P2 la verse dans la marge isolée. |
 | Écrémage | Traitement hebdomadaire de l'excédent de marge (v1 : recomposition). |
 | Recomposition | Politique de réinvestissement : re-ciblage global de la machine à ratios constants (voir 8.5). |
-| Porte de régime | Règle qui fixe l'exposition (2,5x / 1,5x / 0) selon la moyenne 30 j du funding. |
+| Porte de régime | Règle qui fixe l'exposition (`exposure_mult` / `exposure_mult_half` / 0) selon la moyenne 30 j du funding. |
 | BLIND | État dégradé : le bot ne peut plus lire ou agir de façon fiable. Réaction : dégonfler, pas attendre. |
 | TRACER | Mode d'exécution de la marche à blanc : seules des micro-opérations de mesure sont autorisées. |
 
@@ -49,100 +52,76 @@ La performance vient de l'exécution, pas de l'idée : le rendement est un fait 
 
 ## 3. Architecture
 
-Quatre modules + un état persistant. Python 3.11+, asyncio.
+Un moteur de décision pur, entouré de lectures, d'exécutions et d'un état persistant. Python 3.11+, asyncio.
 
 ```
-src/
-  watcher.py      # lectures : WS Hyperliquid (mark price, funding, fills, user events),
-                  # RPC Arbitrum (HF, LTV, soldes, événements de liquidation Aave)
-  decision.py     # moteur de décision PUR (aucun I/O) : état observé -> action ou None.
-                  # Contient le solveur d'état cible. Testable unitairement à 100 %.
-  executor.py     # exécution des actions : tx Aave, ordres HL, pont, swaps.
-                  # Chemins pré-armés (approvals faites), idempotent, journalise avant d'agir.
-  watchdog.py     # mesure les latences réelles (p50/p95), détecte l'état BLIND,
-                  # déclenche le dégonflage de sécurité, gère le kill-file.
-  state.py        # persistance (SQLite) : journal d'intentions, anchor, régime, compteurs.
+src/delta0/
+  watcher.py      # snapshot unique et daté : Aave (un eth_call Multicall3), Hyperliquid (REST + WS)
+  decision.py     # moteur de décision PUR (aucun I/O) : état observé -> action typée ou NOOP.
+                  # Contient le solveur d'état cible et les bandes dérivées du LT. Testable à 100 %.
+  executor.py     # exécution Aave : tx signées, journal avant envoi, idempotence
+  hl_executor.py  # exécution Hyperliquid : ordres, marge isolée
+  safety.py       # garde-fous vérifiés AVANT tout appel réseau (plafonds, soldes, KILL)
+  watchdog.py     # fraîcheur des venues, état BLIND, fichiers KILL
+  latency.py      # p50/p95 des chemins critiques contre leurs budgets (§7), mode prudent
+  reconcile.py    # réconciliation au démarrage : chaîne et API contre le journal
+  failure.py      # cause de chaque échec, sous une forme que le journal garde
+  state.py        # persistance SQLite : intentions, état, transferts, mesures
+  alerts.py       # alertes Telegram, branchées sur la journalisation
+  rpc.py          # bascule entre endpoints RPC, délai dur par requête
+  gas.py          # marge de gaz sur les estimations Arbitrum
+  hl_api.py       # lecture des réponses du SDK HL (refus renvoyés, pas levés)
+  tracer.py       # boucle du mode TRACER (marche à blanc)
+  main.py         # CLI et câblage : status, tracer, report, config-check ; modes DRY_RUN / LIVE_SMALL / LIVE
+  config/         # schéma de config.yaml, invariants vérifiés au chargement
   venues/
-    hyperliquid.py  # wrapper SDK officiel (info + exchange + WS)
-    aave.py         # wrapper web3 : Pool, DataProvider, aTokens
-    swap.py         # agrégateur (Odos ou 1inch), garde-fou slippage
+    aave.py         # lectures Aave v3 : Pool, oracle, aTokens, jeton de dette
+    hyperliquid.py  # lectures HL (SDK officiel)
+    hl_stream.py    # flux WS : mark price, événements de liquidation
     bridge.py       # dépôt Bridge2, retrait via API HL, suivi de crédit
-  main.py         # boucle principale, câblage, modes (DRY_RUN / LIVE_SMALL / LIVE)
-config.yaml
+    swap.py         # agrégateur (Odos ou 1inch), garde-fou slippage
+config.yaml.example
+scripts/          # classeur, simulations, lecture des paramètres Aave, débouclage manuel
 tests/
 backtest/         # rejeu court (M2) et backtest long (M2b) : données, splicing, rapports
+deploy/           # unité systemd, chrony, journald, procédure d'installation du serveur
 ```
 
 Règle d'or : `decision.py` ne fait AUCUN appel réseau. Il reçoit un snapshot d'état complet et retourne une action typée avec sa priorité. C'est ce qui rend le bot testable et les décisions reproductibles.
 
-Solveur d'état cible : une fonction unique `target_state(equity, config) -> {spot_target, notional_target, margin_target, debt_target}` avec spot_target = equity × exposure_mult, notional_target = spot_target, margin_target = spot_target × target_margin_ratio, debt_target = target_ltv × collateral_target. BUILD, RECENTER, SKIM et DEFLATE sont tous des convergences vers cet état cible ; seules les urgences P1 à P4 y dérogent.
+Solveur d'état cible : une fonction unique `target_state(equity, config, cushion_usd) -> {spot_target, notional_target, margin_target, reserve_target, debt_target}`. Le coussin et la réserve HL sont du capital immobilisé : ils sortent de l'équité déployable. La réserve étant une fraction du notionnel, lui-même fonction du déployé, la boucle se résout : spot_target = m × (equity − cushion) / (1 + m × hl_reserve_pct), avec m = exposure_mult ; notional_target = spot_target ; margin_target = spot_target × target_margin_ratio ; reserve_target = spot_target × hl_reserve_pct ; debt_target = target_ltv × spot_target. La dette se dimensionne sur le spot seul : dimensionnée sur spot + coussin, le coussin porterait sa propre dette et coûterait plus de bande qu'il n'en achète une fois consommé. `scripts/classeur.py` vérifie que ce solveur et le bilan qu'il publie coïncident. BUILD, RECENTER, SKIM et DEFLATE sont tous des convergences vers cet état cible ; seules les urgences P1 à P4 y dérogent.
 
 ---
 
 ## 4. Paramètres de configuration
 
-Tous les paramètres vivent dans `config.yaml`. Aucune constante métier en dur dans le code. Les paramètres de risque Aave (LT, LTV max) sont LUS on-chain au démarrage ; les valeurs du YAML ne servent que de garde-fou de cohérence (alerte si écart).
+Tous les paramètres vivent dans `config.yaml`, dont `config.yaml.example` est la liste canonique et commentée ; ce README ne la recopie pas. Aucune constante métier en dur dans le code. Les paramètres de risque Aave (LT, LTV max) sont LUS on-chain à chaque cycle. Une config qui viole une règle ci-dessous est refusée au chargement.
 
-```yaml
-capital_usd: 20000            # capital initial de référence (classeur Model C)
-short_leverage: 10            # levier du short HL (marge isolée)
-target_ltv: 0.70              # LTV cible Aave
-target_margin_ratio: 0.10     # = 1 / short_leverage
-exposure_mult: 2.5            # = 1 / (1 - target_ltv + 1/short_leverage) ; recalculé et vérifié au boot
-exposure_mult_half: 1.5       # exposition en régime intermédiaire
-maintenance_margin: 0.02      # maintenance HL estimée ; lue via API au boot, alerte si écart
-cushion_pct: 0.05             # coussin USDC en supply Aave (% du capital) = 1 000 $
-cushion_floor_pct: 0.025      # sous ce niveau : reconstitution prioritaire à l'écrémage
-recenter_up: 0.045            # seuil de re-centrage à la hausse (bande haute étroite : +8 %)
-recenter_down: 0.06           # seuil de re-centrage à la baisse (bande basse large : -15,7 %)
-delta_tolerance: 0.02         # |delta| / spot max toléré avant re-truage du short
-skim_cron: "SUN 12:00 UTC"    # écrémage hebdomadaire
-skim_min_usd: 200             # sous ce montant, l'écrémage attend la semaine suivante
-skim_policy: recompose        # recompose | deleverage | dividend (v1 : recompose)
-regime:
-  spread_full_bps: 500        # funding30j >= borrow + 5 pts -> exposition pleine
-  hysteresis_days: 7          # confirmation avant tout changement de régime
-slippage_max_bps: 30
-order_style: maker_then_cross # ALO 60 s puis traversée du spread ; urgences : IOC direct
-gas_min_eth: 0.003            # réserve de gas Arbitrum, blocage des ops non critiques si dessous
-emergency:
-  margin_ratio_pump: 0.05     # déclenche la pompe montante (prix ~ +5 % depuis l'anchor)
-  margin_ratio_reduce: 0.035  # déclenche la réduction d'urgence (2 s), ~1,5 pt de prix avant liquidation
-  reduce_fraction: 0.30       # part du short fermée par réduction
-  ltv_pump: 0.75              # déclenche la pompe descendante (prix ~ -6,7 %)
-  ltv_cushion: 0.79           # déclenche le remboursement depuis le coussin (prix ~ -11,4 %)
-  ltv_deleverage: 0.81        # déclenche le désendettement par étapes (prix ~ -13,6 %)
-watchdog:
-  ws_stale_s: 10
-  rpc_fail_s: 30
-  tx_fail_max: 3
-  latency_budget_factor: 1.5  # si p95 mesuré > budget x facteur : re-centrage anticipé (0.03 / 0.045)
-venues:
-  arbitrum_rpc: [primary_url, fallback_url]
-  usdc_address: "0xaf88...5831"   # USDC NATIF uniquement, jamais USDC.e
-  aave_pool: "..."                # adresses officielles Aave v3 Arbitrum
-  hl_api: "https://api.hyperliquid.xyz"
-alerts:
-  telegram_bot_token: env:TG_TOKEN
-  telegram_chat_id: env:TG_CHAT
-mode: DRY_RUN                  # DRY_RUN | LIVE_SMALL | LIVE
-live_small_cap_pct: 0.10       # plafond de capital en mode LIVE_SMALL (2 000 $)
-```
+Groupes : capital et levier (`capital_usd`, `short_leverage`, `target_ltv`, `target_margin_ratio`, `exposure_mult`, `exposure_mult_half`) ; coussin (`cushion_pct`, `cushion_floor_pct`) ; re-centrage et delta (`recenter_up`, `recenter_down`, `delta_tolerance`) ; écrémage (`skim_*`) ; porte de régime (`regime.*`) ; exécution (`slippage_max_bps`, `order_style`, `gas_min_eth`) ; urgences (`emergency.*`) ; `watchdog.*` ; `venues.*` (adresses, dont USDC NATIF uniquement, jamais USDC.e) ; `alerts.*` ; `mode` et `live_small_cap_pct`.
 
-### Bilan de référence attendu après BUILD (assertions des tests M3)
+Règles de dérivation :
+- `target_margin_ratio = 1 / short_leverage` et `exposure_mult = 1 / (1 − target_ltv + 1 / short_leverage)`.
+- **Flanc bas : pas de LTV absolue.** Les seuils sont des marges sous le LT lu on-chain (`emergency.ltv_margin_pump > ltv_margin_cushion > ltv_margin_deleverage`). Seuil en LTV = LT − marge, comparé en HF : HF_seuil = LT / (LT − marge). Un seuil absolu écrit dans un fichier devient faux dès que la gouvernance Aave déplace le LT, ou quand on change de chaîne. Le démarrage est refusé si le seuil de pompe tombe au niveau de `target_ltv` ou dessous.
+- **Flanc haut : seuils en margin ratio**, `margin_ratio_pump > margin_ratio_reduce`, tous deux au-dessus de la maintenance lue via l'API.
+- **Capital immobilisé** : le coussin (`cushion_pct` du capital) et la réserve HL (`emergency.hl_reserve_pct` du notionnel) sortent de l'équité déployable (solveur, §3).
 
-| Poste | Valeur cible | Tolérance |
-|---|---|---|
-| wstETH déposé sur Aave | 50 000 $ | ± 1 % |
-| Marge USDC sur Hyperliquid | 5 000 $ | ± 1 % |
-| Dette USDC totale | 35 000 $ | ± 1 % |
-| Notionnel du short | 50 000 $ | ± delta_tolerance |
-| LTV | 70,0 % | ± 0,5 pt |
-| Margin ratio | 10,0 % | ± 0,5 pt |
-| Bandes de liquidation | −15,7 % / +8,0 % | recalculées depuis les paramètres lus on-chain |
-| Coussin USDC (supply Aave) | 1 000 $ | ± 1 % |
+### Bilan de référence après BUILD (assertions des tests M3)
 
-Hypothèses économiques de référence du classeur (pour le module comptable et les simulations, pas pour les décisions) : staking 2,7 %, emprunt USDC 5 %, funding moyen retenu 11 %, frais 40 $/mois, provision accidents 250 $/mois, croissance recomposition théorique 25,5 %/an.
+Les valeurs cibles sont la sortie de `scripts/classeur.py` pour la config en vigueur. Les tolérances :
+
+| Poste | Tolérance |
+|---|---|
+| wstETH déposé sur Aave | ± 1 % |
+| Marge isolée sur Hyperliquid | ± 1 % |
+| Réserve libre sur Hyperliquid | ± 1 % |
+| Dette USDC totale | ± 1 % |
+| Notionnel du short | ± delta_tolerance |
+| LTV | cible ± 0,5 pt (le LTV observé est sous `target_ltv`, le coussin comptant comme collatéral) |
+| Margin ratio | `target_margin_ratio` ± 0,5 pt |
+| Coussin USDC (supply Aave) | ± 1 % |
+| Bandes de liquidation | recalculées depuis le LT lu on-chain, coussin plein et coussin vide |
+
+Hypothèses économiques (simulations et module comptable, jamais les décisions) : celles de `scripts/classeur.py` et `scripts/simulate.py`.
 
 ---
 
@@ -151,23 +130,29 @@ Hypothèses économiques de référence du classeur (pour le module comptable et
 Le watcher produit un snapshot unique et daté. Toutes les formules ci-dessous sont implémentées dans `decision.py` et testées unitairement.
 
 ```
+wsteth_price_usd = getAssetPrice(wstETH) de l'oracle Aave           # jamais le mark du perp
+wsteth_eth_ratio = getAssetPrice(wstETH) / getAssetPrice(WETH)     # stEthPerToken() n'existe pas sur Arbitrum
 spot_usd        = wsteth_atoken_balance * wsteth_price_usd
+spot_eth        = wsteth_atoken_balance * wsteth_eth_ratio        # ce que le short doit égaler
 cushion_usd     = usdc_atoken_balance
 collateral_usd  = spot_usd + cushion_usd
 debt_usd        = usdc_variable_debt_balance
-ltv             = debt_usd / collateral_usd
-hf              = lu directement via Pool.getUserAccountData (ne pas recalculer)
+ltv             = debt_usd / collateral_usd                        # lecture et rapports
+hf              = lu directement via Pool.getUserAccountData       # décisions P3, P4, P6 ; ne pas recalculer
 notional_usd    = short_size_eth * mark_price
 margin_ratio    = isolated_margin_usd / notional_usd
-delta_usd       = spot_usd - notional_usd
-delta_pct       = delta_usd / spot_usd
+delta_eth       = spot_eth - short_size_eth
+delta_pct       = delta_eth / spot_eth                             # en ETH : pas de mélange de deux prix
 price_move      = (mark_price - anchor_price) / anchor_price
 funding_30d     = moyenne(funding horaire sur 720 h) * 8760      # annualisé
 borrow_apr      = taux variable USDC lu on-chain (ray -> apr)
 carry_spread    = funding_30d - borrow_apr
-equity          = collateral_usd + isolated_margin_usd - debt_usd
+equity          = collateral_usd + isolated_margin_usd + usdc_wallet + hl_free_usdc - debt_usd
+                                                                   # les soldes libres sont des dollars possédés
 exposure_mult   = 1 / (1 - target_ltv + 1/short_leverage)        # vérifié contre config au boot
 ```
+
+Toutes les lectures Aave d'un cycle viennent du même bloc.
 
 ---
 
@@ -192,18 +177,18 @@ Règles d'état :
 
 ## 7. Table de décision (ordre de priorité strict)
 
-Le moteur évalue de haut en bas et retourne la première action déclenchée. Latence max = budget d'exécution, mesuré par le watchdog. Échelle des déclencheurs côté hausse : re-centrage +4,5 %, pompe ~+5 %, réduction ~+6,5 %, liquidation +8 %. Côté baisse : re-centrage −6 %, pompe ~−6,7 %, coussin ~−11,4 %, désendettement ~−13,6 %, liquidation −15,7 %.
+Le moteur évalue de haut en bas et retourne la première action déclenchée. Latence max = budget d'exécution, mesuré par le watchdog. L'échelle des déclencheurs traduite en mouvement de prix, pour la config et le LT en vigueur, est publiée par `scripts/classeur.py`. Côté haut l'ordre est re-centrage, pompe, marge d'urgence, liquidation ; côté bas re-centrage, pompe, coussin, désendettement, liquidation.
 
 | P | Condition | Action | Chemin | Latence max |
 |---|---|---|---|---|
 | 1 | Événement de liquidation détecté (Aave ou HL) | Couper le short pour égaler le spot restant, puis REPAIRING | local HL | 2 s |
-| 2 | margin_ratio <= 0.035 | Réduction : fermer reduce_fraction du short (IOC) | local HL | 2 s |
-| 3 | ltv >= 0.79 | Rembourser une tranche depuis le coussin | local Aave | 10 s |
-| 4 | ltv >= 0.81 et coussin < tranche | Désendettement par étapes : repay coussin restant -> withdraw wstETH -> swap -> repay, en boucle | local Aave | 60 s |
-| 5 | margin_ratio <= 0.05 | Pompe montante : borrow -> bridge -> add margin | pont | 3 min |
-| 6 | ltv >= 0.75 | Pompe descendante : withdraw HL -> bridge -> repay | pont | 8 min |
-| 7 | price_move >= +0.045 ou <= -0.06 | Re-centrage complet (procédure 8.3 ou 8.4) | pont | 15 min |
-| 8 | abs(delta_pct) > 0.02 | Re-truage du short vers notional_target | local HL | 60 s |
+| 2 | margin_ratio <= margin_ratio_reduce | Marge d'urgence : verser la réserve HL dans la marge isolée ; si elle ne suffit pas à repasser le seuil, repli sur la réduction (procédure 8.6) | local HL | 2 s |
+| 3 | HF <= LT / (LT − ltv_margin_cushion) et coussin >= tranche | Rembourser une tranche depuis le coussin | local Aave | 10 s |
+| 4 | HF <= LT / (LT − ltv_margin_deleverage) et coussin < tranche | Désendettement par étapes : repay coussin restant -> withdraw wstETH -> swap -> repay, en boucle | local Aave | 60 s |
+| 5 | margin_ratio <= margin_ratio_pump | Pompe montante : borrow -> bridge -> add margin | pont | 3 min |
+| 6 | HF <= LT / (LT − ltv_margin_pump) | Pompe descendante : withdraw HL -> bridge -> repay | pont | 8 min |
+| 7 | price_move >= recenter_up ou <= −recenter_down | Re-centrage complet (procédure 8.3 ou 8.4) | pont | 15 min |
+| 8 | abs(delta_pct) > delta_tolerance | Re-truage du short vers spot_eth | local HL | 60 s |
 | 9 | Cron écrémage atteint et excédent > skim_min_usd | Écrémage-recomposition (procédure 8.5) | pont | sans enjeu |
 | 10 | Changement de régime confirmé (hystérésis) | BUILDING ou DEFLATING par étapes | pont | jours |
 
@@ -216,7 +201,7 @@ Les priorités 1 à 4 sont les seules autorisées en état BLIND partiel (selon 
 ### 8.1 BUILD (construction)
 Précondition : porte de régime OUVERTE (carry_spread >= spread_full_bps confirmé 7 jours), mode != DRY_RUN.
 1. Vérifier : e-mode Aave désactivé (`setUserEMode(0)`), approvals en place, gas >= gas_min_eth, USDC natif.
-2. Déposer le coussin : supply USDC (cushion_pct × capital = 1 000 $).
+2. Déposer le coussin : supply USDC (cushion_pct × capital).
 3. Construire en 3 tranches de taille égale. Pour chaque tranche :
    a. Boucle itérative jusqu'à l'exposition de tranche : supply wstETH -> borrow USDC -> swap USDC->wstETH -> supply. 3 itérations max par tranche, slippage <= slippage_max_bps.
    b. Borrow la marge de tranche (target_margin_ratio × notionnel de tranche), bridge vers HL.
@@ -245,14 +230,15 @@ Ordre inverse strict : fermer le short (maker par tranches) -> retirer la marge 
 2. Retirer excess, bridge retour.
 3. Affecter dans l'ordre :
    a. Reconstitution du coussin jusqu'à cushion_pct × capital courant.
-   b. Recomposition par re-ciblage global (true-up) : recalculer equity (= collateral + marge + solde - dette), obtenir l'état cible complet via le solveur, puis exécuter les ÉCARTS entre l'état courant et ces cibles (achat de wstETH financé par le solde plus le complément d'emprunt, appoint de marge, agrandissement du short). Cette formulation absorbe en une seule opération le funding à réinvestir ET la dérive de la semaine (intérêts courus qui poussent la LTV vers le haut, staking qui la tire vers le bas) : après l'opération, toute la machine, pas seulement l'incrément, est revenue à LTV 70 % et marge 10 %.
+   b. Recomposition par re-ciblage global (true-up) : recalculer equity (= collateral + marge + solde - dette), obtenir l'état cible complet via le solveur, puis exécuter les ÉCARTS entre l'état courant et ces cibles (achat de wstETH financé par le solde plus le complément d'emprunt, appoint de marge et de réserve HL, agrandissement du short). Cette formulation absorbe en une seule opération le funding à réinvestir ET la dérive de la semaine (intérêts courus qui poussent la LTV vers le haut, staking qui la tire vers le bas) : après l'opération, toute la machine, pas seulement l'incrément, est revenue aux cibles du solveur.
 4. Si la porte de régime n'est pas OUVERTE : la recomposition est suspendue, le solde part en remboursement de dette (politique deleverage par défaut en régime non confirmé).
 5. Journaliser la ligne comptable (funding encaissé, intérêts courus, net, capital courant recalculé).
 
-### 8.6 EMERGENCY_REDUCE (P2)
-1. Ordre IOC : fermer reduce_fraction du short. Pas de maker, pas d'attente.
-2. Alerte CRITICAL. Passer REPAIRING.
-3. REPAIRING (une fois margin_ratio >= 0.07 et volatilité 5 min < 2 %) : vendre la tranche de wstETH excédentaire (withdraw -> swap), repay dette, re-truer le delta, re-poser l'anchor.
+### 8.6 MARGE D'URGENCE (P2)
+Fermer une partie d'une position en marge isolée ne déplace pas son prix de liquidation : la place libère la marge au prorata de la taille fermée, et le margin ratio ne bouge pas. La défense du flanc haut est donc l'ajout de marge, pas la réduction.
+1. Montant voulu : de quoi ramener margin_ratio à target_margin_ratio, plafonné à la réserve libre HL. `update_isolated_margin`, local, signable par l'agent.
+2. Si ce montant ne suffit pas à repasser au-dessus de margin_ratio_reduce, la réserve n'est PAS dépensée : la brûler sans sortir du danger est pire que ne rien faire. Repli : ordre IOC fermant reduce_fraction du short, qui limite la perte d'une liquidation sans en éloigner le prix. Alerte CRITICAL, passer REPAIRING.
+3. REPAIRING (une fois margin_ratio >= 0.07 et volatilité 5 min < 2 %) : après un repli, vendre la tranche de wstETH excédentaire (withdraw -> swap), repay dette, re-truer le delta, re-poser l'anchor. La réserve se reconstitue au true-up de l'écrémage suivant (8.5).
 
 ### 8.7 EMERGENCY_REPAY et désendettement (P3, P4)
 Tranche standard : 25 % du coussin initial. P3 : withdraw coussin -> repay. P4 : si coussin insuffisant, boucle locale : repay ce qui reste -> withdraw wstETH rendu disponible -> swap -> repay, jusqu'à ltv <= target_ltv + 0,01. Puis re-truage du short (le spot a diminué).
@@ -265,8 +251,8 @@ Détection : événement `LiquidationCall` Aave (filtre sur l'adresse du bot) ou
 
 ### 8.9 Porte de régime (P10)
 Évaluée une fois par jour à 00:00 UTC sur funding_30d et borrow_apr :
-- carry_spread >= spread_full_bps pendant hysteresis_days -> cible 2,5x.
-- 0 <= carry_spread < spread_full_bps pendant hysteresis_days -> cible 1,5x.
+- carry_spread >= spread_full_bps pendant hysteresis_days -> cible exposure_mult.
+- 0 <= carry_spread < spread_full_bps pendant hysteresis_days -> cible exposure_mult_half.
 - carry_spread < 0 pendant hysteresis_days -> cible 0 (DEFLATING vers PARKED).
 Tout changement d'exposition se fait par tranches de 25 % de l'écart, une tranche par heure maximum, via les procédures 8.1/8.2 partielles. Jamais de changement d'exposition en urgence.
 
@@ -279,7 +265,8 @@ Tout changement d'exposition se fait par tranches de 25 % de l'écart, une tranc
 - Marge ISOLÉE obligatoire sur ETH-PERP, levier short_leverage (10x). Vérifier au boot, corriger si besoin. Lire la maintenance margin réelle via l'API et alerter si écart avec maintenance_margin.
 - Ordres : maker (ALO) avec timeout 60 s puis traversée du spread pour les opérations planifiées ; IOC pour P1/P2. Gérer les fills partiels : re-coter le reliquat, jamais considérer un ordre comme atomique.
 - Funding : endpoint funding history pour la moyenne 30 j ; crédité chaque heure dans la marge, aucun traitement requis à part le suivi comptable.
-- Clé : wallet dédié au bot. Les ordres passent par un agent wallet (clé séparée, sans droit de retrait) ; les retraits exigent la signature du wallet maître. Les deux clés en variables d'environnement, jamais dans le code ni le journal.
+- Clé : wallet dédié au bot. Les ordres et la marge isolée passent par un agent wallet (clé séparée). Un agent ne peut ni transférer ni retirer : les retraits, transferts et traversées du pont exigent la signature du wallet maître. Un agent expire au bout de 90 jours : rotation planifiée, et démarrage refusé à moins de 7 jours de l'expiration. Les deux clés en variables d'environnement, jamais dans le code ni le journal.
+- Compte unifié : le solde spot USDC est la marge mobilisable et la réserve HL. `withdrawable` et `accountValue` ne la mesurent pas (ils valent 0 pendant qu'un retrait aboutit) et ne servent à aucune décision.
 - Contraintes : dépôt minimum 5 USDC, retrait minimum 2 USDC, frais de retrait 1 USDC, notionnel minimum ~10 $ par ordre, USDC natif Arbitrum uniquement.
 
 ### 9.2 Aave v3 (Arbitrum)
@@ -320,7 +307,7 @@ Tout changement d'exposition se fait par tranches de 25 % de l'écart, une tranc
 ### Invariants (vérifiés à chaque snapshot, violation = alerte + action de la table)
 ```
 I1  abs(delta_pct) <= 0.02 en RUNNING stable
-I2  ltv <= 0.72 en croisière ; jamais >= 0.79 plus de 5 min sans action P3 déclenchée
+I2  ltv <= target_ltv + 0.02 en croisière ; jamais HF <= seuil coussin plus de 5 min sans action P3 déclenchée
 I3  margin_ratio >= 0.07 en croisière ; jamais <= 0.035 sans action P2 déclenchée
 I4  cushion_usd >= cushion_floor_pct * capital courant (sinon reconstitution prioritaire au prochain écrémage)
 I5  gas_eth >= gas_min_eth (sinon blocage des opérations non critiques + alerte)
@@ -368,6 +355,8 @@ Le digest quotidien EST le tableau d'exactitude, cinq dimensions, cinq chiffres,
 | M3 | Executor complet en LIVE_SMALL (10 % du capital, soit 2 000 $) | 2 semaines : au moins 1 re-centrage réel chaque sens + 1 écrémage-recomposition, zéro violation d'invariant, bilan conforme à la section 4 |
 | M4 | LIVE pleine taille + runbook validé | Bascule après revue du journal M3 |
 
+Ce tableau fixe les critères d'acceptation. Ce qui reste à faire pour les atteindre, dans quel ordre et à quel coût, est dans le plan de travail (voir l'en-tête). M3 exige un executor pour chaque action de la table §7 et chaque procédure §8 : le moteur de décision seul ne suffit pas.
+
 Le mode DRY_RUN est obligatoire et bloquant : le bot refuse de passer LIVE sans un rapport de latences M1 de moins de 30 jours. LIVE_SMALL plafonne le capital déployé à live_small_cap_pct.
 
 Précision M1 : la marche à blanc signifie zéro position, pas zéro fonds. Le wallet reçoit une float opérationnelle (~100 $ : 50 USDC + réserve de gas) servant de traceur. Trois niveaux de mesure : lectures pures (WS, RPC, funding : gratuites) ; transactions traceuses Aave (supply ~10 USDC, borrow 1, repay, withdraw, gas en centimes, à heures variées y compris les fenêtres volatiles) ; traversées traceuses du pont (5-10 USDC, un aller-retour par jour minimum, frais ~1 $ par retour) et ordres HL post-only de taille minimale loin du prix, posés puis annulés. L'executor expose donc un mode TRACER avec une liste blanche de ces micro-opérations. Pendant M1, le moteur de décision tourne sur données réelles et journalise les actions qu'il aurait prises (journal des tirs à blanc, relu en revue M1). Les mesures de latence continuent indéfiniment en production.
@@ -393,7 +382,7 @@ Vue d'ensemble, du plus abstrait au plus réel :
 | 8 | Revue de bascule | la décision de passer en vrai | M4 |
 
 ### 15.1 Unitaires
-100 % de `decision.py` et du solveur d'état cible. Table de cas explicite : chaque ligne de la table de décision, chaque bord de seuil (0.0349 vs 0.0351 pour la réduction, 0.789 vs 0.791 pour le coussin), chaque combinaison de priorités concurrentes (la plus prioritaire gagne), les seuils asymétriques (+0.044 : rien ; +0.046 : re-centrage ; -0.059 : rien ; -0.061 : re-centrage).
+100 % de `decision.py` et du solveur d'état cible. Table de cas explicite : chaque ligne de la table de décision, chaque bord de seuil (0.0349 vs 0.0351 pour la marge d'urgence, HF juste au-dessus et juste au-dessous de LT / (LT − ltv_margin_cushion) pour le coussin), chaque combinaison de priorités concurrentes (la plus prioritaire gagne), les seuils asymétriques (+0.044 : rien ; +0.046 : re-centrage ; -0.059 : rien ; -0.061 : re-centrage).
 
 ### 15.2 Rejeu court (M2)
 30 jours récents, prix + funding horaires réels. Vérifie que les déclenchements tombent aux bons moments et qu'aucune action interdite n'est émise. Objectif : exactitude de la décision, pas performance.
@@ -429,7 +418,7 @@ Testnet Hyperliquid pour la jambe perp ; fork Arbitrum (anvil) pour la jambe Aav
 
 ## 16. Runbook opérateur
 
-- Démarrer : `python -m src.main --config config.yaml`. Le bot démarre toujours en réconciliation, puis reprend l'état persistant.
+- Démarrer : en service systemd selon `deploy/README.md` ; en local, `delta0 --help` liste les commandes. Le bot démarre toujours en réconciliation, puis reprend l'état persistant.
 - Pause propre : créer le fichier `KILL`. Reprise : le supprimer puis commande `resume`.
 - Dégonflage d'urgence manuel : `KILL_DEFLATE` ou commande Telegram `deflate`.
 - Intervention manuelle sur les positions : mettre en pause d'abord, TOUJOURS. Le bot réconciliera au resume.
@@ -442,7 +431,7 @@ Testnet Hyperliquid pour la jambe perp ; fork Arbitrum (anvil) pour la jambe Aav
 Décisions figées (ne pas rouvrir pendant l'implémentation) :
 1. Une seule venue perp (Hyperliquid), une seule chaîne (Arbitrum), une seule paire (ETH).
 2. Pas de smart contract custom en v1 : boucle itérative à la construction, désendettement par étapes via le coussin (le flashloan one-shot est une optimisation v2).
-3. Levier short fixe 10x, LTV cible 70 %, exposition dérivée (2,5x) ; l'exposition n'est pilotée que par la porte de régime.
+3. Levier short fixe 10x, LTV cible 67,5 %, exposition dérivée ; l'exposition n'est pilotée que par la porte de régime. La cible valait 70 % tant que le LT supposé était 0,81 (Ethereum) ; au LT réel d'Arbitrum, 0,79, elle ne laissait qu'environ −11,4 % de bande.
 4. Politique d'écrémage v1 : recomposition quand la porte est OUVERTE, désendettement sinon. Le bot ne verse jamais de dividende de sa propre initiative.
 5. Le bot ne modifie jamais ses propres seuils ; tout changement de config exige un redémarrage explicite.
 6. Clés sur le serveur du bot, capital plafonné en conséquence.

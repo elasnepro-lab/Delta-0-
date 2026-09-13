@@ -46,9 +46,10 @@ Arborescence retenue par l'unité systemd fournie :
 /var/lib/delta0      la base SQLite, en lecture-écriture
 ```
 
-La base sort du dépôt exprès. `BACKLOG-M2.md` §5 le demande : une base SQLite
-en mode WAL tient trois fichiers qui doivent rester mutuellement cohérents, et
-elle n'a rien à faire dans un dossier synchronisé ni dans un dépôt git.
+La base sort du dépôt exprès : une base SQLite en mode WAL tient trois fichiers
+qui doivent rester mutuellement cohérents, et elle n'a rien à faire dans un
+dossier synchronisé ni dans un dépôt git. Pendant M1 elle a tourné sept jours
+dans un dossier OneDrive, qui téléverse ces trois fichiers indépendamment.
 
 ## 2. Premier accès et durcissement SSH
 

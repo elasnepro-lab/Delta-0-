@@ -25,8 +25,8 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 # fichiers KILL sont cherches. Sans elle la racine etait `Path.cwd()`, donc un
 # WorkingDirectory inattendu faisait chercher le frein d'urgence dans un
 # repertoire ou personne n'ecrirait jamais, sans un mot.
-# La base sort du depot : voir BACKLOG-M2 §5, une base SQLite en WAL n'a rien a
-# faire dans un dossier synchronise, ni dans un depot git.
+# La base sort du depot : une base SQLite en WAL n'a rien a faire dans un
+# dossier synchronise, ni dans un depot git (voir deploy/README.md §1).
 #
 # On appelle le binaire du venv, PAS `uv run`. `uv run` resout les dependances
 # au demarrage et veut ecrire dans son cache et dans le venv, ce que le bac a
