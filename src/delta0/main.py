@@ -28,6 +28,7 @@ from delta0.alerts import AlertSink, build_sink, make_alert_processor
 from delta0.config import Config, RuntimeMode, load_config
 from delta0.decision import target_state
 from delta0.executor import AaveTraceExecutor
+from delta0.hl_client import make_exchange, make_info
 from delta0.hl_executor import HLTraceExecutor
 from delta0.latency import (
     M1_REPORT_STAMP_KEY,
@@ -722,11 +723,8 @@ def _wire_micro_op_executors(
     crash rather than sign — which is the whole point of handing it nothing
     to sign with.
     """
-    # Lazy on purpose: a DRY_RUN run must never import the signing libraries.
-    from eth_account import Account  # noqa: PLC0415
-    from hyperliquid.exchange import Exchange  # noqa: PLC0415
-    from hyperliquid.info import Info as HLInfo  # noqa: PLC0415
-
+    # Signing stays lazy: `make_exchange` loads the signing libraries only when
+    # a live order is actually built, so a rehearsal never imports them.
     pkey: str | None
     if rehearse:
         pkey = None
@@ -756,7 +754,7 @@ def _wire_micro_op_executors(
         private_key=pkey,
     )
 
-    hl_info = HLInfo(cfg.venues.hl_api, skip_ws=True)
+    hl_info = make_info(cfg.venues.hl_api, websocket=False)
 
     async def _mark_price(coin: str) -> float:
         mids = hl_info.all_mids()
@@ -769,7 +767,7 @@ def _wire_micro_op_executors(
                 "répétition (--rehearse) : aucun ordre Hyperliquid ne doit être construit. "
                 "Le court-circuit dry-run de l'executor a été franchi — c'est un bug.",
             )
-        return Exchange(Account.from_key(pkey), cfg.venues.hl_api)
+        return make_exchange(pkey, cfg.venues.hl_api)
 
     # Size/price grids come from the exchange meta, not a constant: HL rejects
     # an order whose size carries more decimals than the asset allows, and the

@@ -70,7 +70,8 @@ src/delta0/
   alerts.py       # alertes Telegram, branchées sur la journalisation
   rpc.py          # bascule entre endpoints RPC, délai dur par requête
   gas.py          # marge de gaz sur les estimations Arbitrum
-  hl_api.py       # lecture des réponses du SDK HL (refus renvoyés, pas levés)
+  hl_client.py    # seul module autorisé à importer le SDK HL : clients, et refus décodés
+                  # aux deux niveaux (renvoyés au lieu d'être levés, parfois nichés dans status ok)
   tracer.py       # boucle du mode TRACER (marche à blanc)
   main.py         # CLI et câblage : status, tracer, report, config-check ; modes DRY_RUN / LIVE_SMALL / LIVE
   config/         # schéma de config.yaml, invariants vérifiés au chargement

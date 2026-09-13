@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from delta0.config import Config
-from delta0.hl_api import HLActionRefused
+from delta0.hl_client import HLActionRefused
 from delta0.hl_executor import (
     LATENCY_PATH_CANCEL,
     LATENCY_PATH_ORDER,
@@ -21,6 +21,7 @@ from delta0.hl_executor import (
 )
 from delta0.safety import MicroOpsGuard, SafetyRefused
 from delta0.state import StateStore
+from tests.hl_envelopes import C1_INSUFFICIENT_MARGIN
 
 
 @pytest.fixture
@@ -230,6 +231,45 @@ async def test_a_refused_order_is_a_failure(
         await executor.post_and_cancel()
 
     exchange.cancel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_nested_in_an_ok_envelope_is_a_failure(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+) -> None:
+    """C1, verbatim from the testnet: the refusal hides in `statuses`.
+
+    Before chantier 6.2 this passed the first-level check. An emergency IOC
+    refused for margin would have been journaled as confirmed, with a P1/P2
+    sample for an order that never reached the book.
+    """
+    executor, _, exchange = _make_executor(tmp_path, store, config, dry_run=False)
+    exchange.order.return_value = C1_INSUFFICIENT_MARGIN
+
+    with pytest.raises(HLActionRefused, match="Insufficient margin"):
+        await executor.post_and_cancel()
+
+    exchange.cancel.assert_not_called()
+    assert (await store.latency_stats(LATENCY_PATH_ORDER))["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_refused_cancel_is_a_failure_that_names_the_order(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+) -> None:
+    """The cancel answer used to be ignored: a resting order could stay unnoticed."""
+    executor, _, exchange = _make_executor(tmp_path, store, config, dry_run=False)
+    exchange.cancel.return_value = {
+        "status": "ok",
+        "response": {"type": "cancel", "data": {"statuses": [{"error": "Order was not found."}]}},
+    }
+
+    with pytest.raises(HLActionRefused, match="annulation de l'ordre 12345"):
+        await executor.post_and_cancel()
 
 
 # --- HL wire-format grids -----------------------------------------------------

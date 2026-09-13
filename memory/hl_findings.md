@@ -64,7 +64,8 @@ Un test unitaire assertait même explicitement ce dernier comportement
 (« toujours confirmé puisqu'aucune exception n'a été levée »). Il encodait le
 bug comme une intention.
 
-Tout passe désormais par `delta0.hl_api.ensure_ok`, qui transforme un refus en
+Tout passe désormais par `delta0.hl_client.ensure_ok` (seul module autorisé à
+importer le SDK depuis le chantier 6.2), qui transforme un refus en
 exception au point d'appel. Une réponse de forme inconnue compte comme un
 refus : le SDK renvoie toujours un dictionnaire pour ces actions, donc une
 autre forme signifie que le contrat a changé, et la lecture prudente d'une
@@ -181,6 +182,11 @@ chiffre du rapport M1 representant du vide.
 Correction : `ensure_ok` doit inspecter `response.data.statuses` et lever des
 qu'une entree porte une cle `error`. Les deux enveloppes ci-dessus sont a
 reprendre telles quelles comme fixtures de test (point D2 de l'audit).
+
+**Fait au chantier 6.2** (2026-09-13) : `delta0.hl_client` decode les deux
+niveaux, les enveloppes sont dans `tests/hl_envelopes.py`, et la regle ruff
+TID251 interdit d'importer le SDK ailleurs dans `src/`. Au passage, la reponse
+d'annulation n'etait jamais verifiee : elle l'est.
 
 Note de forme : `asset=4` est l'index de ETH dans l'univers perp, pas un code
 d'erreur. Le message est en anglais et non structure — il faut donc detecter la

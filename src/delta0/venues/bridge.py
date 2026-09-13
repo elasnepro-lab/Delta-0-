@@ -39,7 +39,7 @@ from web3 import AsyncWeb3
 from delta0 import failure
 from delta0.config import Config
 from delta0.gas import with_gas_margin
-from delta0.hl_api import ensure_ok, is_ok, response_detail
+from delta0.hl_client import ensure_ok, is_ok, response_detail
 from delta0.latency import elapsed_ms, measurement_path, now_perf
 from delta0.logging import get_logger
 from delta0.safety import MicroOpsGuard
@@ -494,7 +494,7 @@ class BridgeExecutor:
             return
 
         # The SDK signals rejection by RETURNING an error envelope, it does not
-        # raise (see delta0.hl_api). Treating "no exception" as success would
+        # raise (see delta0.hl_client). Treating "no exception" as success would
         # have logged a transfer that never happened, on every single crossing.
         if is_ok(result):
             log.info(

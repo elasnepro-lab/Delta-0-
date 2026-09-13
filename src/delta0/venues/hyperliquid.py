@@ -18,8 +18,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, cast
 
-from hyperliquid.info import Info
-
+from delta0.hl_client import make_info
 from delta0.logging import get_logger
 
 log = get_logger(__name__)
@@ -48,7 +47,7 @@ class HyperliquidReader:
 
     def __init__(self, api_url: str, user_address: str) -> None:
         self._user = user_address
-        self._info = Info(api_url, skip_ws=True)
+        self._info = make_info(api_url, websocket=False)
 
     async def _run(self, fn: Any, *args: Any) -> Any:
         return await asyncio.to_thread(fn, *args)

@@ -28,7 +28,7 @@ from typing import Any, Literal
 
 from delta0 import failure
 from delta0.config import Config
-from delta0.hl_api import ensure_ok
+from delta0.hl_client import ensure_ok, parse_order_response
 from delta0.latency import elapsed_ms, measurement_path, now_perf
 from delta0.logging import get_logger
 from delta0.safety import MicroOpsGuard
@@ -248,16 +248,16 @@ class HLTraceExecutor:
                 size,
                 limit_price,
             )
-            # A rejected order comes back as an error envelope, not an
-            # exception. Left unchecked, `_extract_order_id` simply returns
-            # None, the cancel is skipped and the intent is journaled as
-            # confirmed — putting a P1/P2 latency sample in the M1 report for
-            # an order that was never placed.
-            ensure_ok(order_response, "ordre post-only")
+            # A rejected order comes back as an error envelope — sometimes
+            # nested inside `status: ok` — not as an exception. Left unchecked,
+            # the cancel is skipped and the intent journaled as confirmed,
+            # putting a P1/P2 latency sample in the M1 report for an order
+            # that was never placed.
+            outcome = parse_order_response(order_response, "ordre post-only")
             # Stopped here on purpose: everything after this point is cleanup.
             order_ms = elapsed_ms(order_started)
-            order_id = self._extract_order_id(order_response)
-            fill_size = self._extract_fill_size(order_response)
+            order_id = outcome.order_id
+            fill_size = outcome.filled_size
             if fill_size > 0:
                 log.warning(
                     "hl_post_only_filled",
@@ -268,11 +268,14 @@ class HLTraceExecutor:
                     fill_size=fill_size,
                     coin=self._coin,
                 )
-            # Cancel immediately.
-            if order_id is not None:
-                cancel_started = now_perf()
-                await self._call_exchange_cancel(exchange, self._coin, order_id)
-                cancel_ms = elapsed_ms(cancel_started)
+            # Cancel immediately. A refused cancel leaves the order resting on
+            # the book, 10 % from mark: harmless at this size, but never
+            # silent. The intent fails and the alert names the order to cancel
+            # by hand.
+            cancel_started = now_perf()
+            cancel_response = await self._call_exchange_cancel(exchange, self._coin, order_id)
+            ensure_ok(cancel_response, f"annulation de l'ordre {order_id}")
+            cancel_ms = elapsed_ms(cancel_started)
         except Exception as e:
             entry = await self._journal_failure(intent_id, e)
             log.exception(
@@ -339,38 +342,6 @@ class HLTraceExecutor:
         order_id: int,
     ) -> dict[str, Any]:
         return await asyncio.to_thread(exchange.cancel, coin, order_id)
-
-    @staticmethod
-    def _extract_order_id(response: dict[str, Any]) -> int | None:
-        # HL SDK response shape:
-        #   {"status": "ok", "response": {"type": "order", "data": {"statuses": [...]}}}
-        # Each status entry is either {"resting": {"oid": int}} or {"filled": {...}}.
-        try:
-            statuses = response["response"]["data"]["statuses"]
-            for entry in statuses:
-                if isinstance(entry, dict):
-                    if "resting" in entry:
-                        return int(entry["resting"]["oid"])
-                    if "filled" in entry:
-                        return int(entry["filled"]["oid"])
-        except (KeyError, TypeError, ValueError):
-            return None
-        return None
-
-    @staticmethod
-    def _extract_fill_size(response: dict[str, Any]) -> float:
-        try:
-            statuses = response["response"]["data"]["statuses"]
-        except (KeyError, TypeError):
-            return 0.0
-        total = 0.0
-        for entry in statuses:
-            if isinstance(entry, dict) and "filled" in entry:
-                try:
-                    total += float(entry["filled"].get("totalSz", 0.0))
-                except (TypeError, ValueError):
-                    continue
-        return total
 
     # --- Journal helpers ------------------------------------------------------
 

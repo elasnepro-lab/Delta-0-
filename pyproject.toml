@@ -73,7 +73,14 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["S101", "PLR2004", "S105", "S106"]
+"tests/**/*.py" = ["S101", "PLR2004", "S105", "S106", "TID251"]
+# The one bot module allowed to touch the Hyperliquid SDK, and operator scripts
+# that live outside the bot.
+"src/delta0/hl_client.py" = ["TID251"]
+"scripts/**/*.py" = ["TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"hyperliquid".msg = "Passer par delta0.hl_client : le SDK signale ses refus par valeur de retour, parfois nichés dans status ok."
 
 [tool.ruff.format]
 quote-style = "double"
