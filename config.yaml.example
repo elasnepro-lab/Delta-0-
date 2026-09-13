@@ -12,7 +12,7 @@ exposure_mult: 2.3529411765  # = 1 / (1 - target_ltv + 1 / short_leverage), veri
 exposure_mult_half: 1.5      # lu par aucun code avant le chantier 8.6 (porte de régime)
 maintenance_margin: 0.02     # lu par aucun code avant 8.4 : la comparaison à l'API n'existe pas encore
 cushion_pct: 0.05            # 5% of capital held as USDC supply on Aave = 1000$
-cushion_floor_pct: 0.025     # lu par aucun code avant 6.1 (invariant I4) et 8.5
+cushion_floor_pct: 0.025     # invariant I4 (évalué dès la phase 3) ; reconstitution à l'écrémage en 8.5
 recenter_up: 0.045           # +8% band is narrow; recenter earlier
 recenter_down: 0.06          # -15.7% band is wide; recenter later
 delta_tolerance: 0.02        # |delta| / spot max before short retrue
@@ -25,10 +25,11 @@ regime:
   spread_full_bps: 500       # funding30d >= borrow + 5pts -> full exposure
   hysteresis_days: 7
 
+gas_min_eth: 0.003           # invariant I5 : en dessous, opérations non critiques gelées (boucle : phase 3)
+
 # Lus par aucun code pour l'instant : ne protègent de rien avant leur chantier.
 slippage_max_bps: 30         # 8.1 (agrégateur de swap)
 order_style: maker_then_cross  # 8.3 (ordres maker puis traversée)
-gas_min_eth: 0.003           # 6.1 (invariant I5)
 
 emergency:
   margin_ratio_pump: 0.05    # ~+5% price move: pump up
@@ -50,6 +51,18 @@ watchdog:
   rpc_fail_s: 30
   tx_fail_max: 3
   latency_budget_factor: 1.5
+
+# Seuils des invariants I1-I8 (README §11), aux valeurs du README par défaut.
+# Évalués par delta0/invariants.py ; appelés à chaque cycle une fois la boucle
+# de la phase 3 écrite — d'ici là, ils ne protègent encore de rien.
+invariants:
+  cruise_ltv_headroom: 0.02     # I2 : LTV au plus target_ltv + 0,02 en croisière
+  cruise_margin_floor: 0.07     # I3 : margin ratio au moins 0,07 en croisière
+  p3_grace_s: 300               # I2 : seuil du coussin tenu 5 min sans P3 -> CRITICAL et dégonflage
+  p2_grace_s: 10                # I3 : seuil de marge tenu 10 s sans P2 -> CRITICAL et dégonflage
+  transfer_warn_s: 900          # I6 : traversée de plus de 15 min -> WARN
+  transfer_critical_s: 3600     # I6 : plus d'une heure -> CRITICAL, opérations non critiques gelées
+  recompose_tolerance: 0.005    # I8 : ratios à ±0,5 pt des cibles après recomposition
 
 # M1 TRACER micro-operation safeties (README §14).
 # Defaults are conservative: dry_run True, small caps, first-use confirmation.

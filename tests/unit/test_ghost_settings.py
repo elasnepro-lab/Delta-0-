@@ -33,13 +33,11 @@ SRC = Path(__file__).resolve().parents[2] / "src" / "delta0"
 AWAITING_READER: dict[str, str] = {
     "exposure_mult_half": "8.6 — porte de régime, exposition intermédiaire",
     "maintenance_margin": "8.4 — comparaison au démarrage avec la maintenance lue via l'API",
-    "cushion_floor_pct": "6.1 — invariant I4, puis 8.5 reconstitution du coussin",
     "skim_policy": "8.5 — écrémage-recomposition",
     "regime.spread_full_bps": "8.6 — porte de régime",
     "regime.hysteresis_days": "8.6 — porte de régime",
     "slippage_max_bps": "8.1 — agrégateur de swap",
     "order_style": "8.3 — ordres maker puis traversée du spread",
-    "gas_min_eth": "6.1 — invariant I5",
     "venues.aave_data_provider": (
         "8.4 — LT de la réserve lu avant toute position : getUserAccountData rend 0 "
         "sur un compte vide"

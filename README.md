@@ -98,7 +98,7 @@ Solveur d'état cible : une fonction unique `target_state(equity, config, cushio
 
 Tous les paramètres vivent dans `config.yaml`, dont `config.yaml.example` est la liste canonique et commentée ; ce README ne la recopie pas. Aucune constante métier en dur dans le code. Les paramètres de risque Aave (LT, LTV max) sont LUS on-chain à chaque cycle. Une config qui viole une règle ci-dessous est refusée au chargement.
 
-Groupes : capital et levier (`capital_usd`, `short_leverage`, `target_ltv`, `target_margin_ratio`, `exposure_mult`, `exposure_mult_half`) ; coussin (`cushion_pct`, `cushion_floor_pct`) ; re-centrage et delta (`recenter_up`, `recenter_down`, `delta_tolerance`) ; écrémage (`skim_*`) ; porte de régime (`regime.*`) ; exécution (`slippage_max_bps`, `order_style`, `gas_min_eth`) ; urgences (`emergency.*`) ; `watchdog.*` ; `venues.*` (adresses, dont USDC NATIF uniquement, jamais USDC.e) ; `alerts.*` ; `mode` et `live_small_cap_pct`.
+Groupes : capital et levier (`capital_usd`, `short_leverage`, `target_ltv`, `target_margin_ratio`, `exposure_mult`, `exposure_mult_half`) ; coussin (`cushion_pct`, `cushion_floor_pct`) ; re-centrage et delta (`recenter_up`, `recenter_down`, `delta_tolerance`) ; écrémage (`skim_*`) ; porte de régime (`regime.*`) ; exécution (`slippage_max_bps`, `order_style`, `gas_min_eth`) ; urgences (`emergency.*`) ; `watchdog.*` ; invariants (`invariants.*`, seuils du §11) ; `venues.*` (adresses, dont USDC NATIF uniquement, jamais USDC.e) ; `alerts.*` ; `mode` et `live_small_cap_pct`.
 
 Règles de dérivation :
 - `target_margin_ratio = 1 / short_leverage` et `exposure_mult = 1 / (1 − target_ltv + 1 / short_leverage)`.
@@ -307,15 +307,25 @@ Tout changement d'exposition se fait par tranches de 25 % de l'écart, une tranc
 
 ### Invariants (vérifiés à chaque snapshot, violation = alerte + action de la table)
 ```
-I1  abs(delta_pct) <= 0.02 en RUNNING stable
+I1  abs(delta_pct) <= delta_tolerance en croisière
 I2  ltv <= target_ltv + 0.02 en croisière ; jamais HF <= seuil coussin plus de 5 min sans action P3 déclenchée
-I3  margin_ratio >= 0.07 en croisière ; jamais <= 0.035 sans action P2 déclenchée
+I3  margin_ratio >= 0.07 en croisière ; jamais <= margin_ratio_reduce plus de 10 s sans action P2 déclenchée
 I4  cushion_usd >= cushion_floor_pct * capital courant (sinon reconstitution prioritaire au prochain écrémage)
 I5  gas_eth >= gas_min_eth (sinon blocage des opérations non critiques + alerte)
-I6  aucun transfert en transit > 15 min sans alerte
+I6  aucun transfert en transit > 15 min sans alerte ; > 60 min : CRITICAL (§9.3)
 I7  une seule opération d'exécution en cours à tout instant
-I8  après chaque écrémage-recomposition : ltv et margin_ratio de retour aux cibles à ±0,5 pt
+I8  après chaque écrémage-recomposition : dette/spot et margin_ratio de retour aux cibles à ±0,5 pt
 ```
+
+Les chiffres ci-dessus sont les valeurs par défaut de `invariants.*`. La croisière est l'état RUNNING sans opération ni urgence en cours. La LTV de I8 est celle du solveur, dette / spot : celle qu'Aave affiche est plus basse, le coussin comptant comme collatéral.
+
+Escalade :
+- I1, la partie « en croisière » de I2 et I3, I4, I6 sous une heure, I8 : WARN.
+- La partie « jamais » de I2 et I3, c'est-à-dire une défense de la table qui n'est pas partie à temps : CRITICAL et dégonflage, puisqu'il ne reste rien d'autre à attendre.
+- I7, ou un transfert en transit depuis plus d'une heure : CRITICAL et gel des opérations non critiques.
+- I5 : WARN et gel des opérations non critiques.
+
+Chaque invariant émet son propre événement d'alerte : le regroupement de quinze minutes ne doit jamais cacher un invariant derrière un autre.
 
 ---
 

@@ -125,6 +125,32 @@ class WatchdogConfig(BaseModel):
     latency_budget_factor: Annotated[float, Field(gt=1.0)]
 
 
+class InvariantsConfig(BaseModel):
+    """Thresholds of invariants I1-I8 — README section 11.
+
+    The defaults are the README's own numbers, so a config that omits the
+    section checks exactly what the specification states.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    cruise_ltv_headroom: _Ratio = 0.02  # I2: LTV at most target_ltv + this, at rest
+    cruise_margin_floor: _Ratio = 0.07  # I3: margin ratio at least this, at rest
+    p3_grace_s: _PositiveFloat = 300.0  # I2: cushion threshold held this long without P3
+    # I3: P2's budget is 2 s and the loop cycles every 5 s — one full cycle plus
+    # the budget, rounded up, before a missing P2 counts as a failed defence.
+    p2_grace_s: _PositiveFloat = 10.0
+    transfer_warn_s: _PositiveFloat = 900.0  # I6 and §9.3: 15 min
+    transfer_critical_s: _PositiveFloat = 3600.0  # §9.3: 60 min, dependent operations frozen
+    recompose_tolerance: _Ratio = 0.005  # I8: ±0.5 pt after a skim-recompose
+
+    @model_validator(mode="after")
+    def _check_transfer_order(self) -> InvariantsConfig:
+        if self.transfer_critical_s <= self.transfer_warn_s:
+            raise ValueError("transfer_critical_s must be strictly greater than transfer_warn_s.")
+        return self
+
+
 class TracerConfig(BaseModel):
     """Safeties for M1 TRACER micro-operations (README §14).
 
@@ -279,6 +305,7 @@ class Config(BaseModel):
     # Emergency and watchdog.
     emergency: EmergencyConfig
     watchdog: WatchdogConfig
+    invariants: InvariantsConfig = Field(default_factory=InvariantsConfig)
 
     # M1 TRACER safeties. Defaults are safe: dry_run=True, small cap, low rate.
     tracer: TracerConfig = Field(default_factory=TracerConfig)
@@ -313,6 +340,19 @@ class Config(BaseModel):
             raise ValueError(
                 f"target_margin_ratio {self.target_margin_ratio} must equal "
                 f"1 / short_leverage = {expected}."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_cruise_margin_floor(self) -> Config:
+        # Below the pump the cruise warning would only speak after P5 already
+        # fired; at or above the target it would speak at rest.
+        floor = self.invariants.cruise_margin_floor
+        if not (self.emergency.margin_ratio_pump < floor < self.target_margin_ratio):
+            raise ValueError(
+                f"invariants.cruise_margin_floor {floor} must sit strictly between "
+                f"emergency.margin_ratio_pump {self.emergency.margin_ratio_pump} and "
+                f"target_margin_ratio {self.target_margin_ratio}."
             )
         return self
 
