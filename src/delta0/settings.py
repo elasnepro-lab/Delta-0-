@@ -29,8 +29,6 @@ class Settings(BaseSettings):
     tg_token: SecretStr = Field(default=SecretStr(""))
     tg_chat: str = Field(default="")
 
-    delta0_mode: str = Field(default="DRY_RUN")
-
 
 def load_settings() -> Settings:
     return Settings()  # type: ignore[call-arg]

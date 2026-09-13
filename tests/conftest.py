@@ -22,7 +22,6 @@ _SETTINGS_ENV_VARS = (
     "HL_AGENT_PRIVATE_KEY",
     "TG_TOKEN",
     "TG_CHAT",
-    "DELTA0_MODE",
 )
 
 

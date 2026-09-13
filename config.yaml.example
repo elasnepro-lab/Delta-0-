@@ -9,24 +9,26 @@ short_leverage: 10
 target_ltv: 0.675          # revisable : voir scripts/classeur.py --compare
 target_margin_ratio: 0.10
 exposure_mult: 2.3529411765  # = 1 / (1 - target_ltv + 1 / short_leverage), verifie au boot
-exposure_mult_half: 1.5
-maintenance_margin: 0.02     # HL estimate; read via API at boot, alert on divergence
+exposure_mult_half: 1.5      # lu par aucun code avant le chantier 8.6 (porte de régime)
+maintenance_margin: 0.02     # lu par aucun code avant 8.4 : la comparaison à l'API n'existe pas encore
 cushion_pct: 0.05            # 5% of capital held as USDC supply on Aave = 1000$
-cushion_floor_pct: 0.025     # below this: cushion refill is top priority at skim
+cushion_floor_pct: 0.025     # lu par aucun code avant 6.1 (invariant I4) et 8.5
 recenter_up: 0.045           # +8% band is narrow; recenter earlier
 recenter_down: 0.06          # -15.7% band is wide; recenter later
 delta_tolerance: 0.02        # |delta| / spot max before short retrue
 skim_cron: "SUN 12:00 UTC"
 skim_min_usd: 200
-skim_policy: recompose       # recompose | deleverage | dividend (v1 = recompose)
+skim_policy: recompose       # lu par aucun code avant 8.5 (écrémage)
 
+# Lu par aucun code avant 8.6 : la porte de régime n'est pas encore évaluée.
 regime:
   spread_full_bps: 500       # funding30d >= borrow + 5pts -> full exposure
   hysteresis_days: 7
 
-slippage_max_bps: 30
-order_style: maker_then_cross
-gas_min_eth: 0.003
+# Lus par aucun code pour l'instant : ne protègent de rien avant leur chantier.
+slippage_max_bps: 30         # 8.1 (agrégateur de swap)
+order_style: maker_then_cross  # 8.3 (ordres maker puis traversée)
+gas_min_eth: 0.003           # 6.1 (invariant I5)
 
 emergency:
   margin_ratio_pump: 0.05    # ~+5% price move: pump up
@@ -71,10 +73,9 @@ venues:
   wsteth_address: "0x5979D7b546E38E414F7E9822514be443A4800529"
   weth_address: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"     # pour le ratio wstETH/ETH via l'oracle
   aave_pool: "0x794a61358D6845594F94dc1DB02A252b5b4814aD"
-  aave_data_provider: "0x7F23D86Ee20D869112572136221e173428DD740B"
-  hl_api: "https://api.hyperliquid.xyz"
-  hl_ws: "wss://api.hyperliquid.xyz/ws"
+  aave_data_provider: "0x7F23D86Ee20D869112572136221e173428DD740B"  # lu avant 8.4 par aucun code : LT de réserve avant toute position
+  hl_api: "https://api.hyperliquid.xyz"   # le SDK en déduit aussi l'URL du WebSocket
   hl_bridge2: "0x2Df1c51E09aECF9cacB7bc98cB1742757f163dF7"
   multicall3_address: "0xcA11bde05977b3631167028862bE2a173976CA11"  # un eth_call par snapshot Aave
 
-live_small_cap_pct: 0.10
+live_small_cap_pct: 0.10     # lu par aucun code avant 8.4 : aucun plafond LIVE_SMALL n'est appliqué

@@ -5,7 +5,11 @@ Tables:
 - `shadow_intents`  : what the decision engine would have done in TRACER mode
                       (M1). Never executed. The primary output of the marche à
                       blanc, per README §14.
-- `state_kv`        : simple key/value bag (anchor_price, regime, mode, ...).
+- `state_kv`        : simple key/value bag. Written today: `debt_usd_last`
+                      (boot reconciliation) and the M1 report stamp. Read but
+                      not written yet: `anchor_price` and `last_skim_at`, which
+                      the phase-8 executors will set. `test_ghost_settings.py`
+                      keeps this list honest.
 - `transfers`       : bridge transfers in-flight.
 - `latencies`       : samples for the rolling watchdog histogram.
 

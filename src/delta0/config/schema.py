@@ -23,7 +23,12 @@ _EVM_ADDRESS_LEN = 42
 
 
 class RuntimeMode(StrEnum):
-    """Execution mode. Set via env var DELTA0_MODE or config."""
+    """Execution mode, set in `config.yaml` only.
+
+    An environment override was promised here and never read. It is not coming
+    back: a variable that silently flips the bot to LIVE is a worse lever than
+    the file an operator has to edit and restart on (README §17, decision 5).
+    """
 
     DRY_RUN = "DRY_RUN"
     LIVE_SMALL = "LIVE_SMALL"
@@ -187,8 +192,9 @@ class VenuesConfig(BaseModel):
     weth_address: str
     aave_pool: str
     aave_data_provider: str
+    # No `hl_ws`: the SDK derives the WebSocket URL from `hl_api` and accepts no
+    # other, so a separate setting could only disagree with what is used.
     hl_api: str
-    hl_ws: str
     # Hyperliquid Bridge2 contract on Arbitrum — recipient of USDC transfers
     # for HL account funding. See README §9.3.
     hl_bridge2: str = "0x2Df1c51E09aECF9cacB7bc98cB1742757f163dF7"
