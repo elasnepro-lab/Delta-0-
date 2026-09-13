@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from delta0.config import Config
 from delta0.decision import BlindState, OperationalContext, decide
 from delta0.executor import AaveTraceExecutor
+from delta0.failure import OPERATIONAL_ERRORS
 from delta0.hl_executor import HLTraceExecutor
 from delta0.latency import elapsed_ms, now_perf
 from delta0.logging import get_logger, set_cycle_id
@@ -103,7 +104,9 @@ class TracerLoop:
             t0 = now_perf()
             try:
                 snap = await self.watcher.snapshot()
-            except Exception:
+            except OPERATIONAL_ERRORS:
+                # Survive an unreachable venue, never a bug: an AttributeError
+                # here used to loop forever as "échec construction snapshot".
                 log.exception("snapshot_failed", message="échec construction snapshot")
                 await asyncio.sleep(self.cadence_s)
                 continue
@@ -209,7 +212,7 @@ class TracerLoop:
                 "aave_cycle_refused",
                 message=f"cycle Aave refusé par le guard: {e}",
             )
-        except Exception:
+        except OPERATIONAL_ERRORS:
             log.exception(
                 "aave_cycle_failed",
                 message="cycle Aave a levé une exception — journal des intents à relire",
@@ -225,7 +228,7 @@ class TracerLoop:
                 "hl_cancel_refused",
                 message=f"hl_post_only_cancel refusé par le guard: {e}",
             )
-        except Exception:
+        except OPERATIONAL_ERRORS:
             log.exception(
                 "hl_cancel_failed",
                 message="hl_post_only_cancel a levé une exception",
@@ -247,7 +250,7 @@ class TracerLoop:
                 "bridge_round_trip_refused",
                 message=f"bridge round_trip refusé par le guard: {e}",
             )
-        except Exception:
+        except OPERATIONAL_ERRORS:
             log.exception(
                 "bridge_round_trip_failed",
                 message="bridge round_trip a levé une exception",

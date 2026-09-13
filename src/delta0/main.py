@@ -28,6 +28,7 @@ from delta0.alerts import AlertSink, build_sink, make_alert_processor
 from delta0.config import Config, RuntimeMode, load_config
 from delta0.decision import target_state
 from delta0.executor import AaveTraceExecutor
+from delta0.failure import OPERATIONAL_ERRORS
 from delta0.hl_client import make_exchange, make_info
 from delta0.hl_executor import HLTraceExecutor
 from delta0.latency import (
@@ -604,7 +605,7 @@ def _start_hl_stream(cfg: Config, settings: Settings) -> HyperliquidStream | Non
     )
     try:
         stream.start()
-    except Exception:
+    except OPERATIONAL_ERRORS:
         log.exception(
             "hl_stream_start_failed",
             message="WS Hyperliquid indisponible — repli sur les lectures REST seules",
@@ -651,7 +652,7 @@ async def _reconcile_boot(store: StateStore, watcher: LiveWatcher, *, strict: bo
     log = get_logger("tracer")
     try:
         snap = await watcher.snapshot()
-    except Exception:
+    except OPERATIONAL_ERRORS:
         log.exception(
             "reconcile_snapshot_failed",
             message="snapshot de réconciliation impossible au démarrage",

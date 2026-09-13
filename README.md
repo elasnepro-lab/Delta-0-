@@ -65,7 +65,8 @@ src/delta0/
   watchdog.py     # fraîcheur des venues, état BLIND, fichiers KILL
   latency.py      # p50/p95 des chemins critiques contre leurs budgets (§7), mode prudent
   reconcile.py    # réconciliation au démarrage : chaîne et API contre le journal
-  failure.py      # cause de chaque échec, sous une forme que le journal garde
+  failure.py      # cause de chaque échec, et la liste unique des échecs que la boucle peut survivre
+  errors.py       # hiérarchie d'exceptions : tout ce que le bot lève exprès dérive de Delta0Error
   state.py        # persistance SQLite : intentions, état, transferts, mesures
   alerts.py       # alertes Telegram, branchées sur la journalisation
   rpc.py          # bascule entre endpoints RPC, délai dur par requête

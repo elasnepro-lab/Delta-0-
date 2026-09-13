@@ -22,10 +22,12 @@ from typing import TYPE_CHECKING, Any
 
 from eth_abi.abi import decode as abi_decode
 from eth_abi.abi import encode as abi_encode
+from eth_abi.exceptions import DecodingError
 from eth_typing import ChecksumAddress
 from eth_utils.abi import function_signature_to_4byte_selector
 from web3 import AsyncWeb3
 
+from delta0.errors import VenueError
 from delta0.logging import get_logger
 
 if TYPE_CHECKING:
@@ -176,7 +178,7 @@ _MULTICALL3_ABI: list[dict[str, Any]] = [
 _AGGREGATE3_SELECTOR = function_signature_to_4byte_selector("aggregate3((address,bool,bytes)[])")
 
 
-class MulticallError(RuntimeError):
+class MulticallError(VenueError):
     """A batched read did not come back whole.
 
     Raised rather than returning partial numbers: a snapshot with one field
@@ -432,7 +434,7 @@ class AaveReader:
         for c, (_ok, data) in zip(calls, results, strict=True):
             try:
                 decoded.append(tuple(abi_decode(list(c.out_types), data)))
-            except Exception as e:
+            except DecodingError as e:
                 # Same shape as a missing contract: the target answered, with
                 # nothing decodable. A wrong token address in the config lands here.
                 raise MulticallError(

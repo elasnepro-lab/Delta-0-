@@ -34,6 +34,27 @@ import re
 from dataclasses import dataclass
 from typing import Any, Final
 
+import aiohttp
+from eth_abi.exceptions import DecodingError
+from web3.exceptions import Web3Exception
+
+from delta0.errors import Delta0Error
+from delta0.hl_client import HL_TRANSPORT_ERRORS
+
+# The failures the bot may survive — and nothing else (chantier 6.4). A loop,
+# an optional read or a diagnostic catches THIS, never `Exception`: a bug
+# (AttributeError, TypeError, KeyError...) must propagate and stop the process,
+# not be logged as a network hiccup while the bot carries on around it.
+OPERATIONAL_ERRORS: Final[tuple[type[Exception], ...]] = (
+    Delta0Error,  # our own refusals: the guard, a declined venue action, a broken batch
+    TimeoutError,  # deadlines, asyncio's included
+    OSError,  # connection resets, DNS, and every `requests` error, which derives from it
+    Web3Exception,  # RPC errors, reverts, receipt timeouts
+    aiohttp.ClientError,  # web3's async HTTP transport
+    DecodingError,  # a contract answered bytes that do not decode as asked
+    *HL_TRANSPORT_ERRORS,  # the Hyperliquid SDK's HTTP 4xx and 5xx
+)
+
 # Met in the field, with the operation that produced them. Source:
 # `memory/aave_findings.md` §8. To decode a new one, keccak the candidate
 # signatures and compare the first four bytes.
@@ -169,14 +190,16 @@ async def diagnose_revert(
     moved since.
 
     A replay that comes back clean is not an absence of cause: it is the gas
-    signature, and `from_revert` names it as such. Every error here is
-    classified rather than propagated — a diagnostic that raises would replace
-    the failure we are trying to explain with one of its own.
+    signature, and `from_revert` names it as such. Every operational error of
+    the replay is classified rather than propagated — a diagnostic that raises
+    would replace the failure we are trying to explain with one of its own. A
+    bug in the replay itself still propagates: classified, it would pose as the
+    revert reason.
     """
     block = receipt.get("blockNumber")
     try:
         await call.call({"from": sender}, block_identifier=block)
-    except Exception as replay_error:
+    except OPERATIONAL_ERRORS as replay_error:
         return from_revert(
             tx_hash=tx_hash,
             replay_error=replay_error,

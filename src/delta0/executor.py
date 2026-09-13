@@ -415,7 +415,7 @@ class AaveTraceExecutor:
             return
         try:
             balances = await self._balances.read_token_balances(asset)
-        except Exception:
+        except failure.OPERATIONAL_ERRORS:
             log.warning(
                 "balance_check_unavailable",
                 message=f"{op_kind}: solde libre illisible — opération tentée quand même",

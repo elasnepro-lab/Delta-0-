@@ -130,6 +130,60 @@ async def test_tracer_records_latency_samples(
     assert dec_stats["count"] >= 1
 
 
+class _UnreachableWatcher:
+    """A venue that does not answer: the loop must ride it out."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def snapshot(self) -> Snapshot:
+        self.calls += 1
+        raise ConnectionError("RPC injoignable")
+
+
+class _BrokenWatcher:
+    """A bug in the snapshot code: the loop must NOT ride it out."""
+
+    async def snapshot(self) -> Snapshot:
+        raise AttributeError("'NoneType' object has no attribute 'mark_price'")
+
+
+@pytest.mark.asyncio
+async def test_the_loop_survives_an_unreachable_venue(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+) -> None:
+    watcher = _UnreachableWatcher()
+    loop = TracerLoop(
+        watcher=watcher,
+        watchdog=Watchdog(config=config.watchdog, project_root=tmp_path),
+        store=store,
+        config=config,
+        cadence_s=0.0,
+    )
+    assert await loop.run(duration_s=0.01) == 0
+    assert watcher.calls >= 2  # it kept trying, cycle after cycle
+
+
+@pytest.mark.asyncio
+async def test_the_loop_stops_on_a_bug_instead_of_looping_on_it(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+) -> None:
+    """Chantier 6.4: an AttributeError used to loop forever as a failed snapshot."""
+    loop = TracerLoop(
+        watcher=_BrokenWatcher(),
+        watchdog=Watchdog(config=config.watchdog, project_root=tmp_path),
+        store=store,
+        config=config,
+        cadence_s=0.0,
+    )
+    with pytest.raises(AttributeError, match="mark_price"):
+        await loop.run(duration_s=10.0)
+
+
 @pytest.mark.asyncio
 async def test_tracer_does_not_journal_on_noop(
     config: Config,

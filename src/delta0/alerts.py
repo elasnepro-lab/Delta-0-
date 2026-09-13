@@ -203,7 +203,7 @@ class AlertSink:
         await self._flush()
         try:
             await self._transport.aclose()
-        except Exception:
+        except Exception:  # broad on purpose: closing alerts must never fail the bot's shutdown
             log.warning("alert_transport_close_failed", message="fermeture du canal en échec")
 
     async def _drain_forever(self) -> None:

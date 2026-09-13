@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from web3.exceptions import ContractLogicError
 
 from delta0 import failure
 
@@ -116,7 +117,8 @@ class _FakeCall:
 @pytest.mark.asyncio
 async def test_replay_runs_at_the_mined_block_not_the_chain_tip() -> None:
     """The tip may have moved; only the mined block holds the state seen."""
-    call = _FakeCall(ValueError("execution reverted: 0x6679996d"))
+    # What web3 7 raises when the replayed call reverts with Aave's custom error.
+    call = _FakeCall(ContractLogicError("execution reverted: 0x6679996d", data="0x6679996d"))
     cause = await failure.diagnose_revert(
         call=call,
         receipt={"blockNumber": 504_446_045},
@@ -128,6 +130,20 @@ async def test_replay_runs_at_the_mined_block_not_the_chain_tip() -> None:
     assert call.seen["block"] == 504_446_045
     assert call.seen["tx"] == {"from": "0xSender"}
     assert cause.name == "HealthFactorLowerThanLiquidationThreshold"
+
+
+@pytest.mark.asyncio
+async def test_a_bug_in_the_replay_is_not_passed_off_as_the_revert_reason() -> None:
+    """Chantier 6.4: classified, an AttributeError would pose as the revert reason."""
+    with pytest.raises(AttributeError, match="boom"):
+        await failure.diagnose_revert(
+            call=_FakeCall(AttributeError("boom")),
+            receipt={"blockNumber": 1},
+            tx_hash="0xabc",
+            sender="0xSender",
+            gas_used=1,
+            gas_limit=2,
+        )
 
 
 @pytest.mark.asyncio

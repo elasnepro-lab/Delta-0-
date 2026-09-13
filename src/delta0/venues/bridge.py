@@ -482,7 +482,7 @@ class BridgeExecutor:
         exchange = self._make_hl_exchange()
         try:
             result = await asyncio.to_thread(exchange.usd_class_transfer, amount_usdc, True)
-        except Exception:
+        except failure.OPERATIONAL_ERRORS:
             log.exception(
                 "hl_spot_to_perp_failed",
                 message=(

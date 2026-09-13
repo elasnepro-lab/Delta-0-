@@ -32,6 +32,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from hyperliquid.info import Info
+from hyperliquid.utils.error import Error as _SdkTransportError
+
+from delta0.errors import VenueError
 
 if TYPE_CHECKING:
     from hyperliquid.exchange import Exchange
@@ -39,8 +42,12 @@ if TYPE_CHECKING:
 # Re-exported for type annotations, so callers never import the SDK themselves.
 HLInfo = Info
 
+# What the SDK raises when Hyperliquid answers HTTP 4xx or 5xx. Its transport
+# errors come from `requests`, which derive from OSError and are covered there.
+HL_TRANSPORT_ERRORS: tuple[type[Exception], ...] = (_SdkTransportError,)
 
-class HLActionRefused(Exception):  # noqa: N818 - mirrors SafetyRefused naming
+
+class HLActionRefused(VenueError):  # noqa: N818 - mirrors SafetyRefused naming
     """Hyperliquid accepted the request and declined to perform it."""
 
 

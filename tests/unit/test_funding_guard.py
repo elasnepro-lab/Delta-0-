@@ -102,6 +102,13 @@ class _Unreadable:
         raise ConnectionError("rpc down")
 
 
+class _Buggy:
+    """Reader with a bug in it — not the same thing as an unreachable RPC."""
+
+    async def read_token_balances(self, asset: str) -> AaveTokenBalances:
+        raise AttributeError("'NoneType' object has no attribute 'functions'")
+
+
 def _executor(
     cfg: Config,
     store: StateStore,
@@ -261,6 +268,25 @@ async def test_an_unreadable_balance_does_not_block_the_operation(
         result = await executor.supply(USDC, 5.0)
     assert result.status == "dry_run"
     assert eth.pool_functions.calls == ["supply"]
+
+
+@pytest.mark.asyncio
+async def test_a_bug_in_the_balance_reader_is_not_read_as_unreadable(
+    dry_config: Config,
+    store: StateStore,
+    tmp_path: Path,
+) -> None:
+    """Chantier 6.4: "we could not check" is for a venue, never for our own bug.
+
+    Swallowed, this AttributeError would have let every operation through with
+    the guard silently off, forever.
+    """
+    executor, eth = _executor(dry_config, store, tmp_path, _Buggy())
+    with patch("delta0.executor.AsyncWeb3") as m:
+        m.to_checksum_address.side_effect = lambda a: a
+        with pytest.raises(AttributeError, match="functions"):
+            await executor.supply(USDC, 5.0)
+    assert eth.pool_functions.calls == []
 
 
 @pytest.mark.asyncio

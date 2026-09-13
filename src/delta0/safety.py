@@ -27,12 +27,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from delta0.config import TracerConfig
+from delta0.errors import Delta0Error
 from delta0.logging import get_logger
 
 log = get_logger(__name__)
 
 
-class SafetyRefused(Exception):  # noqa: N818 - "Refused" reads better in stack traces than "RefusedError"
+class SafetyRefused(Delta0Error):  # noqa: N818 - "Refused" reads better in stack traces than "RefusedError"
     """Raised when the guard refuses a micro-op. Always safe to catch."""
 
 

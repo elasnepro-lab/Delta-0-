@@ -33,6 +33,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import aiohttp
+from web3.exceptions import Web3Exception
 from web3.providers.async_base import AsyncBaseProvider
 from web3.providers.rpc import AsyncHTTPProvider
 from web3.types import RPCEndpoint, RPCResponse
@@ -159,7 +161,10 @@ class FailoverProvider(AsyncBaseProvider):
             except TimeoutError as e:
                 last_error = e
                 self._bench(ep, f"pas de réponse en {self._timeout_s:.0f} s sur {method}")
-            except Exception as e:
+            except (OSError, aiohttp.ClientError, Web3Exception) as e:
+                # Transport failures bench the endpoint. A bug in this class or
+                # in web3 propagates instead: benching every endpoint for it
+                # would read as an outage and hide the traceback.
                 last_error = e
                 self._bench(ep, f"{type(e).__name__} sur {method}")
             else:
