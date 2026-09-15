@@ -13,6 +13,7 @@ import datetime as dt
 import hashlib
 import io
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -78,15 +79,19 @@ def test_an_empty_range_is_refused_before_any_request() -> None:
 
 def test_all_is_every_series_prices_and_funding(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[list[str]] = []
+    kwargs: list[dict[str, Any]] = []
 
-    def fake_download(client, root, series, start, end, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_download(client, root, series, start, end, **rest):  # type: ignore[no-untyped-def]
         seen.append([one.name for one in series])
+        kwargs.append(rest)
         return EXIT_OK
 
     monkeypatch.setattr("backtest.download.download", fake_download)
     assert main(["--to", "2021-01"]) == EXIT_OK
     assert main(["--series", "mark", "--to", "2021-01"]) == EXIT_OK
-    assert seen == [["spot", "futures", "mark", "funding"], ["mark"]]
+    assert main(["--series", "hl-funding", "--to", "2021-01"]) == EXIT_OK
+    assert seen == [["spot", "futures", "mark", "funding"], ["mark"], []]
+    assert [call["hyperliquid"] for call in kwargs] == [True, False, True]
 
 
 # --- Filling the cache --------------------------------------------------------

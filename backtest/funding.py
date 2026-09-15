@@ -19,6 +19,7 @@ arrive dans un second temps.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from itertools import pairwise
 from pathlib import Path
 
@@ -54,7 +55,7 @@ def load(root: Path, start: Month, end: Month) -> list[Funding]:
     return rows
 
 
-def intervals(rows: list[Funding]) -> dict[int, int]:
+def intervals(rows: Sequence[Funding]) -> dict[int, int]:
     """Combien de lignes pour chaque période déclarée. Décrit la série, ne la corrige pas."""
     counts: dict[int, int] = {}
     for row in rows:
@@ -62,7 +63,7 @@ def intervals(rows: list[Funding]) -> dict[int, int]:
     return counts
 
 
-def gaps(rows: list[Funding]) -> list[tuple[int, float]]:
+def gaps(rows: Sequence[Funding]) -> list[tuple[int, float]]:
     """Les trous : (instant du versement, heures manquantes après lui).
 
     Mesuré contre la période que la ligne DÉCLARE couvrir, pas contre une
