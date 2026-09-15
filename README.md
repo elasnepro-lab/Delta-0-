@@ -409,14 +409,16 @@ Vue d'ensemble, du plus abstrait au plus réel :
 ### 15.3 Backtest long (M2b)
 Objectif : tester les PARAMÈTRES (bandes, seuils, porte de régime) à travers tous les régimes connus, pas prédire le rendement futur.
 
-Période cible : ~5 ans, en deux segments de fidélité documentés :
-- Segment fidèle (mi-2023 -> aujourd'hui) : funding horaire Hyperliquid réel (archives publiques API/S3).
-- Segment proxy (2021 -> mi-2023) : funding Binance ETHUSDT (8 h, réparti en pas horaires), étiqueté PROXY dans les rapports. Hyperliquid n'existait pas : ce segment teste les règles, pas la venue.
+Période cible : 2021 -> aujourd'hui, en trois segments de fidélité documentés. Chaque rapport donne ses résultats par segment, jamais seulement le total :
+- Segment FIDÈLE (2023-06-28 -> aujourd'hui) : le montage exact existe sur Aave Arbitrum (wstETH collatéral, USDC natif), oracle wstETH = taux de conversion × ETH/USD, funding horaire Hyperliquid réel.
+- Segment INTERMÉDIAIRE (2023-03-01 -> 2023-06-28) : wstETH listé, dette sur USDC.e ; les sources oracle d'alors suivaient le marché stETH.
+- Segment PROXY (2021-01 -> 2023-03-01) : ni le wstETH sur Aave Arbitrum ni Hyperliquid n'existaient. Règles oracle actuelles, funding Binance ETHUSDT (8 h, réparti en pas horaires), taux Aave v2 mainnet puis USDC.e. Ce segment teste les règles, pas les places ; il porte mai 2021 et juin 2022.
 
-Données :
-- Prix ETH : bougies horaires (API publique Binance ou équivalent) sur toute la période, PLUS fenêtres 1 minute sur les épisodes de stress (mai 2021, juin 2022 avec depeg stETH, 10 octobre 2025, février 2026).
-- Taux d'emprunt USDC : Aave v3 Arbitrum depuis mars 2022 (subgraph/Aavescan) ; avant : proxy Aave v2 mainnet, étiqueté PROXY.
-- Staking : historique APR Lido. Ratio stETH/ETH historique pour le stress de depeg.
+Données (sources vérifiées dans `docs/backtest/`) :
+- Prix ETH : bougies **1 minute sur toute la période** (archives Binance), pas seulement sur les épisodes de stress : un krach non listé se lit mal en horaire. Collatéral Aave : spot comme proxy de l'ETH/USD Chainlink. Jambe perp : mark futures Binance comme proxy du mark Hyperliquid, qui n'a pas d'historique public, plus un **choc d'écart à la hausse** réglable, testé sur une plage de valeurs.
+- Prix oracle du wstETH : `stEthPerToken` (quotidien, mainnet) × ETH/USD. Le prix de marché stETH/ETH n'entre pas dans le facteur de santé depuis le 2023-06-26 ; le décrochage de juin 2022 pèse à la sortie (vente du wstETH), pas sur la liquidation. Stress à part : une baisse du taux de conversion (slashing Lido), que le short ne couvre pas.
+- Taux d'emprunt USDC : événements `ReserveDataUpdated` lus on-chain (index cumulés, au bloc) — Aave v3 Arbitrum USDC natif, USDC.e avant lui, Aave v2 mainnet avant mars 2022, raccords mesurés sur leurs chevauchements. Lu par RPC publics, jamais sur le quota du serveur.
+- Staking : taux de conversion `stEthPerToken` lu aux blocs passés.
 
 Méthode :
 - Les bandes se testent contre les HIGH/LOW des bougies, jamais contre les clôtures (une mèche liquide aussi bien qu'une clôture).
