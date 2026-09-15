@@ -170,10 +170,14 @@ def missing_minutes(candles: list[Candle], year: int, month: int) -> int:
     return (end - start) // MINUTE_MS - len(candles)
 
 
-def fetch_month(
+def fetch_month_bytes(
     client: httpx.Client, series: Series, year: int, month: int
-) -> tuple[list[Candle], str]:
-    """Download one month of one series. Returns the candles and the verified sha256."""
+) -> tuple[bytes, str]:
+    """Download one month's archive, checked against the sha256 its `.CHECKSUM` announces.
+
+    The bytes come back unparsed, so the cache can store the archive exactly as
+    published — and store nothing at all when the download does not check out.
+    """
     url = archive_url(series, year, month)
     checksum = client.get(f"{url}.CHECKSUM")
     if checksum.status_code == httpx.codes.NOT_FOUND:
@@ -183,4 +187,15 @@ def fetch_month(
 
     body = client.get(url)
     body.raise_for_status()
-    return read_archive(body.content, expected, year, month), expected
+    actual = hashlib.sha256(body.content).hexdigest()
+    if actual != expected:
+        raise ArchiveError(f"sha256 {actual} ≠ annoncé {expected} : téléchargement tronqué ?")
+    return body.content, expected
+
+
+def fetch_month(
+    client: httpx.Client, series: Series, year: int, month: int
+) -> tuple[list[Candle], str]:
+    """Download one month of one series. Returns the candles and the verified sha256."""
+    payload, expected = fetch_month_bytes(client, series, year, month)
+    return read_archive(payload, expected, year, month), expected

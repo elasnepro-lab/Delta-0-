@@ -12,8 +12,6 @@ afford.
 from __future__ import annotations
 
 import hashlib
-import io
-import zipfile
 
 import httpx
 import pytest
@@ -28,46 +26,13 @@ from backtest.binance import (
     archive_url,
     fetch_month,
     missing_minutes,
-    month_bounds_ms,
     months,
     parse_checksum,
     parse_klines_csv,
     read_archive,
     to_milliseconds,
 )
-
-OCTOBER_2025_START = 1_759_276_800_000  # 2025-10-01T00:00:00Z, in milliseconds
-HEADER = "open_time,open,high,low,close,volume,close_time"
-
-
-def kline_row(ts: int, close: float = 4000.0) -> str:
-    """One archive line: the five fields we read, then the ones we ignore."""
-    ignored = f"12.5,{ts + MINUTE_MS - 1},50000,120,6.2,24000,0"
-    return f"{ts},{close - 1},{close + 2},{close - 3},{close},{ignored}"
-
-
-def build_csv(
-    count: int, *, start: int = OCTOBER_2025_START, header: bool = False, micros: bool = False
-) -> str:
-    rows = [kline_row((start + i * MINUTE_MS) * (1000 if micros else 1)) for i in range(count)]
-    return "\n".join(([HEADER] if header else []) + rows) + "\n"
-
-
-def build_zip(csv: str, *, name: str = "ETHUSDT-1m-2025-10.csv", extra: str | None = None) -> bytes:
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w") as archive:
-        archive.writestr(name, csv)
-        if extra is not None:
-            archive.writestr(extra, csv)
-    return buffer.getvalue()
-
-
-def full_october() -> tuple[bytes, str]:
-    """A complete, well-formed October 2025 archive, and its true sha256."""
-    start, end = month_bounds_ms(2025, 10)
-    payload = build_zip(build_csv((end - start) // MINUTE_MS))
-    return payload, hashlib.sha256(payload).hexdigest()
-
+from tests.binance_archives import OCTOBER_2025_START, build_csv, build_zip, full_month, kline_row
 
 # --- The two formats that move under our feet ---------------------------------
 
@@ -123,16 +88,16 @@ def test_a_checksum_file_that_does_not_fit_is_refused(text: str, match: str) -> 
 
 def test_a_truncated_download_is_refused() -> None:
     """The whole point: a short file would read as a quiet month."""
-    payload, _ = full_october()
+    payload, digest = full_month()
     with pytest.raises(ArchiveError, match="tronquée"):
-        read_archive(payload[:-20], hashlib.sha256(payload).hexdigest(), 2025, 10)
+        read_archive(payload[:-20], digest, 2025, 10)
 
 
 # --- One month, and nothing but that month ------------------------------------
 
 
 def test_a_complete_month_reads_whole() -> None:
-    payload, digest = full_october()
+    payload, digest = full_month()
     candles = read_archive(payload, digest, 2025, 10)
     assert len(candles) == 31 * 24 * 60
     assert missing_minutes(candles, 2025, 10) == 0
@@ -204,7 +169,7 @@ def test_a_month_not_published_yet_is_told_apart_from_a_failure() -> None:
 
 
 def test_a_published_month_comes_back_with_its_verified_digest() -> None:
-    payload, digest = full_october()
+    payload, digest = full_month()
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith(".CHECKSUM"):
