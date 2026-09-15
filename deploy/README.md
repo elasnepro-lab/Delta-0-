@@ -302,11 +302,14 @@ pendant la marche à blanc ne servent plus de référence : la lecture Aave y
 coûtait 34 requêtes RPC, Multicall3 n'en envoie qu'une (les cinq appels REST
 Hyperliquid ne changent pas).
 
+Le service du §5 fait déjà ce travail, à la même cadence de 5 s. On ne lance
+donc pas de second traceur : deux processus feraient les mêmes lectures et
+doubleraient la consommation du quota RPC. On laisse tourner le service 48 h,
+puis on lit sa base :
+
 ```bash
-sudo -u delta0 /opt/delta0/.venv/bin/delta0 tracer --config /opt/delta0/config.yaml \
-    --root /opt/delta0 --db /var/lib/delta0/probe.db -d 2d --cadence 5
 sudo -u delta0 /opt/delta0/.venv/bin/delta0 report --config /opt/delta0/config.yaml \
-    --db /var/lib/delta0/probe.db
+    --db /var/lib/delta0/m1_run.db --days 2
 ```
 
 Plus lent que chez soi veut dire que la machine ou son fournisseur RPC est le
