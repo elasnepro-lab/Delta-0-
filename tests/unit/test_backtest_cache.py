@@ -15,7 +15,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from backtest.binance import SERIES, ArchiveError, Series, archive_name, month_bounds_ms
+from backtest.binance import SERIES, ArchiveError, Series, month_bounds_ms
 from backtest.cache import (
     DEFAULT_ROOT,
     CacheMissError,
@@ -29,43 +29,9 @@ from backtest.cache import (
     store,
     stored_digest,
 )
-from tests.binance_archives import month_archive
+from tests.binance_archives import CANDLES_PER_MONTH, FakeBinance, month_archive
 
 SPOT = SERIES["spot"]
-CANDLES_PER_MONTH = 3  # enough to read back; the cache never parses what it stores
-
-
-class FakeBinance:
-    """The archive server, in memory: it counts requests and can lie on demand."""
-
-    def __init__(
-        self, *, missing: tuple[tuple[int, int], ...] = (), truncate: bool = False
-    ) -> None:
-        self.missing = set(missing)
-        self.truncate = truncate
-        self.requests: list[str] = []
-
-    def payload(self, year: int, month: int) -> bytes:
-        return month_archive(year, month, candles=CANDLES_PER_MONTH)
-
-    def digest(self, year: int, month: int) -> str:
-        return hashlib.sha256(self.payload(year, month)).hexdigest()
-
-    def handler(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(str(request.url))
-        name = request.url.path.split("/")[-1]
-        year, month = (int(part) for part in name.removesuffix(".CHECKSUM")[-11:-4].split("-"))
-        if (year, month) in self.missing:
-            return httpx.Response(404)
-        if name.endswith(".CHECKSUM"):
-            return httpx.Response(
-                200, text=f"{self.digest(year, month)}  {archive_name(year, month)}"
-            )
-        body = self.payload(year, month)
-        return httpx.Response(200, content=body[:-20] if self.truncate else body)
-
-    def client(self) -> httpx.Client:
-        return httpx.Client(transport=httpx.MockTransport(self.handler))
 
 
 @pytest.fixture

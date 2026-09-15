@@ -12,7 +12,11 @@ import hashlib
 import io
 import zipfile
 
-from backtest.binance import MINUTE_MS, month_bounds_ms
+import httpx
+
+from backtest.binance import MINUTE_MS, archive_name, month_bounds_ms
+
+CANDLES_PER_MONTH = 3  # enough to read back; the cache never parses what it stores
 
 OCTOBER_2025_START = 1_759_276_800_000  # 2025-10-01T00:00:00Z, in milliseconds
 HEADER = "open_time,open,high,low,close,volume,close_time"
@@ -52,3 +56,46 @@ def full_month(year: int = 2025, month: int = 10) -> tuple[bytes, str]:
     """A complete, well-formed archive for that month, and its true sha256."""
     payload = month_archive(year, month)
     return payload, hashlib.sha256(payload).hexdigest()
+
+
+class FakeBinance:
+    """The archive server, in memory: it counts requests and can lie on demand.
+
+    Shared by the cache and the CLI tests, so both measure the same server: one
+    that answers 404 for the months in `missing`, and cuts twenty bytes off
+    every archive when `truncate` is set.
+    """
+
+    def __init__(
+        self,
+        *,
+        missing: tuple[tuple[int, int], ...] = (),
+        truncate: bool = False,
+        candles: int = CANDLES_PER_MONTH,
+    ) -> None:
+        self.missing = set(missing)
+        self.truncate = truncate
+        self.candles = candles
+        self.requests: list[str] = []
+
+    def payload(self, year: int, month: int) -> bytes:
+        return month_archive(year, month, candles=self.candles)
+
+    def digest(self, year: int, month: int) -> str:
+        return hashlib.sha256(self.payload(year, month)).hexdigest()
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(str(request.url))
+        name = request.url.path.split("/")[-1]
+        year, month = (int(part) for part in name.removesuffix(".CHECKSUM")[-11:-4].split("-"))
+        if (year, month) in self.missing:
+            return httpx.Response(404)
+        if name.endswith(".CHECKSUM"):
+            return httpx.Response(
+                200, text=f"{self.digest(year, month)}  {archive_name(year, month)}"
+            )
+        body = self.payload(year, month)
+        return httpx.Response(200, content=body[:-20] if self.truncate else body)
+
+    def client(self) -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(self.handler))
