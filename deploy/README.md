@@ -74,16 +74,34 @@ ssh -o PreferredAuthentications=publickey <compte>@<ip> 'echo cle ok'
 Une fois cette preuve obtenue, et pas avant :
 
 ```bash
-sudo tee /etc/ssh/sshd_config.d/durcissement.conf >/dev/null <<'EOF'
+sudo tee /etc/ssh/sshd_config.d/00-durcissement.conf >/dev/null <<'EOF'
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitRootLogin prohibit-password
 EOF
 sudo sshd -t && sudo systemctl reload ssh
+sudo sshd -T | grep -Ei '^(passwordauthentication|kbdinteractiveauthentication|permitrootlogin)'
 ```
 
 `sshd -t` valide la configuration avant le rechargement : une faute de frappe
 refusée maintenant vaut mieux qu'un service SSH qui ne redémarre pas.
+
+**Le préfixe `00-` n'est pas décoratif.** L'image Debian 13 d'OVH livre
+`50-cloud-init.conf`, qui contient `PasswordAuthentication yes`. `sshd` lit ce
+dossier par ordre alphabétique et **retient la première valeur rencontrée** :
+un fichier nommé `durcissement.conf` passe après `50-…` et son réglage est
+ignoré sans un mot. Constaté au premier déploiement, le 2026-09-15.
+
+C'est pourquoi on lit la configuration effective avec `sshd -T` plutôt que de se
+fier aux fichiers. On attend `passwordauthentication no`,
+`kbdinteractiveauthentication no` et `permitrootlogin without-password` (ancien
+nom de `prohibit-password`). Puis, depuis le poste, le serveur ne doit plus
+proposer que la clé :
+
+```bash
+ssh -o BatchMode=yes -o PubkeyAuthentication=no <compte>@<ip> exit
+# attendu : Permission denied (publickey).
+```
 
 Une IP publique reçoit des tentatives de connexion en permanence. Avec les mots
 de passe coupés elles ne peuvent plus aboutir, mais elles remplissent les
@@ -145,10 +163,15 @@ Vérifier que le binaire attendu par l'unité systemd existe :
 ## 4. L'horloge, avant tout le reste
 
 ```bash
-sudo apt install chrony
-sudo systemctl enable --now chronyd
+sudo apt install -y chrony
+sudo systemctl enable --now chrony
 chronyc tracking          # 'System time' doit rester sous 50 ms
 ```
+
+`chrony`, pas `chronyd` : sous Debian `chronyd.service` n'est qu'un alias, et
+`systemctl enable chronyd` est refusé (`Refusing to operate on linked unit
+file`). L'alias suffit en revanche pour l'ordre de démarrage de l'unité
+fournie. L'installation retire `systemd-timesyncd`, qui ferait doublon.
 
 À vérifier **avant** le premier ordre signé. Une dérive ne casse pas les
 lectures, elle casse les écritures, et elle les casse en silence côté client :
