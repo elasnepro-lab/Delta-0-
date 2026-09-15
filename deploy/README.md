@@ -197,14 +197,21 @@ Puis vérifier que le frein fonctionne, une fois, avant d'en avoir besoin :
 ```bash
 sudo -u delta0 touch /opt/delta0/KILL
 journalctl -t delta0 -f          # tracer_kill : le traceur s'arrête proprement
+systemctl is-active delta0-tracer   # inactive : sorti avec le code 0, pas relancé
 sudo rm /opt/delta0/KILL
-sudo systemctl reset-failed delta0-tracer
 sudo systemctl start delta0-tracer
 ```
 
-Tant que `KILL` existe, systemd relance le traceur et celui-ci ressort aussitôt ;
-après cinq relances en cinq minutes, systemd abandonne. D'où les deux dernières
-lignes : sans elles, le service reste arrêté une fois le fichier retiré.
+Le traceur sort avec le code 0 quand il lit `KILL`, et l'unité ne relance que sur
+échec (`Restart=on-failure`) : il reste arrêté, y compris après un redémarrage de
+la machine tant que le fichier est là. Retirer le fichier ne suffit donc pas, il
+faut relancer le service.
+
+Un plantage, lui, est relancé toutes les 10 s, sans plafond. La première version
+de l'unité promettait l'abandon après cinq relances en cinq minutes, mais
+Debian 13 ignore `StartLimitIntervalSec` placé sous `[Service]` : la limite n'a
+jamais existé. Elle est retirée plutôt que corrigée, parce qu'un bot qui abandonne
+ne surveille plus rien, et les alertes disent pendant ce temps pourquoi il tombe.
 
 ## 6. Rétention des journaux
 

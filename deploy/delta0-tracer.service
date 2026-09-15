@@ -5,6 +5,12 @@ Documentation=file:///opt/delta0/RUNBOOK-M1.md
 # Hyperliquid sont horodatees et un decalage les fait refuser.
 After=network-online.target chronyd.service
 Wants=network-online.target chronyd.service
+# Aucun plafond de relances : un bot qui abandonne apres cinq plantages ne
+# surveille plus rien, et c'est quand il plante que la position a besoin de lui.
+# Cette cle vit sous [Unit] : Debian 13 l'ignore sous [Service] (« Unknown key »,
+# vu sur le VPS le 2026-09-15), si bien que la limite de 5 relances en 300 s
+# ecrite jusque-la n'a jamais existe.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -39,12 +45,15 @@ ExecStart=/opt/delta0/.venv/bin/delta0 tracer \
     --db /var/lib/delta0/m1_run.db \
     --cadence 5
 
-# Redemarrage systematique, mais pas en boucle serree : un RPC injoignable ou
-# un .env casse se repareraient a la main, pas en 200 relances par minute.
-Restart=always
+# Relance sur echec, pas en boucle serree : un RPC injoignable ou un .env casse
+# se reparent a la main, pas en 200 relances par minute. Sans plafond (voir
+# StartLimitIntervalSec=0 sous [Unit]).
+#
+# on-failure et non always : le frein KILL fait sortir le traceur avec le code 0,
+# et il doit rester a l'arret. Avec always, systemd le relancait toutes les 10 s,
+# chaque demarrage relisant le KILL pour ressortir aussitot.
+Restart=on-failure
 RestartSec=10
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
 # Les journaux sont la seule source du post-mortem (README §16).
 StandardOutput=journal
