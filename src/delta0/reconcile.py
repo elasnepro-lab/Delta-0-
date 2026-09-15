@@ -14,6 +14,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from delta0.config import Config
+from delta0.decision import bands_incoherence, derive_bands
+from delta0.errors import BootRefused
 from delta0.logging import get_logger
 from delta0.state import StateStore
 from delta0.types import Snapshot
@@ -39,9 +42,40 @@ class ReconcileReport:
     warnings: tuple[str, ...]
 
 
-async def reconcile_at_boot(store: StateStore, snapshot: Snapshot) -> ReconcileReport:
-    """Compare persistent state to on-chain reality; log any drift."""
+async def reconcile_at_boot(
+    store: StateStore, snapshot: Snapshot, config: Config
+) -> ReconcileReport:
+    """Compare persistent state to on-chain reality; log any drift.
+
+    Refuses the boot outright when the emergency bands cannot hold against the
+    liquidation threshold Aave actually applies. That check has to happen here
+    rather than at config load: the threshold is on-chain, and it moves.
+    """
     warnings: list[str] = []
+
+    # --- Emergency bands against the real liquidation threshold ---------------
+    problem = bands_incoherence(snapshot.aave_lt_wsteth, config)
+    if problem is not None:
+        log.critical(
+            "reconcile_bands_incoherent",
+            message=f"bandes d'urgence inutilisables — démarrage refusé : {problem}",
+            lt=snapshot.aave_lt_wsteth,
+        )
+        raise BootRefused(f"bandes d'urgence inutilisables face au LT on-chain : {problem}")
+
+    bands = derive_bands(snapshot.aave_lt_wsteth, config)
+    log.info(
+        "reconcile_bands",
+        message=(
+            f"bandes dérivées du LT {bands.lt:.4f} : pompe {bands.ltv_pump:.4f} "
+            f"(-{100 * bands.price_drop_to(bands.ltv_pump, config.target_ltv):.2f} %), "
+            f"coussin {bands.ltv_cushion:.4f} "
+            f"(-{100 * bands.price_drop_to(bands.ltv_cushion, config.target_ltv):.2f} %), "
+            f"désendettement {bands.ltv_deleverage:.4f} "
+            f"(-{100 * bands.price_drop_to(bands.ltv_deleverage, config.target_ltv):.2f} %)"
+        ),
+        lt=bands.lt,
+    )
 
     # --- Anchor drift ---------------------------------------------------------
     anchor_str = await store.kv_get("anchor_price")

@@ -145,14 +145,31 @@ transaction contre un état qu'on n'a pas pu vérifier.
 Arrêt propre à tout moment : créer un fichier `KILL` à la racine. Le guard
 refuse alors toute nouvelle micro-op et la boucle sort au cycle suivant.
 
+« À la racine » veut dire à la racine que le tracer a affichée au démarrage, pas
+au répertoire courant du terminal où l'on tape la commande. Le chemin absolu du
+fichier attendu est écrit dans le journal de boot et affiché à l'écran ; sous
+systemd il se fixe avec `--root`. Voir `deploy/README.md`.
+
 ## 5. Lire le rapport
 
 ```bash
-uv run delta0 report
+uv run delta0 report --db data/m1_run.db --days 7
 ```
 
-Trois tableaux : les tirs à blanc par priorité, les 5 chemins critiques
-(p95 vs budget README §7), les latences brutes par micro-op.
+**Toujours passer `--db`.** Sans lui la commande lit `data/delta0.db`, qui n'est
+pas la base de la campagne. Le rapport nomme désormais la base et la fenêtre sur
+sa première ligne, et refuse de rendre un verdict sur une base sans mesure.
+`--days` borne la lecture : une base ayant servi à plusieurs sessions les
+mélange, et les maxima viennent alors d'une autre campagne.
+
+Le code de sortie vaut 0 si le critère de vitesse est tenu, 1 sinon, 2 si la
+base est vide. `--json <fichier>` écrit le même rapport en données.
+
+Quatre tableaux : les tirs à blanc par priorité, **les intentions en échec
+groupées par cause**, les 5 chemins critiques (p95 vs budget README §7), et les
+latences brutes par micro-op. Le tableau des échecs vient avant les latences :
+une jambe qui a cessé de tirer deux jours avant la fin n'est pas une jambe
+rapide, et le rapport n'avait aucun endroit pour le dire.
 
 | Verdict | Sens | Action |
 |---|---|---|
@@ -197,8 +214,9 @@ rapport qui passe en taisant ce qu'il a excusé serait pire qu'un rapport qui
 
 ## 6. Limites connues à la clôture de M1-B2
 
-Ces limites, plus les manques révélés par la marche à blanc elle-même, sont
-reprises et détaillées dans `BACKLOG-M2.md`.
+Ces limites sont portées par le plan de travail « Route vers LIVE_SMALL »
+(chantiers 8.1, 8.6, 8.7 et 8.8) ; les manques révélés par la marche à blanc
+elle-même, par les chantiers 5.1, 6.1, 4.7 à 4.9, 6.6 et 8.9. Ce runbook décrit une campagne close et n'est plus mis à jour.
 
 
 - `venues/swap.py` est un stub : P4 n'est mesurable qu'en partie. Le

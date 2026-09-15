@@ -23,6 +23,7 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal
 
 
@@ -247,3 +248,53 @@ def m1_acceptance_met(verdicts: list[PathVerdict]) -> bool:
     that M1 structurally cannot measure — see `path_meets_m1`.
     """
     return bool(verdicts) and all(path_meets_m1(v) for v in verdicts)
+
+
+# --- The LIVE gate (README §14) ----------------------------------------------
+#
+# "Le mode DRY_RUN est obligatoire et bloquant : le bot refuse de passer LIVE
+#  sans un rapport de latences M1 de moins de 30 jours."
+#
+# `delta0 report` stamps these two keys into the journal it read, so the
+# evidence travels with the journal it describes rather than with the machine
+# that produced it. A report about another campaign cannot unlock this one.
+
+M1_REPORT_STAMP_KEY = "m1_report.generated_at"
+M1_REPORT_STATUS_KEY = "m1_report.status"
+M1_REPORT_MAX_AGE_DAYS = 30
+
+
+def report_age_days(generated_at: str | None, *, now: datetime | None = None) -> float | None:
+    """Age in days of a stamped report, or None when there is none to read."""
+    if not generated_at:
+        return None
+    try:
+        stamped = datetime.fromisoformat(generated_at)
+    except ValueError:
+        return None
+    if stamped.tzinfo is None:
+        stamped = stamped.replace(tzinfo=UTC)
+    reference = now or datetime.now(UTC)
+    return (reference - stamped).total_seconds() / 86_400.0
+
+
+def live_gate_refusal(
+    generated_at: str | None,
+    status: str | None,
+    *,
+    now: datetime | None = None,
+) -> str | None:
+    """The reason LIVE must not start, or None when it may.
+
+    Three ways to be refused, and they are named apart on purpose: an operator
+    who is told "no report" goes and runs one, while one told "report failed"
+    goes and reads it. A single message would send both to the wrong place.
+    """
+    age = report_age_days(generated_at, now=now)
+    if age is None:
+        return "aucun rapport M1 dans ce journal"
+    if age > M1_REPORT_MAX_AGE_DAYS:
+        return f"le rapport M1 a {age:.0f} jours, la limite est {M1_REPORT_MAX_AGE_DAYS}"
+    if status != "OK":
+        return f"le dernier rapport M1 conclut {status or 'rien'}, pas OK"
+    return None

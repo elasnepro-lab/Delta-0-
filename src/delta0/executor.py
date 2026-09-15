@@ -25,17 +25,20 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from eth_typing import ChecksumAddress
 from web3 import AsyncWeb3
 
+from delta0 import failure
 from delta0.config import Config
 from delta0.gas import with_gas_margin
 from delta0.latency import elapsed_ms, measurement_path, now_perf
 from delta0.logging import get_logger
-from delta0.safety import MicroOpsGuard
+from delta0.safety import InsufficientBalance, MicroOpsGuard
 from delta0.state import StateStore, deterministic_id
+from delta0.units import Rounding, to_raw
+from delta0.venues.aave import AaveTokenBalances
 
 log = get_logger(__name__)
 
@@ -138,6 +141,12 @@ _VARIABLE_RATE_MODE = 2
 _REFERRAL_CODE = 0
 
 
+class BalanceReader(Protocol):
+    """The one read the funding guard needs. Structural, so a test can fake it."""
+
+    async def read_token_balances(self, asset: str) -> AaveTokenBalances: ...
+
+
 @dataclass(frozen=True, slots=True)
 class OpResult:
     """Outcome of one micro-op."""
@@ -147,6 +156,19 @@ class OpResult:
     status: Literal["confirmed", "failed", "dry_run"]
     duration_ms: float
     gas_used: int | None
+
+
+# The one rounding each operation may apply when its amount becomes native units
+# (chantier 6.5). What spends or creates debt never exceeds the amount asked;
+# what authorizes or pays back never falls short of it. Aave caps a repay at the
+# outstanding debt, so rounding a repay up cannot overpay.
+_ROUNDING: dict[str, Rounding] = {
+    "aave_approve": Rounding.UP,
+    "aave_supply": Rounding.DOWN,
+    "aave_borrow": Rounding.DOWN,
+    "aave_repay": Rounding.UP,
+    "aave_withdraw": Rounding.DOWN,
+}
 
 
 class AaveTraceExecutor:
@@ -166,6 +188,7 @@ class AaveTraceExecutor:
         master_address: str,
         chain_id: int,
         private_key: str | None = None,
+        balances: BalanceReader | None = None,
     ) -> None:
         self._w3 = web3
         self._config = config
@@ -180,11 +203,17 @@ class AaveTraceExecutor:
         # Held only when the CLI explicitly wired --live-micro-ops. Never
         # logged (structlog + our own code never format `_private_key`).
         self._private_key = private_key
+        # Without a reader the funding guard cannot run. It is optional rather
+        # than required so that a caller wiring an executor for something else
+        # is not forced to build one, and its absence is logged at the first
+        # operation that would have been checked — never silently skipped.
+        self._balances = balances
 
     # --- Public micro-op API --------------------------------------------------
 
     async def approve(self, asset: str, amount_native: float) -> OpResult:
         """Approve the Aave Pool to pull `amount_native` of `asset`."""
+        self._guard.check("aave_approve", self._estimate_notional(asset, amount_native))
         return await self._erc20_write(
             op_kind="aave_approve",
             asset=asset,
@@ -196,6 +225,8 @@ class AaveTraceExecutor:
         )
 
     async def supply(self, asset: str, amount_native: float) -> OpResult:
+        self._guard.check("aave_supply", self._estimate_notional(asset, amount_native))
+        await self._refuse_if_underfunded("aave_supply", asset, needed=amount_native)
         return await self._pool_write(
             op_kind="aave_supply",
             asset=asset,
@@ -209,6 +240,7 @@ class AaveTraceExecutor:
         )
 
     async def borrow(self, asset: str, amount_native: float) -> OpResult:
+        self._guard.check("aave_borrow", self._estimate_notional(asset, amount_native))
         return await self._pool_write(
             op_kind="aave_borrow",
             asset=asset,
@@ -223,6 +255,7 @@ class AaveTraceExecutor:
         )
 
     async def repay(self, asset: str, amount_native: float) -> OpResult:
+        self._guard.check("aave_repay", self._estimate_notional(asset, amount_native))
         return await self._pool_write(
             op_kind="aave_repay",
             asset=asset,
@@ -247,6 +280,11 @@ class AaveTraceExecutor:
         max_uint = 2**256 - 1
         op_kind: AaveOpKind = "aave_repay"
         self._guard.check(op_kind, notional_usd=self._estimate_notional(asset, 2.0))
+        # MAX_UINT256 does not mean "whatever I have": Aave pulls the full
+        # outstanding debt, so that is the amount the wallet must hold. It is
+        # the exact shape of the 8 September failure, where a wallet at 2,97
+        # was asked for 35,01.
+        await self._refuse_if_underfunded(op_kind, asset, needed=None)
 
         call = self._pool.functions.repay(
             AsyncWeb3.to_checksum_address(asset),
@@ -272,6 +310,7 @@ class AaveTraceExecutor:
         at deposit time — which is why the same sequence passes one day and
         reverts the next. See memory/aave_findings.md.
         """
+        self._guard.check("aave_withdraw", self._estimate_notional(asset, amount_native))
         return await self._pool_write(
             op_kind="aave_withdraw",
             asset=asset,
@@ -295,8 +334,10 @@ class AaveTraceExecutor:
         USDC collateral, not just this cycle's deposit. That is correct for the
         M1 tracer, which is the only supplier during the marche a blanc. Once
         the real USDC cushion exists (M2), a cycle must withdraw its own
-        deposit only — read the aToken balance and pass it to `withdraw`, which
-        is safe in that direction because the balance only grows with interest.
+        deposit only — read the aToken balance and withdraw it, which is safe in
+        that direction because the balance only grows with interest. Not as a
+        float, though: a float cannot carry an 18-decimal balance, and rounding
+        it can ask for more than is held (see `units.to_raw`).
 
         `notional_hint` is what the guard sees: MAX_UINT256 as a notional would
         blow the `max_op_usd` cap on every call, so callers pass the amount
@@ -333,7 +374,7 @@ class AaveTraceExecutor:
             abi=_ERC20_MUT_ABI,
         )
         decimals: int = await contract.functions.decimals().call()
-        raw_amount = int(amount_native * (10**decimals))
+        raw_amount = to_raw(amount_native, decimals, _ROUNDING[op_kind])
         call = build_call(contract, raw_amount)
         return await self._journal_and_send(
             op_kind=op_kind,
@@ -356,7 +397,7 @@ class AaveTraceExecutor:
             abi=_ERC20_MUT_ABI,
         )
         decimals: int = await token.functions.decimals().call()
-        raw_amount = int(amount_native * (10**decimals))
+        raw_amount = to_raw(amount_native, decimals, _ROUNDING[op_kind])
         call = build_call(raw_amount)
         return await self._journal_and_send(
             op_kind=op_kind,
@@ -364,6 +405,52 @@ class AaveTraceExecutor:
             amount_native=amount_native,
             call=call,
         )
+
+    async def _refuse_if_underfunded(
+        self,
+        op_kind: AaveOpKind,
+        asset: str,
+        *,
+        needed: float | None,
+    ) -> None:
+        """Refuse an operation the wallet demonstrably cannot fund.
+
+        `needed=None` means "the full outstanding debt", which is what
+        `repay_all` spends: MAX_UINT256 does not mean "whatever I have", Aave
+        pulls the whole debt. Resolving it from the same read keeps the guard
+        to one round trip.
+
+        The guard refuses only on a balance it actually read. A failed read
+        must NOT block the operation: on an emergency path a repay that might
+        have worked is worth more than a refusal based on ignorance, and the
+        transaction still carries its own revert as a second line of defence.
+        We block what we know to be impossible, never what we merely failed to
+        check.
+        """
+        if self._balances is None:
+            log.warning(
+                "balance_check_absent",
+                message=f"{op_kind}: aucun lecteur de soldes câblé — opération non vérifiée",
+                op_kind=op_kind,
+            )
+            return
+        try:
+            balances = await self._balances.read_token_balances(asset)
+        except failure.OPERATIONAL_ERRORS:
+            log.warning(
+                "balance_check_unavailable",
+                message=f"{op_kind}: solde libre illisible — opération tentée quand même",
+                op_kind=op_kind,
+            )
+            return
+        required = balances.variable_debt_balance if needed is None else needed
+        if required <= 0.0:
+            return
+        if balances.wallet_balance < required:
+            raise InsufficientBalance(
+                f"{op_kind}: le portefeuille porte {balances.wallet_balance:.6f} "
+                f"et l'opération en demande {required:.6f}",
+            )
 
     async def _journal_and_send(
         self,
@@ -373,12 +460,10 @@ class AaveTraceExecutor:
         amount_native: float,
         call: Any,
     ) -> OpResult:
-        # For M1 TRACER, we treat notional in USD as == amount for stables (USDC)
-        # and use a conservative overestimate for volatile tokens. This is only
-        # for the safety cap; it does not need to be precise.
-        notional_estimate = self._estimate_notional(asset, amount_native)
-        self._guard.check(op_kind, notional_estimate)
-
+        # No guard check here: every public method passes the guard once, first,
+        # before any network read (its contract). Checking again here counted
+        # each MAX_UINT256 operation twice against the hourly limit — the second
+        # time with a notional of 0, which no cap could ever refuse.
         intent_id = deterministic_id(
             op_kind,
             asset,
@@ -424,12 +509,15 @@ class AaveTraceExecutor:
             signed = self._w3.eth.account.sign_transaction(tx, private_key=self._pkey())
             tx_hash = await self._w3.eth.send_raw_transaction(signed.raw_transaction)
             receipt = await self._w3.eth.wait_for_transaction_receipt(tx_hash)
-        except Exception:
+        except Exception as e:
+            cause = failure.from_exception(e)
             await self._mark_intent_status(intent_id, "failed", None)
+            await self._store.record_intent_failure(intent_id, cause.journal_entry())
             log.exception(
                 "op_send_failed",
                 message=f"{op_kind}: envoi ou attente de reçu en échec",
                 intent_id=intent_id,
+                failure=cause.journal_entry(),
             )
             raise
 
@@ -438,12 +526,22 @@ class AaveTraceExecutor:
         gas_used = int(receipt.get("gasUsed", 0))
         status = int(receipt.get("status", 0))
         if status != 1:
+            cause = await failure.diagnose_revert(
+                call=call,
+                receipt=receipt,
+                tx_hash=tx_hash.hex(),
+                sender=self._master,
+                gas_used=gas_used,
+                gas_limit=int(tx["gas"]),
+            )
             await self._mark_intent_status(intent_id, "failed", [tx_hash.hex()])
+            await self._store.record_intent_failure(intent_id, cause.journal_entry())
             log.error(
                 "op_reverted",
-                message=f"{op_kind}: transaction reverted",
+                message=f"{op_kind}: transaction reverted — {cause.journal_entry()}",
                 intent_id=intent_id,
                 tx_hash=tx_hash.hex(),
+                failure=cause.journal_entry(),
             )
             return OpResult(
                 intent_id=intent_id,

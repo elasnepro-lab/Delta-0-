@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from pathlib import Path
 
+import aiosqlite
 import pytest
 
 from delta0.state import StateStore, deterministic_id
@@ -122,3 +123,60 @@ async def test_latency_stats_all_keys_every_path(store: StateStore) -> None:
     assert set(stats) == {"path.aave_supply", "path.p1_p2_hl_local"}
     assert stats["path.aave_supply"]["count"] == 1.0
     assert stats["path.p1_p2_hl_local"]["p95"] == 400.0
+
+
+@pytest.mark.asyncio
+async def test_failure_cause_roundtrip(store: StateStore) -> None:
+    async with store.transaction() as conn:
+        await conn.execute(
+            """INSERT INTO intents
+               (id, created_at, action, priority, params_json, reason, status, updated_at)
+               VALUES ('i1', '2026-09-12T00:00:00+00:00', 'aave_repay', 3, '{}',
+                       'micro-op M1-B2', 'failed', '2026-09-12T00:00:00+00:00')""",
+        )
+    assert await store.intent_failure("i1") is None
+    await store.record_intent_failure("i1", "revert | Boom | 0xdeadbeef")
+    assert await store.intent_failure("i1") == "revert | Boom | 0xdeadbeef"
+
+
+@pytest.mark.asyncio
+async def test_failure_of_an_unknown_intent_is_none(store: StateStore) -> None:
+    assert await store.intent_failure("nope") is None
+
+
+@pytest.mark.asyncio
+async def test_the_failure_column_reaches_a_journal_created_without_it(
+    tmp_path: Path,
+) -> None:
+    """A campaign's journal is the one we most want to read back.
+
+    `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so without
+    the additive step a new column would never appear in `data/m1_run.db` and
+    every past failure would stay unreadable.
+    """
+    path = tmp_path / "old.db"
+    async with aiosqlite.connect(path) as conn:
+        await conn.execute(
+            """CREATE TABLE intents (
+                   id TEXT PRIMARY KEY, created_at TEXT NOT NULL, action TEXT NOT NULL,
+                   priority INTEGER NOT NULL, params_json TEXT NOT NULL,
+                   reason TEXT NOT NULL, status TEXT NOT NULL, tx_hashes TEXT,
+                   updated_at TEXT NOT NULL)""",
+        )
+        await conn.execute(
+            """INSERT INTO intents VALUES
+               ('old', '2026-09-08T20:39:53+00:00', 'aave_repay', 3, '{}',
+                'micro-op M1-B2', 'failed', NULL, '2026-09-08T20:39:53+00:00')""",
+        )
+        await conn.commit()
+
+    s = StateStore(path)
+    await s.open()
+    try:
+        # The pre-existing row survived, and can now carry a cause.
+        await s.record_intent_failure("old", "revert_gas | tx=0xabc")
+        assert await s.intent_failure("old") == "revert_gas | tx=0xabc"
+        # Opening twice must not attempt the column a second time.
+        await s.open()
+    finally:
+        await s.close()

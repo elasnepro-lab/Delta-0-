@@ -1,0 +1,67 @@
+:root{--ground:#F1F4F4;--surface:#fff;--surface-2:#E9EEEE;--ink:#131A1C;--ink-soft:#3E4E50;
+--muted:#647576;--rule:#D2DCDC;--rule-soft:#E2EAEA;--accent:#0E6E70;--accent-soft:#D9EBEA;
+--crit:#A32B20;--crit-soft:#F6E2DF;--warn:#8A5A00;--warn-soft:#F7EBD6;--ok:#2C6640;--ok-soft:#DDEDE1;
+--f-display:"Newsreader",Georgia,serif;--f-body:"IBM Plex Sans",-apple-system,"Segoe UI",sans-serif;
+--f-mono:"IBM Plex Mono",ui-monospace,Consolas,monospace}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--ground:#0D1315;--surface:#151D1F;
+--surface-2:#1D2729;--ink:#E5ECEB;--ink-soft:#BCC9C8;--muted:#8E9E9E;--rule:#273235;--rule-soft:#1F292B;
+--accent:#4FB3AE;--accent-soft:#16302F;--crit:#EE8B80;--crit-soft:#34201D;--warn:#DCAF5C;
+--warn-soft:#2E2717;--ok:#7FC48D;--ok-soft:#1A2A1F}}
+:root[data-theme="dark"]{--ground:#0D1315;--surface:#151D1F;--surface-2:#1D2729;--ink:#E5ECEB;
+--ink-soft:#BCC9C8;--muted:#8E9E9E;--rule:#273235;--rule-soft:#1F292B;--accent:#4FB3AE;
+--accent-soft:#16302F;--crit:#EE8B80;--crit-soft:#34201D;--warn:#DCAF5C;--warn-soft:#2E2717;
+--ok:#7FC48D;--ok-soft:#1A2A1F}
+*{box-sizing:border-box}
+body{background:var(--ground);color:var(--ink);font-family:var(--f-body);font-size:16px;line-height:1.6;
+-webkit-font-smoothing:antialiased}
+.wrap{max-width:1000px;margin:0 auto;padding:0 24px 96px}
+.mast{padding:64px 0 32px;border-bottom:2px solid var(--ink)}
+.eyebrow{font-family:var(--f-mono);font-size:11px;font-weight:500;letter-spacing:.14em;
+text-transform:uppercase;color:var(--accent);margin:0 0 20px}
+h1{font-family:var(--f-display);font-weight:500;font-size:clamp(38px,6vw,58px);line-height:1.05;
+letter-spacing:-.02em;margin:0 0 20px;text-wrap:balance}
+.standfirst{font-size:18px;line-height:1.55;color:var(--ink-soft);max-width:62ch;margin:0 0 32px}
+.standfirst strong{color:var(--ink);font-weight:600}
+section{padding-top:56px}
+h2{font-family:var(--f-display);font-weight:600;font-size:29px;letter-spacing:-.015em;margin:0 0 8px;
+text-wrap:balance}
+h3{font-family:var(--f-body);font-size:16px;font-weight:600;margin:32px 0 10px}
+.sub{color:var(--muted);font-size:15px;margin:0 0 26px;max-width:66ch}
+p{max-width:68ch}
+.note{border:1px solid var(--rule);border-left:4px solid var(--warn);background:var(--surface);
+padding:22px 24px;margin:24px 0}
+.note.good{border-left-color:var(--ok)}
+.note.crit{border-left-color:var(--crit)}
+.note h4{font-family:var(--f-body);font-size:16px;font-weight:600;margin:0 0 8px}
+.note p{margin:0 0 10px;font-size:15px;color:var(--ink-soft)}
+.note p:last-child{margin-bottom:0}
+.note strong{color:var(--ink)}
+.scroll{overflow-x:auto;border:1px solid var(--rule);background:var(--surface);margin:14px 0}
+table{border-collapse:collapse;width:100%;font-size:13.5px;min-width:620px}
+th,td{text-align:right;padding:9px 14px;border-bottom:1px solid var(--rule-soft);white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+thead th{font-family:var(--f-mono);font-size:10px;font-weight:500;letter-spacing:.07em;
+text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--rule)}
+tbody tr:last-child td{border-bottom:none}
+td{font-variant-numeric:tabular-nums}
+td.num,th.num{font-family:var(--f-mono)}
+tr.total td{font-weight:600;background:var(--surface-2);border-top:1px solid var(--rule)}
+tr.best{background:var(--ok-soft)}
+.m{font-family:var(--f-mono);font-size:12.5px}
+.pill{display:inline-block;font-family:var(--f-mono);font-size:10px;letter-spacing:.06em;
+text-transform:uppercase;padding:2px 7px;background:var(--accent-soft);color:var(--accent)}
+.grid{display:grid;gap:1px;background:var(--rule);border:1px solid var(--rule)}
+.cell{background:var(--surface);padding:16px 18px}
+.cell dt{font-family:var(--f-mono);font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;
+color:var(--muted);margin:0 0 5px}
+.cell dd{margin:0;font-size:14.5px;color:var(--ink-soft)}
+.cell dd b{color:var(--ink)}
+@media(min-width:700px){.grid.two{grid-template-columns:1fr 1fr}}
+footer{margin-top:64px;padding-top:24px;border-top:1px solid var(--rule);font-size:13.5px;
+color:var(--muted)}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+td.win{background:var(--ok-soft);font-weight:600}
+.soft{color:var(--muted);font-size:11.5px}
+td.bad{color:var(--crit)}
+tr.grouphead td{background:var(--surface-2);font-family:var(--f-mono);
+font-size:11.5px;color:var(--ink-soft);text-align:left}

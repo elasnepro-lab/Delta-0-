@@ -20,8 +20,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from hyperliquid.info import Info
-
+from delta0.hl_client import HLInfo, make_info
 from delta0.logging import get_logger
 
 log = get_logger(__name__)
@@ -56,7 +55,7 @@ class HyperliquidStream:
     user_address: str
     coin: str = "ETH"
 
-    _info: Info | None = None
+    _info: HLInfo | None = None
     _loop: asyncio.AbstractEventLoop | None = None
     _mark_queue: asyncio.Queue[MarkTick] = field(default_factory=lambda: asyncio.Queue(_QUEUE_MAX))
     _events_queue: asyncio.Queue[UserEvent] = field(
@@ -67,8 +66,7 @@ class HyperliquidStream:
         if self._info is not None:
             return
         self._loop = asyncio.get_running_loop()
-        # skip_ws=False starts the WS thread.
-        self._info = Info(self.api_url, skip_ws=False)
+        self._info = make_info(self.api_url, websocket=True)
         # Mark price subscription: `allMids` gives {coin: str_price}.
         self._info.subscribe({"type": "allMids"}, self._on_mids)
         # User events subscription: fills + liquidations + funding for our address.

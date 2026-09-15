@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from delta0.config import Config
 from delta0.decision import BlindState, OperationalContext, decide
 from delta0.executor import AaveTraceExecutor
+from delta0.failure import OPERATIONAL_ERRORS
 from delta0.hl_executor import HLTraceExecutor
 from delta0.latency import elapsed_ms, now_perf
 from delta0.logging import get_logger, set_cycle_id
@@ -45,6 +46,26 @@ LATENCY_PATH_DECISION = "decision"
 # USDC address on Arbitrum — pulled from config in practice; here as a
 # fallback for callers that instantiate a bare TracerLoop.
 _USDC_ARB_MAINNET = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+
+
+def _aave_position_in_the_way(snap: Snapshot) -> str | None:
+    """What on the Aave account forbids the tracer's cycle, or None if it is empty.
+
+    The cycle ends with `repay_all` and `withdraw_all`, both MAX_UINT256: they act
+    on the whole account, not on the cycle's own few USDC. Next to a real
+    position they would repay the strategy's debt and pull its cushion; after a
+    cycle that died half-way they would run on top of the leftovers (audit dev
+    2026-09-16, 1.9). The docstring of `withdraw_all` named the risk, nothing
+    checked it.
+    """
+    found = []
+    if snap.wsteth_atoken_balance > 0.0:
+        found.append(f"{snap.wsteth_atoken_balance:.6f} wstETH déposés")
+    if snap.usdc_atoken_balance > 0.0:
+        found.append(f"{snap.usdc_atoken_balance:.2f} USDC déposés")
+    if snap.usdc_variable_debt_balance > 0.0:
+        found.append(f"{snap.usdc_variable_debt_balance:.2f} USDC de dette")
+    return ", ".join(found) or None
 
 
 @dataclass(slots=True)
@@ -103,7 +124,9 @@ class TracerLoop:
             t0 = now_perf()
             try:
                 snap = await self.watcher.snapshot()
-            except Exception:
+            except OPERATIONAL_ERRORS:
+                # Survive an unreachable venue, never a bug: an AttributeError
+                # here used to loop forever as "échec construction snapshot".
                 log.exception("snapshot_failed", message="échec construction snapshot")
                 await asyncio.sleep(self.cadence_s)
                 continue
@@ -129,19 +152,20 @@ class TracerLoop:
                 )
 
             # --- Scheduled micro-ops (opt-in) --------------------------------
-            await self._maybe_fire_micro_ops(now_mono=time.monotonic())
+            await self._maybe_fire_micro_ops(now_mono=time.monotonic(), snap=snap)
 
             # --- Wait -------------------------------------------------------
             await asyncio.sleep(self.cadence_s)
 
         return shadow_count
 
-    async def _maybe_fire_micro_ops(self, *, now_mono: float) -> None:
+    async def _maybe_fire_micro_ops(self, *, now_mono: float, snap: Snapshot) -> None:
         """Fire scheduled micro-ops when their interval has elapsed.
 
         Each executor is guarded by its own safety guard (allowlist, cap,
         rate limit, KILL file, first-use). If a guard refuses, the loop
         continues — a scheduled micro-op is best-effort, never mandatory.
+        `snap` is this cycle's snapshot: what the account holds right now.
         """
         tracer_cfg = self.config.tracer
 
@@ -150,7 +174,7 @@ class TracerLoop:
             and now_mono - self._last_aave_cycle >= tracer_cfg.aave_cycle_every_s
         ):
             self._last_aave_cycle = now_mono
-            await self._fire_aave_cycle()
+            await self._fire_aave_cycle(snap)
 
         if (
             self.hl_executor is not None
@@ -166,7 +190,7 @@ class TracerLoop:
             self._last_bridge_cycle = now_mono
             await self._fire_bridge_round_trip()
 
-    async def _fire_aave_cycle(self) -> None:
+    async def _fire_aave_cycle(self, snap: Snapshot) -> None:
         """Full round trip: approve, supply, borrow, repay-all, withdraw-all.
 
         Sequence chosen after fork validation (see memory/aave_findings.md):
@@ -186,6 +210,16 @@ class TracerLoop:
         the loop.
         """
         assert self.aave_executor is not None
+        in_the_way = _aave_position_in_the_way(snap)
+        if in_the_way is not None:
+            log.warning(
+                "aave_cycle_refused_position",
+                message=(
+                    f"cycle Aave refusé : le compte porte déjà {in_the_way}. "
+                    "repay_all et withdraw_all agiraient sur tout le compte."
+                ),
+            )
+            return
         amount = self.config.tracer.aave_cycle_amount_usdc
         usdc = self.config.venues.usdc_address or _USDC_ARB_MAINNET
         # Borrow ~20 % of the supplied amount to keep well below the LTV limit.
@@ -209,7 +243,7 @@ class TracerLoop:
                 "aave_cycle_refused",
                 message=f"cycle Aave refusé par le guard: {e}",
             )
-        except Exception:
+        except OPERATIONAL_ERRORS:
             log.exception(
                 "aave_cycle_failed",
                 message="cycle Aave a levé une exception — journal des intents à relire",
@@ -225,7 +259,7 @@ class TracerLoop:
                 "hl_cancel_refused",
                 message=f"hl_post_only_cancel refusé par le guard: {e}",
             )
-        except Exception:
+        except OPERATIONAL_ERRORS:
             log.exception(
                 "hl_cancel_failed",
                 message="hl_post_only_cancel a levé une exception",
@@ -247,7 +281,7 @@ class TracerLoop:
                 "bridge_round_trip_refused",
                 message=f"bridge round_trip refusé par le guard: {e}",
             )
-        except Exception:
+        except OPERATIONAL_ERRORS:
             log.exception(
                 "bridge_round_trip_failed",
                 message="bridge round_trip a levé une exception",

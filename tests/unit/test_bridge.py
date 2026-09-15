@@ -315,7 +315,8 @@ async def test_a_failed_transfer_does_not_abort_the_crossing(
     """Funds are already on HL at this point — aborting would strand them."""
     bridge = _make_bridge(tmp_path, store, config, dry_run=False)
     exchange = bridge._make_hl_exchange()
-    exchange.usd_class_transfer.side_effect = RuntimeError("HL a refuse")
+    # What the SDK's `requests` transport raises on a dropped connection.
+    exchange.usd_class_transfer.side_effect = ConnectionResetError("HL injoignable")
 
     bridge.bridge_out = AsyncMock(return_value=_dummy_leg())  # type: ignore[method-assign]
     bridge.bridge_in = AsyncMock(return_value=_dummy_leg())  # type: ignore[method-assign]
@@ -326,3 +327,23 @@ async def test_a_failed_transfer_does_not_abort_the_crossing(
 
     assert result.down_credit_wait_ms == 2000.0
     bridge.bridge_in.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_bug_in_the_transfer_is_not_swallowed(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+) -> None:
+    """Chantier 6.4: "HL unreachable, carry on" is for the venue, never our own bug."""
+    bridge = _make_bridge(tmp_path, store, config, dry_run=False)
+    exchange = bridge._make_hl_exchange()
+    exchange.usd_class_transfer.side_effect = AttributeError("'NoneType' object has no attribute")
+
+    bridge.bridge_out = AsyncMock(return_value=_dummy_leg())  # type: ignore[method-assign]
+    bridge.bridge_in = AsyncMock(return_value=_dummy_leg())  # type: ignore[method-assign]
+    bridge.wait_for_hl_credit = AsyncMock(return_value=1000.0)  # type: ignore[method-assign]
+    bridge.wait_for_arbitrum_credit = AsyncMock(return_value=2000.0)  # type: ignore[method-assign]
+
+    with pytest.raises(AttributeError):
+        await bridge.round_trip(5.0)

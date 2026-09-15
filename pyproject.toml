@@ -73,7 +73,14 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["S101", "PLR2004", "S105", "S106"]
+"tests/**/*.py" = ["S101", "PLR2004", "S105", "S106", "TID251"]
+# The one bot module allowed to touch the Hyperliquid SDK, and operator scripts
+# that live outside the bot.
+"src/delta0/hl_client.py" = ["TID251"]
+"scripts/**/*.py" = ["TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"hyperliquid".msg = "Passer par delta0.hl_client : le SDK signale ses refus par valeur de retour, parfois nichés dans status ok."
 
 [tool.ruff.format]
 quote-style = "double"
@@ -110,7 +117,7 @@ addopts = [
     "--cov=delta0",
     "--cov-report=term-missing",
     "--cov-report=xml",
-    "--cov-fail-under=85",
+    "--cov-fail-under=86",
 ]
 markers = [
     "integration: hits live testnet/fork (skipped by default in CI)",
@@ -121,15 +128,15 @@ markers = [
 [tool.coverage.run]
 branch = true
 source = ["src/delta0"]
-# Placeholders and venue I/O wrappers are covered by integration tests
-# (M1 TRACER + M2 fork tests). Pure logic modules stay in the coverage gate.
+# Thin SDK/RPC wrappers whose only logic is the call itself. Everything that
+# holds a decision, a state machine or an arithmetic step stays in the gate.
+# The threshold below is a floor measured on the real perimeter: raise it when
+# coverage improves, never lower it to make a run pass.
 omit = [
     "src/delta0/main.py",
     "src/delta0/settings.py",
-    "src/delta0/watcher.py",
     "src/delta0/venues/aave.py",
     "src/delta0/venues/hyperliquid.py",
-    "src/delta0/venues/bridge.py",
     "src/delta0/venues/swap.py",
 ]
 

@@ -32,7 +32,8 @@ class Priority(IntEnum):
 
 ActionKind = Literal[
     "NOOP",
-    "REDUCE",  # P2 IOC close a fraction of the short
+    "ADD_ISOLATED_MARGIN",  # P2 — local, one request, actually moves liquidationPx
+    "REDUCE",  # P2 fallback — damage limitation only, see decision._p2
     "REPAY_FROM_CUSHION",  # P3
     "STEPWISE_DELEVERAGE",  # P4
     "PUMP_UP",  # P5
@@ -52,17 +53,20 @@ class Snapshot:
 
     Produced by the watcher, consumed by the pure decision engine.
     All amounts are in USD unless the field name says otherwise.
-    Balances are in native token units (Decimal-ish) — kept as float for now,
-    to be tightened to Decimal in M1 once the shape is stable.
+    Balances are in token units as floats: precise enough to observe and to
+    decide on ratios. Amounts only become exact where they are sent on-chain,
+    through `delta0.units.to_raw` and an explicit rounding (chantier 6.5).
     """
 
     ts: datetime
 
     # Aave leg.
     wsteth_atoken_balance: float
-    wsteth_price_usd: float
+    wsteth_price_usd: float  # Aave oracle price — the one behind the health factor
+    wsteth_eth_ratio: float  # ETH per wstETH, from the same oracle
     usdc_atoken_balance: float
     usdc_variable_debt_balance: float
+    usdc_wallet_balance: float  # libre dans le portefeuille, ce qu'une op dépense
     hf: float  # from Pool.getUserAccountData — trusted, never recomputed
     aave_lt_wsteth: float  # liquidation threshold, on-chain
     aave_ltv_max_wsteth: float  # max LTV allowed, on-chain
@@ -72,6 +76,7 @@ class Snapshot:
     mark_price: float
     short_size_eth: float  # positive number, this is a short position
     isolated_margin_usd: float
+    hl_free_usdc: float  # on the account, not committed as margin
     hl_maintenance_margin: float  # observed, compared to config
     funding_last_hour: float  # hourly rate
     funding_30d_annualized: float
@@ -119,14 +124,36 @@ class Snapshot:
         return self.isolated_margin_usd / self.notional_usd
 
     @property
-    def delta_usd(self) -> float:
-        return self.spot_usd - self.notional_usd
+    def spot_eth_equivalent(self) -> float:
+        """The collateral expressed in ETH — what the short has to match.
+
+        The hedge is a short on ETH, so neutrality is an equality of ETH
+        quantities, not of dollar amounts. Stating it this way makes the delta
+        immune to the USD base: a stETH depeg moves the Aave leg's LTV, which
+        is an Aave problem, and leaves this figure alone. See README §5.
+        """
+        return self.wsteth_atoken_balance * self.wsteth_eth_ratio
+
+    @property
+    def delta_eth(self) -> float:
+        """Uncovered ETH exposure. Positive means long, negative means short."""
+        return self.spot_eth_equivalent - self.short_size_eth
 
     @property
     def delta_pct(self) -> float:
-        if self.spot_usd == 0.0:
+        if self.spot_eth_equivalent == 0.0:
             return 0.0
-        return self.delta_usd / self.spot_usd
+        return self.delta_eth / self.spot_eth_equivalent
+
+    @property
+    def delta_usd(self) -> float:
+        """Reporting only — decisions use `delta_eth` / `delta_pct`.
+
+        Kept because a dollar figure reads better in a digest, but it mixes two
+        price sources (oracle for the spot, mark for the notional) and so drifts
+        from `delta_eth` whenever they diverge.
+        """
+        return self.spot_usd - self.notional_usd
 
     @property
     def carry_spread(self) -> float:
@@ -134,7 +161,33 @@ class Snapshot:
 
     @property
     def equity(self) -> float:
-        return self.collateral_usd + self.isolated_margin_usd - self.debt_usd
+        return equity_usd(
+            collateral_usd=self.collateral_usd,
+            isolated_margin_usd=self.isolated_margin_usd,
+            wallet_usdc=self.usdc_wallet_balance,
+            hl_free_usdc=self.hl_free_usdc,
+            debt_usd=self.debt_usd,
+        )
+
+
+def equity_usd(
+    *,
+    collateral_usd: float,
+    isolated_margin_usd: float,
+    wallet_usdc: float,
+    hl_free_usdc: float,
+    debt_usd: float,
+) -> float:
+    """What the machine is worth, in one place — README §5.
+
+    The free balances count: they are dollars owned. The status panel added
+    them after announcing "equity 0.00 $" with 169.80 $ on hand, while
+    `Snapshot.equity` kept the older formula, so the panel and the engine
+    disagreed on the number the solver sizes everything from. The HL free
+    balance is also where the reserve lives: leaving it out would make the
+    solver's own fixed point unreachable.
+    """
+    return collateral_usd + isolated_margin_usd + wallet_usdc + hl_free_usdc - debt_usd
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +197,7 @@ class TargetState:
     spot_target_usd: float
     notional_target_usd: float
     margin_target_usd: float
+    reserve_target_usd: float  # free USDC on HL, what P2 pours into the margin
     debt_target_usd: float
 
 

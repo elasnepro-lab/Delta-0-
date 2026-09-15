@@ -1,0 +1,77 @@
+[Unit]
+Description=Delta-0- TRACER (marche a blanc M1)
+Documentation=file:///opt/delta0/RUNBOOK-M1.md
+# Le bot ne fait rien d'utile sans reseau ni horloge juste : les signatures
+# Hyperliquid sont horodatees et un decalage les fait refuser.
+After=network-online.target chronyd.service
+Wants=network-online.target chronyd.service
+# Aucun plafond de relances : un bot qui abandonne apres cinq plantages ne
+# surveille plus rien, et c'est quand il plante que la position a besoin de lui.
+# Cette cle vit sous [Unit] : Debian 13 l'ignore sous [Service] (« Unknown key »,
+# vu sur le VPS le 2026-09-15), si bien que la limite de 5 relances en 300 s
+# ecrite jusque-la n'a jamais existe.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=delta0
+Group=delta0
+
+# WorkingDirectory sert encore a une chose : `.env` est lu relativement au
+# repertoire courant (pydantic-settings, `env_file=".env"`). Si ce chemin est
+# faux le bot refuse de demarrer avec le code 3, donc l'erreur est bruyante.
+WorkingDirectory=/opt/delta0
+
+# Le depot est monte en lecture seule pour le service (voir plus bas), donc
+# Python ne peut pas y ecrire ses .pyc. Il s'en passe silencieusement, mais
+# autant le lui dire au lieu de le laisser essayer a chaque import.
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# --root est la protection contre l'erreur SILENCIEUSE : c'est la racine ou les
+# fichiers KILL sont cherches. Sans elle la racine etait `Path.cwd()`, donc un
+# WorkingDirectory inattendu faisait chercher le frein d'urgence dans un
+# repertoire ou personne n'ecrirait jamais, sans un mot.
+# La base sort du depot : une base SQLite en WAL n'a rien a faire dans un
+# dossier synchronise, ni dans un depot git (voir deploy/README.md §1).
+#
+# On appelle le binaire du venv, PAS `uv run`. `uv run` resout les dependances
+# au demarrage et veut ecrire dans son cache et dans le venv, ce que le bac a
+# sable ci-dessous interdit — le service echouerait au lancement pour une
+# raison qui n'a rien a voir avec le bot. `uv sync` reste une etape a la main,
+# faite avant d'activer le service.
+ExecStart=/opt/delta0/.venv/bin/delta0 tracer \
+    --root /opt/delta0 \
+    --config /opt/delta0/config.yaml \
+    --db /var/lib/delta0/m1_run.db \
+    --cadence 5
+
+# Relance sur echec, pas en boucle serree : un RPC injoignable ou un .env casse
+# se reparent a la main, pas en 200 relances par minute. Sans plafond (voir
+# StartLimitIntervalSec=0 sous [Unit]).
+#
+# on-failure et non always : le frein KILL fait sortir le traceur avec le code 0,
+# et il doit rester a l'arret. Avec always, systemd le relancait toutes les 10 s,
+# chaque demarrage relisant le KILL pour ressortir aussitot.
+Restart=on-failure
+RestartSec=10
+
+# Les journaux sont la seule source du post-mortem (README §16).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=delta0
+
+# Arret propre. Le fichier KILL reste la voie normale : il laisse la boucle
+# sortir au cycle suivant plutot qu'au milieu d'un cycle Aave.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+# Surface reduite : le bot lit le depot, ecrit la base et rien d'autre.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/delta0
+ReadOnlyPaths=/opt/delta0
+
+[Install]
+WantedBy=multi-user.target

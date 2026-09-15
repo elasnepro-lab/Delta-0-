@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
@@ -24,13 +24,20 @@ from rich.table import Table
 from web3 import AsyncWeb3
 
 from delta0 import __version__
-from delta0.config import Config, load_config
+from delta0.alerts import AlertSink, build_sink, make_alert_processor
+from delta0.config import Config, RuntimeMode, load_config
 from delta0.decision import target_state
+from delta0.errors import BootRefused
 from delta0.executor import AaveTraceExecutor
+from delta0.failure import OPERATIONAL_ERRORS
+from delta0.hl_client import HLReadError, make_exchange, make_info
 from delta0.hl_executor import HLTraceExecutor
 from delta0.latency import (
+    M1_REPORT_STAMP_KEY,
+    M1_REPORT_STATUS_KEY,
     PathVerdict,
     evaluate_all,
+    live_gate_refusal,
     m1_acceptance_met,
     needs_prudent_mode,
     path_meets_m1,
@@ -42,6 +49,7 @@ from delta0.safety import ALLOWED_OP_KINDS, MicroOpsGuard
 from delta0.settings import Settings, load_settings
 from delta0.state import StateStore
 from delta0.tracer import TracerLoop
+from delta0.types import equity_usd
 from delta0.venues.aave import AaveReader
 from delta0.venues.bridge import BridgeExecutor
 from delta0.venues.hl_stream import HyperliquidStream
@@ -60,6 +68,30 @@ console = Console()
 
 _DEFAULT_CONFIG = Path("config.yaml")
 _DEFAULT_DB = Path("data/delta0.db")
+
+
+def resolve_root(root: Path | None) -> Path:
+    """Absolute project root: where the KILL files are looked for.
+
+    `Path.cwd()` was the implicit answer until now, which is correct when the
+    operator runs the bot from a shell sitting in the checkout, and silently
+    wrong under systemd if `WorkingDirectory` is not the checkout. A KILL file
+    looked for in the wrong directory is an emergency stop that does nothing
+    and says nothing, so the root becomes an explicit option, is resolved to
+    an absolute path, and is printed at boot.
+    """
+    return (root or Path.cwd()).resolve()
+
+
+def resolve_under_root(path: Path, root: Path) -> Path:
+    """Resolve a relative path against the project root, leave absolute alone.
+
+    Keeps `--root` a single lever: pointing it at the checkout moves the
+    config, the database and the KILL files together. With no `--root` the
+    root is the working directory, so relative defaults resolve exactly as
+    they did before.
+    """
+    return path if path.is_absolute() else root / path
 
 
 def _parse_duration(spec: str) -> float:
@@ -162,13 +194,29 @@ async def _gather_status(cfg: Config, settings: Settings) -> dict[str, object]:
     meta = await hl.read_market_meta("ETH")
     position = await hl.read_position("ETH")
     funding_30d = await hl.read_funding_avg_30d("ETH")
+    # Le solde SPOT, pas `withdrawable` ni `accountValue` : en compte unifie
+    # ces deux-la valent 0 pendant que l'argent est bien la (voir
+    # memory/hl_findings.md). Le lecteur le sait deja, le panneau l'ignorait.
+    hl_free = await hl.read_free_usdc()
 
-    equity = (
-        account.total_collateral_usd
-        + (position.isolated_margin_usd if position else 0.0)
-        - account.total_debt_usd
+    # Les soldes libres comptent dans l'equite : ce sont des dollars qu'on
+    # possede. Les omettre faisait annoncer « equite 0,00 $ » au lendemain de
+    # la cloture de la campagne, avec 143 USDC sur Arbitrum et 26,79 sur
+    # Hyperliquid.
+    equity = equity_usd(
+        collateral_usd=account.total_collateral_usd,
+        isolated_margin_usd=position.isolated_margin_usd if position else 0.0,
+        wallet_usdc=usdc_bal.wallet_balance,
+        hl_free_usdc=hl_free,
+        debt_usd=account.total_debt_usd,
     )
-    targets = target_state(equity=max(equity, 1.0), config=cfg) if equity > 0 else None
+    # The cushion is the USDC sitting as Aave collateral — reserve, not fuel.
+    cushion_usd = usdc_bal.atoken_balance
+    targets = (
+        target_state(equity=equity, config=cfg, cushion_usd=cushion_usd)
+        if equity > cushion_usd
+        else None
+    )
 
     return {
         "ts": datetime.now(UTC).isoformat(),
@@ -186,6 +234,7 @@ async def _gather_status(cfg: Config, settings: Settings) -> dict[str, object]:
             "wsteth_balance": wsteth_bal.atoken_balance,
             "usdc_supply_balance": usdc_bal.atoken_balance,
             "usdc_debt_balance": usdc_bal.variable_debt_balance,
+            "usdc_wallet_balance": usdc_bal.wallet_balance,
             "gas_eth": gas_eth,
         },
         "hyperliquid": {
@@ -196,6 +245,7 @@ async def _gather_status(cfg: Config, settings: Settings) -> dict[str, object]:
             "isolated_margin_usd": position.isolated_margin_usd if position else 0.0,
             "leverage": position.leverage if position else 0,
             "funding_30d_annualized": funding_30d,
+            "free_usdc": hl_free,
         },
         "equity_usd": equity,
         "targets": (
@@ -203,6 +253,7 @@ async def _gather_status(cfg: Config, settings: Settings) -> dict[str, object]:
                 "spot_target_usd": targets.spot_target_usd,
                 "notional_target_usd": targets.notional_target_usd,
                 "margin_target_usd": targets.margin_target_usd,
+                "reserve_target_usd": targets.reserve_target_usd,
                 "debt_target_usd": targets.debt_target_usd,
             }
             if targets
@@ -233,6 +284,10 @@ def _render_status(cfg: Config, data: dict[str, object]) -> None:
     aave_table.add_row("wstETH aToken", f"{aave['wsteth_balance']:.6f}")
     aave_table.add_row("USDC coussin", f"{aave['usdc_supply_balance']:,.2f}")
     aave_table.add_row("USDC dette", f"{aave['usdc_debt_balance']:,.2f}")
+    # Le solde libre du portefeuille : celui qu'une operation depense, et le
+    # seul que le panneau ne montrait pas. Apres la cloture de la campagne il
+    # affichait « equite 0,00 $ » avec 143 USDC dans le portefeuille.
+    aave_table.add_row("USDC libre", f"{aave['usdc_wallet_balance']:,.2f}")
     aave_table.add_row("Gaz ETH", f"{aave['gas_eth']:.6f}")
 
     hl_table = Table(title="Hyperliquid (lecture seule)", show_header=True)
@@ -242,6 +297,7 @@ def _render_status(cfg: Config, data: dict[str, object]) -> None:
     hl_table.add_row("Prix mark", f"${hl['mark_price']:,.2f}")
     hl_table.add_row("Taille position", f"{hl['position_size']:.6f}")
     hl_table.add_row("Marge isolée", f"${hl['isolated_margin_usd']:,.2f}")
+    hl_table.add_row("USDC libre (spot)", f"${hl['free_usdc']:,.2f}")
     hl_table.add_row("Levier", str(hl["leverage"]))
     hl_table.add_row("Funding 30j annualisé", f"{hl['funding_30d_annualized']:.4%}")
 
@@ -256,6 +312,7 @@ def _render_status(cfg: Config, data: dict[str, object]) -> None:
         t_table.add_row("Spot", f"${targets['spot_target_usd']:,.2f}")
         t_table.add_row("Notionnel", f"${targets['notional_target_usd']:,.2f}")
         t_table.add_row("Marge", f"${targets['margin_target_usd']:,.2f}")
+        t_table.add_row("Réserve HL", f"${targets['reserve_target_usd']:,.2f}")
         t_table.add_row("Dette", f"${targets['debt_target_usd']:,.2f}")
         console.print(t_table)
     else:
@@ -331,8 +388,27 @@ def tracer(
             ),
         ),
     ] = False,
+    root: Annotated[
+        Path | None,
+        typer.Option(
+            "--root",
+            help=(
+                "Racine du projet : où les fichiers KILL sont cherchés et où "
+                "les chemins relatifs de --config et --db sont résolus. "
+                "Défaut : le répertoire courant. À fixer explicitement sous "
+                "systemd."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """M1 marche à blanc — observe, décide, journalise (aucune exécution par défaut)."""
+    project_root = resolve_root(root)
+    if not project_root.is_dir():
+        console.print(f"[bold red]REFUS[/bold red]: racine introuvable: {project_root}")
+        raise typer.Exit(code=7)
+    config = resolve_under_root(config, project_root)
+    db = resolve_under_root(db, project_root)
+
     cfg = load_config(config)
 
     # Coherence of the execution flags against the config is checked FIRST,
@@ -342,7 +418,16 @@ def tracer(
     _check_execution_flags(cfg, live_micro_ops=live_micro_ops, rehearse=rehearse)
 
     settings = load_settings()
-    configure_logging(cfg.mode)
+
+    # Le puits d'alertes se construit avant la journalisation, puisqu'il en
+    # devient un processeur. `build_sink` rend None quand le canal n'est pas
+    # configure, et on l'annonce a l'ecran : un filet dont on ignore s'il est
+    # arme n'est pas un filet. C'est le sens du chantier 5.1.
+    alert_sink = build_sink(cfg, settings)
+    configure_logging(
+        cfg.mode,
+        alert_processor=make_alert_processor(alert_sink) if alert_sink else None,
+    )
     log = get_logger("tracer")
     run_id = new_run_id()
     duration_s = _parse_duration(duration) if duration else None
@@ -358,7 +443,23 @@ def tracer(
         rehearse=rehearse,
         confirmed_kinds=confirmed_kinds,
         ws_enabled=not no_ws,
+        project_root=str(project_root),
+        kill_file=str(project_root / "KILL"),
+        db_path=str(db),
+        config_path=str(config),
     )
+    # The operator's only emergency brake is a file. Its absolute path is
+    # printed at boot so a wrong root is caught before it matters, not during
+    # the incident it was supposed to stop.
+    console.print(f"Arrêt propre : créer [bold]{project_root / 'KILL'}[/bold]")
+    if alert_sink is None:
+        console.print(
+            "[bold yellow]ALERTES DÉSACTIVÉES[/bold yellow] : TG_TOKEN ou TG_CHAT "
+            "absent du .env. Une panne ne sera signalée nulle part — c'est ce "
+            "qui a laissé la jambe Aave morte 60 h pendant la marche à blanc.",
+        )
+    else:
+        console.print("Alertes Telegram [bold green]actives[/bold green] (WARN et CRITICAL).")
     if rehearse:
         console.print(
             "[bold yellow]RÉPÉTITION[/bold yellow] : executors câblés, "
@@ -377,6 +478,8 @@ def tracer(
             confirmed_kinds,
             use_ws=not no_ws,
             rehearse=rehearse,
+            project_root=project_root,
+            alert_sink=alert_sink,
         ),
     )
 
@@ -418,9 +521,15 @@ async def _run_tracer(
     confirmed_kinds: list[str],
     use_ws: bool,
     rehearse: bool = False,
+    project_root: Path | None = None,
+    alert_sink: AlertSink | None = None,
 ) -> None:
+    root = resolve_root(project_root)
+    if alert_sink is not None:
+        await alert_sink.start()
     store = StateStore(db_path)
     await store.open()
+    await _assert_m1_report_fresh(store, cfg)
 
     w3 = AsyncWeb3(
         build_provider(settings.arbitrum_rpc_primary, settings.arbitrum_rpc_fallback),
@@ -429,9 +538,11 @@ async def _run_tracer(
         web3=w3,
         pool_address=cfg.venues.aave_pool,
         user_address=settings.bot_master_address,
+        multicall_address=cfg.venues.multicall3_address,
+        data_provider_address=cfg.venues.aave_data_provider,
     )
     hl = HyperliquidReader(cfg.venues.hl_api, user_address=settings.bot_master_address)
-    watchdog = Watchdog(config=cfg.watchdog, project_root=Path.cwd())
+    watchdog = Watchdog(config=cfg.watchdog, project_root=root)
 
     # WS feed: fresher mark price than REST polling, and the only source of
     # HL liquidation events (P1). A WS that refuses to start degrades the
@@ -459,6 +570,8 @@ async def _run_tracer(
                 w3=w3,
                 confirmed_kinds=confirmed_kinds,
                 rehearse=rehearse,
+                project_root=root,
+                balances=aave,
             )
 
         loop = TracerLoop(
@@ -477,6 +590,10 @@ async def _run_tracer(
         if stream is not None:
             stream.stop()
         await store.close()
+        # En dernier, pour que les alertes levees pendant la fermeture des
+        # autres ressources aient encore un canal ouvert pour sortir.
+        if alert_sink is not None:
+            await alert_sink.stop()
     console.print(f"[bold green]TRACER terminé[/bold green] — {n} tirs à blanc journalisés.")
     console.print("Rapport : [bold]delta0 report[/bold]")
 
@@ -490,13 +607,41 @@ def _start_hl_stream(cfg: Config, settings: Settings) -> HyperliquidStream | Non
     )
     try:
         stream.start()
-    except Exception:
+    except OPERATIONAL_ERRORS:
         log.exception(
             "hl_stream_start_failed",
             message="WS Hyperliquid indisponible — repli sur les lectures REST seules",
         )
         return None
     return stream
+
+
+async def _assert_m1_report_fresh(store: StateStore, cfg: Config) -> None:
+    """README §14 : pas de mode LIVE sans rapport M1 de moins de 30 jours.
+
+    Le contrôle porte sur le `mode` de la config, pas sur `--live-micro-ops` :
+    les micro-ops du traceur sont la façon dont on PRODUIT le rapport, donc les
+    exiger avant lui rendrait la porte infranchissable. Ce qui est gardé, c'est
+    le passage du châssis en LIVE ou LIVE_SMALL, c'est-à-dire le moment où du
+    capital est réellement exposé.
+
+    L'estampille est lue dans le journal que le bot s'apprête à écrire, pas
+    dans un fichier de côté : un rapport portant sur une autre campagne ne peut
+    pas déverrouiller celle-ci.
+    """
+    if cfg.mode is RuntimeMode.DRY_RUN:
+        return
+    refusal = live_gate_refusal(
+        await store.kv_get(M1_REPORT_STAMP_KEY),
+        await store.kv_get(M1_REPORT_STATUS_KEY),
+    )
+    if refusal is None:
+        return
+    console.print(
+        f"[bold red]REFUS[/bold red] : mode {cfg.mode.value} demandé mais {refusal}. "
+        f"Lancer [bold]delta0 report --db <base>[/bold] sur ce journal d'abord.",
+    )
+    raise typer.Exit(code=8)
 
 
 async def _reconcile_boot(store: StateStore, watcher: LiveWatcher, *, strict: bool) -> bool:
@@ -509,7 +654,7 @@ async def _reconcile_boot(store: StateStore, watcher: LiveWatcher, *, strict: bo
     log = get_logger("tracer")
     try:
         snap = await watcher.snapshot()
-    except Exception:
+    except OPERATIONAL_ERRORS:
         log.exception(
             "reconcile_snapshot_failed",
             message="snapshot de réconciliation impossible au démarrage",
@@ -526,7 +671,13 @@ async def _reconcile_boot(store: StateStore, watcher: LiveWatcher, *, strict: bo
         )
         return True
 
-    report: ReconcileReport = await reconcile_at_boot(store, snap)
+    try:
+        report: ReconcileReport = await reconcile_at_boot(store, snap, watcher.config)
+    except BootRefused as refusal:
+        # In every mode: bands that cannot hold are not a warning to observe
+        # through, they make every emergency decision meaningless.
+        console.print(f"[bold red]REFUS[/bold red]: {refusal}")
+        return False
     _render_reconcile(report)
     if report.warnings and strict:
         console.print(
@@ -565,6 +716,8 @@ def _wire_micro_op_executors(
     w3: AsyncWeb3,  # type: ignore[type-arg]
     confirmed_kinds: list[str],
     rehearse: bool,
+    project_root: Path,
+    balances: AaveReader,
 ) -> tuple[AaveTraceExecutor, HLTraceExecutor, BridgeExecutor]:
     """Instantiate the three micro-op executors.
 
@@ -579,11 +732,8 @@ def _wire_micro_op_executors(
     crash rather than sign — which is the whole point of handing it nothing
     to sign with.
     """
-    # Lazy on purpose: a DRY_RUN run must never import the signing libraries.
-    from eth_account import Account  # noqa: PLC0415
-    from hyperliquid.exchange import Exchange  # noqa: PLC0415
-    from hyperliquid.info import Info as HLInfo  # noqa: PLC0415
-
+    # Signing stays lazy: `make_exchange` loads the signing libraries only when
+    # a live order is actually built, so a rehearsal never imports them.
     pkey: str | None
     if rehearse:
         pkey = None
@@ -596,7 +746,7 @@ def _wire_micro_op_executors(
             )
             raise typer.Exit(code=3)
 
-    guard = MicroOpsGuard(config=cfg.tracer, project_root=Path.cwd())
+    guard = MicroOpsGuard(config=cfg.tracer, project_root=project_root)
     for kind in confirmed_kinds:
         if kind not in ALLOWED_OP_KINDS:
             console.print(f"[bold red]REFUS[/bold red]: op_kind inconnu: {kind!r}")
@@ -611,14 +761,24 @@ def _wire_micro_op_executors(
         master_address=settings.bot_master_address,
         chain_id=ARBITRUM_CHAIN_ID,
         private_key=pkey,
+        # Without it the funding guard of 4.7 logs `balance_check_absent` and
+        # lets every supply and repay through: the check existed, its tests
+        # passed, and production never ran it (audit dev 2026-09-16, 1.1).
+        balances=balances,
     )
 
-    hl_info = HLInfo(cfg.venues.hl_api, skip_ws=True)
+    hl_info = make_info(cfg.venues.hl_api, websocket=False)
 
     async def _mark_price(coin: str) -> float:
-        mids = hl_info.all_mids()
-        raw = mids.get(coin)
-        return float(raw) if raw is not None else 0.0
+        # Off the event loop like every other SDK call: a synchronous
+        # `all_mids()` froze the loop for as long as Hyperliquid took to answer.
+        # And an absent coin raised nothing, it returned 0.0, which the order
+        # sizing then divided by (audit dev 2026-09-16, 4.1 and 4.2).
+        mids = await asyncio.to_thread(hl_info.all_mids)
+        try:
+            return float(mids[coin])
+        except (KeyError, TypeError, ValueError) as e:
+            raise HLReadError(f"prix mark de {coin!r} absent ou illisible") from e
 
     def _make_exchange() -> object:
         if pkey is None:
@@ -626,7 +786,7 @@ def _wire_micro_op_executors(
                 "répétition (--rehearse) : aucun ordre Hyperliquid ne doit être construit. "
                 "Le court-circuit dry-run de l'executor a été franchi — c'est un bug.",
             )
-        return Exchange(Account.from_key(pkey), cfg.venues.hl_api)
+        return make_exchange(pkey, cfg.venues.hl_api)
 
     # Size/price grids come from the exchange meta, not a constant: HL rejects
     # an order whose size carries more decimals than the asset allows, and the
@@ -671,29 +831,126 @@ def _wire_micro_op_executors(
 def report(
     db: Annotated[Path, typer.Option("--db")] = _DEFAULT_DB,
     config: Annotated[Path, typer.Option("--config", "-c")] = _DEFAULT_CONFIG,
+    days: Annotated[
+        float | None,
+        typer.Option(
+            "--days",
+            help=(
+                "Ne lire que les N derniers jours. Sans cette borne, une base "
+                "qui a servi à plusieurs campagnes les mélange."
+            ),
+        ),
+    ] = None,
+    json_out: Annotated[
+        Path | None,
+        typer.Option("--json", help="Écrit aussi le rapport en JSON dans ce fichier."),
+    ] = None,
 ) -> None:
-    """Rapport TRACER : tirs à blanc + p50/p95 des 5 chemins critiques vs budget."""
-    asyncio.run(_run_report(db, config))
+    """Rapport TRACER : tirs à blanc + p50/p95 des 5 chemins critiques vs budget.
+
+    Code de sortie 0 si le critère de vitesse M1 est tenu, 1 sinon, 2 si la
+    base ne porte aucune mesure. Un script de livraison peut donc s'y fier.
+    """
+    raise typer.Exit(code=asyncio.run(_run_report(db, config, days, json_out)))
 
 
-async def _run_report(db_path: Path, config_path: Path) -> None:
+async def _run_report(
+    db_path: Path,
+    config_path: Path,
+    days: float | None = None,
+    json_out: Path | None = None,
+) -> int:
     cfg = load_config(config_path)
+    since = None
+    if days is not None:
+        since = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+
     store = StateStore(db_path)
     await store.open()
     try:
-        total = await store.count_shadow_intents()
-        by_prio = await store.shadow_intents_by_priority()
-        stats_by_path = await store.latency_stats_all()
+        total = await store.count_shadow_intents(since)
+        by_prio = await store.shadow_intents_by_priority(since)
+        stats_by_path = await store.latency_stats_all(since)
+        failures = await store.failure_summary(since)
+
+        if not stats_by_path:
+            # The runbook trap: `delta0 report` without `--db` read
+            # `data/delta0.db`, a journal abandoned days before the campaign,
+            # and announced "critère NON satisfait" about the wrong database.
+            # Naming the path and refusing beats rendering a verdict on
+            # nothing.
+            console.print(
+                f"[bold red]REFUS[/bold red] : aucune mesure dans [bold]{db_path}[/bold]"
+                + (f" sur les {days:g} derniers jours." if days else ".")
+                + " Vérifier le chemin de la base : un rapport sur une base vide "
+                "n'est pas un rapport.",
+            )
+            return 2
+
+        factor = cfg.watchdog.latency_budget_factor
+        verdicts = evaluate_all(stats_by_path, budget_factor=factor)
+        met = m1_acceptance_met(verdicts)
+
+        # The stamp travels with the journal it describes, so a report about
+        # another campaign cannot unlock this one. Read by the LIVE gate.
+        await store.kv_set(M1_REPORT_STAMP_KEY, datetime.now(UTC).isoformat())
+        await store.kv_set(M1_REPORT_STATUS_KEY, "OK" if met else "ECHEC")
     finally:
         await store.close()
 
-    factor = cfg.watchdog.latency_budget_factor
-    verdicts = evaluate_all(stats_by_path, budget_factor=factor)
-
+    _render_window(db_path, days, stats_by_path)
     _render_shadow_intents(total, by_prio)
+    _render_failures(failures)
     _render_critical_paths(verdicts, factor)
     _render_raw_latencies(stats_by_path)
     _render_m1_verdict(verdicts, factor)
+
+    if json_out is not None:
+        _write_json_report(json_out, db_path, days, verdicts, stats_by_path, met)
+        console.print(f"Artefact JSON écrit : [bold]{json_out}[/bold]")
+    return 0 if met else 1
+
+
+def _render_window(db_path: Path, days: float | None, stats: dict[str, dict[str, float]]) -> None:
+    """Say which journal and which window the numbers describe, always."""
+    samples = int(sum(s["count"] for s in stats.values()))
+    window = f"{days:g} derniers jours" if days is not None else "tout le journal"
+    console.print(f"Base : [bold]{db_path}[/bold] — {window} — {samples:,} échantillons.")
+
+
+def _write_json_report(
+    path: Path,
+    db_path: Path,
+    days: float | None,
+    verdicts: list[PathVerdict],
+    stats: dict[str, dict[str, float]],
+    met: bool,
+) -> None:
+    """The report as data, for a gate or a diff between two campaigns."""
+    payload = {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "database": str(db_path),
+        "window_days": days,
+        "m1_speed_criterion_met": met,
+        "critical_paths": [
+            {
+                "key": v.path.key,
+                "label": v.path.label,
+                "samples": v.samples,
+                "p50_ms": v.p50_ms,
+                "p95_ms": v.p95_ms,
+                "budget_ms": v.path.budget_ms,
+                "budget_ratio": v.budget_ratio,
+                "verdict": v.verdict,
+                "missing_legs": list(v.missing),
+                "unmeasured_legs": list(v.path.unmeasured),
+            }
+            for v in verdicts
+        ],
+        "raw_paths": stats,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 _MS_PER_S = 1_000.0
@@ -733,6 +990,27 @@ def _render_shadow_intents(total: int, by_prio: dict[int, int]) -> None:
         table.add_row(f"P{prio_val}", str(by_prio[prio_val]))
     if not by_prio:
         table.add_row("—", "0")
+    console.print(table)
+
+
+def _render_failures(failures: list[tuple[str, str, int, str]]) -> None:
+    """Failed intents with their cause — silence here is the good outcome.
+
+    Rendered right after the shadow intents so that a campaign's failures are
+    read before its latencies. A fast path that stopped firing two days before
+    the end is not a fast path, and the previous report had no place to say so.
+    """
+    if not failures:
+        console.print("[green]Aucune intention en échec.[/green]")
+        return
+    total = sum(n for _, _, n, _ in failures)
+    table = Table(title=f"Intentions en échec par cause (total: {total})")
+    table.add_column("Action")
+    table.add_column("Cause enregistrée", overflow="fold")
+    table.add_column("Compte", justify="right")
+    table.add_column("Dernière", justify="right")
+    for action, cause, count, last_seen in failures:
+        table.add_row(action, cause, str(count), last_seen[:19])
     console.print(table)
 
 

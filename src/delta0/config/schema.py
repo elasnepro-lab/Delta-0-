@@ -3,8 +3,10 @@
 Every business parameter of the bot lives here — README section 4.
 Cross-field validators enforce the invariants that the classeur Model C guarantees:
 - exposure_mult == 1 / (1 - target_ltv + 1 / short_leverage)
-- Threshold monotonicity on both flanks (recenter < pump < reduce < liquidation).
-- LTV thresholds are strictly ordered (pump < cushion < deleverage < LT).
+- Upper flank ordering (reduce < pump); the recenter bands are not compared to
+  the emergency thresholds (see `_check_recenter_bands`).
+- Down-flank margins strictly ordered (pump > cushion > deleverage); the bands
+  they give are checked against the on-chain LT at boot, not here.
 
 If any invariant fails, the bot refuses to boot — that is by design.
 """
@@ -23,7 +25,12 @@ _EVM_ADDRESS_LEN = 42
 
 
 class RuntimeMode(StrEnum):
-    """Execution mode. Set via env var DELTA0_MODE or config."""
+    """Execution mode, set in `config.yaml` only.
+
+    An environment override was promised here and never read. It is not coming
+    back: a variable that silently flips the bot to LIVE is a worse lever than
+    the file an operator has to edit and restart on (README §17, decision 5).
+    """
 
     DRY_RUN = "DRY_RUN"
     LIVE_SMALL = "LIVE_SMALL"
@@ -43,6 +50,10 @@ class OrderStyle(StrEnum):
 
 
 # --- Sub-models ---------------------------------------------------------------
+
+# A priority whose threshold sits closer than this to the liquidation threshold
+# has no room to act before Aave liquidates.
+MIN_LTV_MARGIN_TO_LT = 0.01
 
 _Ratio = Annotated[float, Field(gt=0.0, lt=1.0)]
 _PositiveFloat = Annotated[float, Field(gt=0.0)]
@@ -65,9 +76,21 @@ class EmergencyConfig(BaseModel):
     margin_ratio_pump: _Ratio
     margin_ratio_reduce: _Ratio
     reduce_fraction: _Ratio
-    ltv_pump: _Ratio
-    ltv_cushion: _Ratio
-    ltv_deleverage: _Ratio
+    # USDC left free on Hyperliquid, as a fraction of the notional. This is
+    # what P2 spends: adding isolated margin is the only action measured to
+    # move the liquidation price, and it can only spend what sits there.
+    # Undeployed capital, so it costs carry — priced in the classeur.
+    hl_reserve_pct: _Ratio
+
+    # Down flank: distances BELOW the on-chain liquidation threshold, in LTV
+    # points — not absolute LTVs. Absolute values cannot live in a file: they
+    # only mean something relative to a parameter Aave governance can change,
+    # and the previous ones were calibrated on Ethereum's LT (0.81) while
+    # Arbitrum's is 0.79, which put two of the three thresholds at or beyond
+    # the liquidation point. See memory/aave_findings.md §9.
+    ltv_margin_pump: _Ratio
+    ltv_margin_cushion: _Ratio
+    ltv_margin_deleverage: _Ratio
 
     @model_validator(mode="after")
     def _check_monotonicity(self) -> EmergencyConfig:
@@ -77,10 +100,20 @@ class EmergencyConfig(BaseModel):
                 "margin_ratio_reduce must be strictly lower than margin_ratio_pump "
                 "(reduce fires closer to liquidation)."
             )
-        # Down flank: pump < cushion < deleverage.
-        if not (self.ltv_pump < self.ltv_cushion < self.ltv_deleverage):
+        # Down flank: a wider margin means the priority fires earlier, so the
+        # pump must sit furthest from the liquidation threshold.
+        margins = (self.ltv_margin_pump, self.ltv_margin_cushion, self.ltv_margin_deleverage)
+        if not (margins[0] > margins[1] > margins[2]):
             raise ValueError(
-                "LTV emergency thresholds must satisfy ltv_pump < ltv_cushion < ltv_deleverage."
+                "LTV margins must satisfy "
+                "ltv_margin_pump > ltv_margin_cushion > ltv_margin_deleverage "
+                "(a wider margin fires earlier)."
+            )
+        if margins[2] < MIN_LTV_MARGIN_TO_LT:
+            raise ValueError(
+                f"the tightest LTV margin must leave at least {MIN_LTV_MARGIN_TO_LT} "
+                "to the liquidation threshold; below that the priority cannot act "
+                "before Aave does."
             )
         return self
 
@@ -92,6 +125,34 @@ class WatchdogConfig(BaseModel):
     rpc_fail_s: _PositiveInt
     tx_fail_max: _PositiveInt
     latency_budget_factor: Annotated[float, Field(gt=1.0)]
+
+
+class InvariantsConfig(BaseModel):
+    """Thresholds of invariants I1-I8 — README section 11.
+
+    The defaults are the README's own numbers, so a config that omits the
+    section checks exactly what the specification states.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    cruise_ltv_headroom: _Ratio = 0.02  # I2: LTV at most target_ltv + this, at rest
+    cruise_margin_floor: _Ratio = 0.07  # I3: margin ratio at least this, at rest
+    # I2: cushion threshold held this long without a P3 or P4 inside the window.
+    p3_grace_s: _PositiveFloat = 300.0
+    # I3: P2's budget is 2 s and the loop cycles every 5 s — one full cycle plus
+    # the budget, rounded up, before no P2 or P1 inside the window counts as a
+    # failed defence.
+    p2_grace_s: _PositiveFloat = 10.0
+    transfer_warn_s: _PositiveFloat = 900.0  # I6 and §9.3: 15 min
+    transfer_critical_s: _PositiveFloat = 3600.0  # §9.3: 60 min, dependent operations frozen
+    recompose_tolerance: _Ratio = 0.005  # I8: ±0.5 pt after a skim-recompose
+
+    @model_validator(mode="after")
+    def _check_transfer_order(self) -> InvariantsConfig:
+        if self.transfer_critical_s <= self.transfer_warn_s:
+            raise ValueError("transfer_critical_s must be strictly greater than transfer_warn_s.")
+        return self
 
 
 class TracerConfig(BaseModel):
@@ -153,20 +214,34 @@ class VenuesConfig(BaseModel):
 
     usdc_address: str
     wsteth_address: str
+    # Needed to price wstETH in ETH terms: the Aave oracle quotes both assets in
+    # USD, and their ratio is the wstETH/ETH rate. Reading it there rather than
+    # from the token keeps the rate consistent with the health factor Aave
+    # applies — and wstETH on Arbitrum is a bridged token that does not expose
+    # stEthPerToken() at all. See memory/aave_findings.md §10.
+    weth_address: str
     aave_pool: str
     aave_data_provider: str
+    # No `hl_ws`: the SDK derives the WebSocket URL from `hl_api` and accepts no
+    # other, so a separate setting could only disagree with what is used.
     hl_api: str
-    hl_ws: str
     # Hyperliquid Bridge2 contract on Arbitrum — recipient of USDC transfers
     # for HL account funding. See README §9.3.
     hl_bridge2: str = "0x2Df1c51E09aECF9cacB7bc98cB1742757f163dF7"
+    # Multicall3, deployed at the same address on every EVM chain. The Aave leg
+    # of a snapshot goes through it as ONE eth_call instead of eleven: the
+    # 2026-09-13 quota alert showed the M1 run alone had spent ~80 % of the
+    # free RPC allowance, and a LIVE cadence would need five times that.
+    multicall3_address: str = "0xcA11bde05977b3631167028862bE2a173976CA11"
 
     @field_validator(
         "usdc_address",
         "wsteth_address",
+        "weth_address",
         "aave_pool",
         "aave_data_provider",
         "hl_bridge2",
+        "multicall3_address",
     )
     @classmethod
     def _check_eth_address(cls, v: str) -> str:
@@ -234,6 +309,7 @@ class Config(BaseModel):
     # Emergency and watchdog.
     emergency: EmergencyConfig
     watchdog: WatchdogConfig
+    invariants: InvariantsConfig = Field(default_factory=InvariantsConfig)
 
     # M1 TRACER safeties. Defaults are safe: dry_run=True, small cap, low rate.
     tracer: TracerConfig = Field(default_factory=TracerConfig)
@@ -272,11 +348,26 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _check_cruise_margin_floor(self) -> Config:
+        # Below the pump the cruise warning would only speak after P5 already
+        # fired; at or above the target it would speak at rest.
+        floor = self.invariants.cruise_margin_floor
+        if not (self.emergency.margin_ratio_pump < floor < self.target_margin_ratio):
+            raise ValueError(
+                f"invariants.cruise_margin_floor {floor} must sit strictly between "
+                f"emergency.margin_ratio_pump {self.emergency.margin_ratio_pump} and "
+                f"target_margin_ratio {self.target_margin_ratio}."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _check_recenter_bands(self) -> Config:
-        # Recenter must fire before pump (asymmetric bands, README section 1).
-        # Up flank: recenter_up < margin_ratio_pump translated to price? We keep it simple:
-        # recenter thresholds must be strictly positive and below the emergency thresholds
-        # measured in price space; the mapping is documented in the decision table.
+        # Only positivity is checked. Nothing verifies that recentering fires
+        # before the pumps: that ordering lives in price space, where it depends
+        # on the liquidation threshold read on-chain and on the margin ratio, so
+        # it cannot be settled from this file alone. `scripts/classeur.py` prints
+        # the down-flank bands in price moves; compare `recenter_down` to them by
+        # hand. The cushion floor is checked here for lack of a better home.
         if self.recenter_up <= 0 or self.recenter_down <= 0:
             raise ValueError("recenter thresholds must be strictly positive.")
         if self.cushion_floor_pct >= self.cushion_pct:
@@ -285,8 +376,19 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def _check_ltv_below_liquidation(self) -> Config:
-        # We do not know the on-chain LT here — it is fetched at boot and compared then.
-        # Sanity: emergency LTV thresholds must be strictly above target_ltv.
-        if self.emergency.ltv_pump <= self.target_ltv:
-            raise ValueError("emergency.ltv_pump must be strictly above target_ltv.")
+        # The thresholds themselves depend on the on-chain LT, so they cannot be
+        # checked here — `derive_bands` builds them, and `bands_incoherence`, run
+        # by `reconcile_at_boot`, refuses the boot in every mode when they
+        # collapse onto the target or the LT reads 0. Two gaps remain: in
+        # observation mode a failed boot snapshot skips the reconciliation, and
+        # nothing re-checks the LT during a run. What IS checkable without the
+        # chain: the widest margin must still leave the pump above the target,
+        # whatever plausible LT we face. With LT >= target + widest margin the
+        # pump sits above target by construction; below that the config can
+        # never be coherent.
+        if self.emergency.ltv_margin_pump >= 1.0 - self.target_ltv:
+            raise ValueError(
+                "emergency.ltv_margin_pump is so wide that no liquidation threshold "
+                "could place the pump above target_ltv."
+            )
         return self

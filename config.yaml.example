@@ -1,46 +1,68 @@
 # Delta-0- config — bot Montage C.
-# Values sourced from the classeur `montage_C_delta_neutre.xlsx` sheet "Model C",
-# validated by the operator on 2026-08-25. See README section 4.
+# Valeurs validées par l'opérateur le 2026-08-25. Le bilan et les bandes qu'elles
+# donnent sont publiés par `scripts/classeur.py` ; règles de dérivation : README §4.
 #
 # Copy to `config.yaml` and adjust locally. Never commit `config.yaml`.
 
 capital_usd: 20000
 short_leverage: 10
-target_ltv: 0.70
+target_ltv: 0.675          # revisable : voir scripts/classeur.py --compare
 target_margin_ratio: 0.10
-exposure_mult: 2.5           # = 1 / (1 - target_ltv + 1 / short_leverage), verified at boot
-exposure_mult_half: 1.5
-maintenance_margin: 0.02     # HL estimate; read via API at boot, alert on divergence
+exposure_mult: 2.3529411765  # = 1 / (1 - target_ltv + 1 / short_leverage), verifie au boot
+exposure_mult_half: 1.5      # lu par aucun code avant le chantier 8.6 (porte de régime)
+maintenance_margin: 0.02     # lu par aucun code avant 8.4 : la comparaison à l'API n'existe pas encore
 cushion_pct: 0.05            # 5% of capital held as USDC supply on Aave = 1000$
-cushion_floor_pct: 0.025     # below this: cushion refill is top priority at skim
-recenter_up: 0.045           # +8% band is narrow; recenter earlier
-recenter_down: 0.06          # -15.7% band is wide; recenter later
+cushion_floor_pct: 0.025     # invariant I4 (évalué dès la phase 3) ; reconstitution à l'écrémage en 8.5
+recenter_up: 0.045           # flanc haut étroit (levier du short) : re-centrer tôt
+recenter_down: 0.06          # flanc bas large (bandes : scripts/classeur.py) : re-centrer plus tard
 delta_tolerance: 0.02        # |delta| / spot max before short retrue
 skim_cron: "SUN 12:00 UTC"
 skim_min_usd: 200
-skim_policy: recompose       # recompose | deleverage | dividend (v1 = recompose)
+skim_policy: recompose       # lu par aucun code avant 8.5 (écrémage)
 
+# Lu par aucun code avant 8.6 : la porte de régime n'est pas encore évaluée.
 regime:
   spread_full_bps: 500       # funding30d >= borrow + 5pts -> full exposure
   hysteresis_days: 7
 
-slippage_max_bps: 30
-order_style: maker_then_cross
-gas_min_eth: 0.003
+gas_min_eth: 0.003           # invariant I5 : en dessous, opérations non critiques gelées (boucle : phase 3)
+
+# Lus par aucun code pour l'instant : ne protègent de rien avant leur chantier.
+slippage_max_bps: 30         # 8.1 (agrégateur de swap)
+order_style: maker_then_cross  # 8.3 (ordres maker puis traversée)
 
 emergency:
   margin_ratio_pump: 0.05    # ~+5% price move: pump up
-  margin_ratio_reduce: 0.035 # ~+6.5% price move: emergency reduce (2s)
+  margin_ratio_reduce: 0.035 # seuil de P2 (2 s) : réserve HL versée en marge, réduction du short en repli
   reduce_fraction: 0.30
-  ltv_pump: 0.75             # ~-6.7% price move: pump down
-  ltv_cushion: 0.79          # ~-11.4% price move: repay from cushion
-  ltv_deleverage: 0.81       # ~-13.6% price move: stepwise deleverage
+  hl_reserve_pct: 0.03        # couvre un squeeze de +9 %/min (harnais 1.6)
+  # Marges SOUS le seuil de liquidation lu on-chain, en points de LTV.
+  # Les seuils absolus ont ete retires : ils dependaient d'un LT de 0,81
+  # (Ethereum) alors qu'Arbitrum applique 0,79, ce qui placait le coussin
+  # pile sur la liquidation et le desendettement deux points au-dela.
+  # Avec LT = 0,79 ces marges donnent 0,75 / 0,765 / 0,775 ; les mouvements de
+  # prix correspondants depuis la cible, coussin plein et vide : scripts/classeur.py.
+  ltv_margin_pump: 0.040       # pompe descendante, la plus precoce
+  ltv_margin_cushion: 0.025    # remboursement depuis le coussin
+  ltv_margin_deleverage: 0.015 # desendettement par etapes, dernier recours
 
 watchdog:
   ws_stale_s: 10
   rpc_fail_s: 30
   tx_fail_max: 3
   latency_budget_factor: 1.5
+
+# Seuils des invariants I1-I8 (README §11), aux valeurs du README par défaut.
+# Évalués par delta0/invariants.py ; appelés à chaque cycle une fois la boucle
+# de la phase 3 écrite — d'ici là, ils ne protègent encore de rien.
+invariants:
+  cruise_ltv_headroom: 0.02     # I2 : LTV au plus target_ltv + 0,02 en croisière
+  cruise_margin_floor: 0.07     # I3 : margin ratio au moins 0,07 en croisière
+  p3_grace_s: 300               # I2 : seuil du coussin tenu 5 min sans P3 ni P4 dans ces 5 min -> CRITICAL et dégonflage
+  p2_grace_s: 10                # I3 : seuil de marge tenu 10 s sans P2 ni P1 dans ces 10 s -> CRITICAL et dégonflage
+  transfer_warn_s: 900          # I6 : traversée de plus de 15 min -> WARN
+  transfer_critical_s: 3600     # I6 : plus d'une heure -> CRITICAL, opérations non critiques gelées
+  recompose_tolerance: 0.005    # I8 : ratios à ±0,5 pt des cibles après recomposition
 
 # M1 TRACER micro-operation safeties (README §14).
 # Defaults are conservative: dry_run True, small caps, first-use confirmation.
@@ -62,10 +84,11 @@ venues:
   # Aave v3 Arbitrum official addresses (verify against Aave docs at boot).
   usdc_address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"     # native USDC, NEVER USDC.e
   wsteth_address: "0x5979D7b546E38E414F7E9822514be443A4800529"
+  weth_address: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"     # pour le ratio wstETH/ETH via l'oracle
   aave_pool: "0x794a61358D6845594F94dc1DB02A252b5b4814aD"
-  aave_data_provider: "0x7F23D86Ee20D869112572136221e173428DD740B"
-  hl_api: "https://api.hyperliquid.xyz"
-  hl_ws: "wss://api.hyperliquid.xyz/ws"
+  aave_data_provider: "0x7F23D86Ee20D869112572136221e173428DD740B"  # LT et LTV max de la réserve wstETH quand le compte est vide
+  hl_api: "https://api.hyperliquid.xyz"   # le SDK en déduit aussi l'URL du WebSocket
   hl_bridge2: "0x2Df1c51E09aECF9cacB7bc98cB1742757f163dF7"
+  multicall3_address: "0xcA11bde05977b3631167028862bE2a173976CA11"  # un eth_call par snapshot Aave
 
-live_small_cap_pct: 0.10
+live_small_cap_pct: 0.10     # lu par aucun code avant 8.4 : aucun plafond LIVE_SMALL n'est appliqué

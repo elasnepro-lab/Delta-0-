@@ -120,6 +120,27 @@ def _make_executor(
 
 
 @pytest.mark.asyncio
+async def test_each_operation_counts_once_against_the_hourly_limit(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+) -> None:
+    """Chantier 6.3: the MAX_UINT256 operations used to pass the guard twice.
+
+    `repay_all` and `withdraw_all` checked it themselves, then the send path
+    checked again with a notional of 0. A five-operation cycle cost seven slots
+    of `max_ops_per_hour`, and the second check could refuse nothing.
+    """
+    executor, guard = _make_executor(tmp_path, store, config, dry_run=True)
+    await executor.approve(USDC, 5.0)
+    await executor.supply(USDC, 5.0)
+    await executor.borrow(USDC, 1.0)
+    await executor.repay_all(USDC)
+    await executor.withdraw_all(USDC, 5.0)
+    assert guard.ops_in_last_hour() == 5
+
+
+@pytest.mark.asyncio
 async def test_dry_run_supply_journals_pending_then_confirmed(
     config: Config,
     store: StateStore,

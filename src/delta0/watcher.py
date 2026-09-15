@@ -61,18 +61,19 @@ class LiveWatcher:
         # the two dictates wall time instead of their sum. `return_exceptions`
         # lets us record per-venue outcomes distinctly (README §11 needs
         # BLIND state per venue, not a single global fail flag).
-        aave_task = asyncio.gather(
-            self.aave.read_account_data(),
-            self.aave.read_token_balances(self.config.venues.wsteth_address),
-            self.aave.read_token_balances(self.config.venues.usdc_address),
-            self.aave.read_reserve_rates(self.config.venues.usdc_address),
-            self.aave.read_gas_balance_eth(),
+        # The Aave leg is a single Multicall3 eth_call: one request per cycle
+        # instead of eleven, and every number read at the same block.
+        aave_task = self.aave.read_snapshot(
+            wsteth_address=self.config.venues.wsteth_address,
+            usdc_address=self.config.venues.usdc_address,
+            weth_address=self.config.venues.weth_address,
         )
         hl_task = asyncio.gather(
             self.hl.read_market_meta(self.coin),
             self.hl.read_position(self.coin),
             self.hl.read_funding_avg_30d(self.coin),
             self.hl.read_last_hour_funding(self.coin),
+            self.hl.read_free_usdc(),
         )
         aave_result, hl_result = await asyncio.gather(
             aave_task,
@@ -89,7 +90,12 @@ class LiveWatcher:
                 error=repr(aave_result),
             )
             raise aave_result
-        account, wsteth, usdc, usdc_rates, gas = aave_result
+        account = aave_result.account
+        wsteth = aave_result.wsteth
+        usdc = aave_result.usdc
+        usdc_rates = aave_result.usdc_rates
+        gas = aave_result.gas_eth
+        oracle = aave_result.oracle
         self.watchdog.mark_aave_ok(now=now_mono)
 
         # --- HL outcome -------------------------------------------------------
@@ -101,7 +107,7 @@ class LiveWatcher:
                 error=repr(hl_result),
             )
             raise hl_result
-        meta, position, funding_30d, funding_1h = hl_result
+        meta, position, funding_30d, funding_1h, hl_free = hl_result
         self.watchdog.mark_hl_ok(now=now_mono)
 
         # WS ticks (if any) refresh the freshness signal. Without a stream,
@@ -123,10 +129,15 @@ class LiveWatcher:
         return Snapshot(
             ts=now_utc,
             wsteth_atoken_balance=wsteth.atoken_balance,
-            # wstETH ≈ ETH for M1; refine with wstETH/stETH rate in M1-B.
-            wsteth_price_usd=mark_price,
+            # Priced by the Aave oracle, never by the perp mark: this is the
+            # number behind the health factor. wstETH trades around 1.24 ETH,
+            # so using the mark understated the collateral by ~20 % and made
+            # the bot read a healthy position as one to deleverage.
+            wsteth_price_usd=oracle.wsteth_usd,
+            wsteth_eth_ratio=oracle.wsteth_eth_ratio,
             usdc_atoken_balance=usdc.atoken_balance,
             usdc_variable_debt_balance=usdc.variable_debt_balance,
+            usdc_wallet_balance=usdc.wallet_balance,
             hf=account.health_factor,
             aave_lt_wsteth=account.liquidation_threshold,
             aave_ltv_max_wsteth=account.ltv_max,
@@ -134,6 +145,7 @@ class LiveWatcher:
             mark_price=mark_price,
             short_size_eth=short_size,
             isolated_margin_usd=margin,
+            hl_free_usdc=hl_free,
             hl_maintenance_margin=meta.maintenance_margin_ratio,
             funding_last_hour=funding_1h,
             funding_30d_annualized=funding_30d,

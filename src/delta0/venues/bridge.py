@@ -36,13 +36,15 @@ from typing import Any, Literal
 from eth_typing import ChecksumAddress
 from web3 import AsyncWeb3
 
+from delta0 import failure
 from delta0.config import Config
 from delta0.gas import with_gas_margin
-from delta0.hl_api import ensure_ok, is_ok, response_detail
+from delta0.hl_client import ensure_ok, is_ok, response_detail
 from delta0.latency import elapsed_ms, measurement_path, now_perf
 from delta0.logging import get_logger
 from delta0.safety import MicroOpsGuard
 from delta0.state import StateStore, deterministic_id
+from delta0.units import Rounding, to_raw
 
 log = get_logger(__name__)
 
@@ -206,12 +208,15 @@ class BridgeExecutor:
             # `bridge_in_submit` latency recorded for a withdrawal the venue
             # declined to perform.
             ensure_ok(result, "retrait du pont")
-        except Exception:
+        except Exception as e:
+            cause = failure.from_exception(e)
             await self._mark_intent_status(intent_id, "failed", None)
+            await self._store.record_intent_failure(intent_id, cause.journal_entry())
             log.exception(
                 "bridge_in_failed",
                 message="bridge_in: échec du retrait HL",
                 intent_id=intent_id,
+                failure=cause.journal_entry(),
             )
             raise
 
@@ -337,7 +342,8 @@ class BridgeExecutor:
         amount_usdc: float,
     ) -> BridgeLegResult:
         decimals: int = await self._usdc_contract.functions.decimals().call()
-        raw_amount = int(amount_usdc * (10**decimals))
+        # A transfer never sends more than asked (chantier 6.5).
+        raw_amount = to_raw(amount_usdc, decimals, Rounding.DOWN)
 
         intent_id = deterministic_id(
             op_kind,
@@ -388,12 +394,15 @@ class BridgeExecutor:
             signed = self._w3.eth.account.sign_transaction(tx, private_key=self._pkey())
             tx_hash = await self._w3.eth.send_raw_transaction(signed.raw_transaction)
             receipt = await self._w3.eth.wait_for_transaction_receipt(tx_hash)
-        except Exception:
+        except Exception as e:
+            cause = failure.from_exception(e)
             await self._mark_intent_status(intent_id, "failed", None)
+            await self._store.record_intent_failure(intent_id, cause.journal_entry())
             log.exception(
                 f"{op_kind}_failed",
                 message=f"{op_kind}: envoi ou attente de reçu en échec",
                 intent_id=intent_id,
+                failure=cause.journal_entry(),
             )
             raise
 
@@ -401,11 +410,21 @@ class BridgeExecutor:
         await self._store.record_latency(f"path.{op_kind}_submit", duration_ms)
         status_int = int(receipt.get("status", 0))
         if status_int != 1:
+            cause = await failure.diagnose_revert(
+                call=call,
+                receipt=receipt,
+                tx_hash=tx_hash.hex(),
+                sender=self._master,
+                gas_used=int(receipt.get("gasUsed", 0)),
+                gas_limit=int(tx["gas"]),
+            )
             await self._mark_intent_status(intent_id, "failed", [tx_hash.hex()])
+            await self._store.record_intent_failure(intent_id, cause.journal_entry())
             log.error(
                 f"{op_kind}_reverted",
-                message=f"{op_kind}: transaction reverted",
+                message=f"{op_kind}: transaction reverted — {cause.journal_entry()}",
                 intent_id=intent_id,
+                failure=cause.journal_entry(),
             )
             return BridgeLegResult(
                 intent_id=intent_id,
@@ -465,7 +484,7 @@ class BridgeExecutor:
         exchange = self._make_hl_exchange()
         try:
             result = await asyncio.to_thread(exchange.usd_class_transfer, amount_usdc, True)
-        except Exception:
+        except failure.OPERATIONAL_ERRORS:
             log.exception(
                 "hl_spot_to_perp_failed",
                 message=(
@@ -477,7 +496,7 @@ class BridgeExecutor:
             return
 
         # The SDK signals rejection by RETURNING an error envelope, it does not
-        # raise (see delta0.hl_api). Treating "no exception" as success would
+        # raise (see delta0.hl_client). Treating "no exception" as success would
         # have logged a transfer that never happened, on every single crossing.
         if is_ok(result):
             log.info(

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
-from dataclasses import dataclass
+import time
+from collections.abc import AsyncGenerator, Callable
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -16,36 +18,29 @@ from delta0.state import StateStore
 from delta0.tracer import TracerLoop
 from delta0.types import Snapshot
 from delta0.watchdog import Watchdog
+from tests.world import reference_snapshot
 
 
 def _stable_snap() -> Snapshot:
-    return Snapshot(
+    return reference_snapshot(ts=datetime.now(UTC))
+
+
+def _empty_aave_snap() -> Snapshot:
+    """The account the tracer's Aave cycle is allowed to run on: nothing on Aave."""
+    return reference_snapshot(
         ts=datetime.now(UTC),
-        wsteth_atoken_balance=20.0,
-        wsteth_price_usd=2_500.0,
-        usdc_atoken_balance=1_000.0,
-        usdc_variable_debt_balance=35_000.0,
-        hf=1.5,
-        aave_lt_wsteth=0.83,
-        aave_ltv_max_wsteth=0.80,
-        aave_emode=0,
-        mark_price=2_500.0,
-        short_size_eth=20.0,
-        isolated_margin_usd=5_000.0,
-        hl_maintenance_margin=0.02,
-        funding_last_hour=1.25e-5,
-        funding_30d_annualized=0.11,
-        borrow_apr=0.05,
-        gas_eth=0.01,
-        ws_last_tick_age_s=1.0,
-        rpc_ok=True,
+        wsteth_atoken_balance=0.0,
+        usdc_atoken_balance=0.0,
+        usdc_variable_debt_balance=0.0,
     )
 
 
 @dataclass(slots=True)
 class _FakeWatcher:
+    make_snap: Callable[[], Snapshot] = _stable_snap
+
     async def snapshot(self) -> Snapshot:
-        return _stable_snap()
+        return self.make_snap()
 
 
 @pytest.fixture
@@ -70,7 +65,7 @@ async def test_scheduler_fires_aave_cycle_when_interval_zero(
     )
     wd = Watchdog(config=cfg.watchdog, project_root=tmp_path)
     loop = TracerLoop(
-        watcher=_FakeWatcher(),
+        watcher=_FakeWatcher(_empty_aave_snap),
         watchdog=wd,
         store=store,
         config=cfg,
@@ -107,8 +102,12 @@ async def test_scheduler_does_not_fire_before_interval(
         cadence_s=0.0,
         aave_executor=aave,
     )
-    # Bump the "last fired" so the initial 0.0 doesn't immediately trigger.
-    loop._last_aave_cycle = 999999.0  # any large value > monotonic now
+    # Bump the "last fired" so the initial -inf doesn't immediately trigger.
+    # It has to be read on the same clock the scheduler uses: a constant such
+    # as 999999.0 stops being "in the future" once the machine's monotonic
+    # clock passes it, which takes 11,6 days of uptime — this test went red on
+    # the 2026-09-12 for exactly that reason, after 13 days up.
+    loop._last_aave_cycle = time.monotonic()
     await loop.run(duration_s=0.02)
     aave.approve.assert_not_called()
 
@@ -160,7 +159,7 @@ async def test_scheduler_survives_safety_refused(
     )
     wd = Watchdog(config=cfg.watchdog, project_root=tmp_path)
     loop = TracerLoop(
-        watcher=_FakeWatcher(),
+        watcher=_FakeWatcher(_empty_aave_snap),
         watchdog=wd,
         store=store,
         config=cfg,
@@ -224,3 +223,45 @@ async def test_first_cycle_fires_regardless_of_machine_uptime(
     assert loop._last_bridge_cycle == float("-inf")
     await loop.run(duration_s=0.02)
     bridge.round_trip.assert_awaited()
+
+
+@pytest.mark.parametrize(
+    "holding",
+    [
+        {"wsteth_atoken_balance": 16.0},
+        {"usdc_atoken_balance": 1_000.0},
+        {"usdc_variable_debt_balance": 1.0},
+    ],
+)
+@pytest.mark.asyncio
+async def test_the_aave_cycle_never_runs_next_to_a_position(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+    holding: dict[str, Any],
+) -> None:
+    """repay_all and withdraw_all act on the whole account (audit dev 2026-09-16, 1.9).
+
+    One wstETH deposited, one USDC of cushion or one USDC of debt left by a
+    cycle that died half-way is enough to refuse the next cycle.
+    """
+    aave = AsyncMock()
+    cfg = config.model_copy(
+        update={"tracer": config.tracer.model_copy(update={"aave_cycle_every_s": 1})},
+    )
+
+    def _holding_snap() -> Snapshot:
+        return replace(_empty_aave_snap(), **holding)
+
+    loop = TracerLoop(
+        watcher=_FakeWatcher(_holding_snap),
+        watchdog=Watchdog(config=cfg.watchdog, project_root=tmp_path),
+        store=store,
+        config=cfg,
+        cadence_s=0.0,
+        aave_executor=aave,
+    )
+    await loop.run(duration_s=0.02)
+    aave.approve.assert_not_called()
+    aave.repay_all.assert_not_called()
+    aave.withdraw_all.assert_not_called()

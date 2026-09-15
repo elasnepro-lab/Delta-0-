@@ -26,8 +26,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from delta0 import failure
 from delta0.config import Config
-from delta0.hl_api import ensure_ok
+from delta0.hl_client import (
+    HLReadError,
+    ensure_ok,
+    is_ok,
+    make_cloid,
+    parse_order_response,
+    response_detail,
+)
 from delta0.latency import elapsed_ms, measurement_path, now_perf
 from delta0.logging import get_logger
 from delta0.safety import MicroOpsGuard
@@ -89,6 +97,31 @@ def round_size(size: float, sz_decimals: int) -> float:
 def round_price(price: float, sz_decimals: int) -> float:
     """Round a limit price onto HL's price grid (5 sig figs, then decimals)."""
     return round(float(f"{price:.{_PRICE_SIG_FIGS}g}"), _PERP_MAX_DECIMALS - sz_decimals)
+
+
+def post_only_geometry(
+    mark: float,
+    sz_decimals: int,
+    side: Literal["buy", "sell"],
+) -> tuple[float, float]:
+    """Limit price and size of the tracer's post-only order, on HL's grids.
+
+    For a sell post-only, the limit MUST be strictly above mark so it rests as a
+    maker; for a buy, strictly below. Rounding to HL's price grid moves the limit
+    by at most one tick — a 10 % offset absorbs that without ever crossing back
+    over mark. The size makes a notional of about `_MIN_NOTIONAL_USD`, snapped to
+    the asset's size grid. `mark` must be positive: the caller checks it.
+    """
+    offset = _POST_ONLY_OFFSET
+    raw_limit = mark * (1.0 + offset) if side == "sell" else mark * (1.0 - offset)
+    limit_price = round_price(raw_limit, sz_decimals)
+
+    size = round_size(_MIN_NOTIONAL_USD / mark, sz_decimals)
+    if size * mark < _HL_MIN_NOTIONAL_USD:
+        # Rounding down took us under HL's floor: step one tick up rather than
+        # send an order the venue will reject.
+        size = round_size(size + 10.0**-sz_decimals, sz_decimals)
+    return limit_price, size
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,24 +199,13 @@ class HLTraceExecutor:
 
         # Get a mark price (from stream cache preferably, else REST).
         mark = await self._get_mark_price(self._coin)
+        if not mark > 0.0:
+            # The size below divides by it. A zero mark raised ZeroDivisionError,
+            # which is a bug to the loop: the process stopped and the
+            # surveillance with it (audit dev 2026-09-16, 4.2). NaN lands here too.
+            raise HLReadError(f"prix mark de {self._coin} inutilisable : {mark!r}")
         sz_decimals = await self._size_decimals()
-        offset = _POST_ONLY_OFFSET
-        # For a sell post-only, the limit MUST be strictly above mark so it
-        # rests as a maker. For a buy, strictly below. Rounding to HL's price
-        # grid moves the limit by at most one tick — a 10 % offset absorbs that
-        # without ever crossing back over mark.
-        raw_limit = mark * (1.0 + offset) if side == "sell" else mark * (1.0 - offset)
-        limit_price = round_price(raw_limit, sz_decimals)
-
-        # Size chosen so notional ≈ _MIN_NOTIONAL_USD at mark price, then
-        # snapped to the asset's size grid.
-        size = round_size(_MIN_NOTIONAL_USD / mark, sz_decimals)
-        notional = size * mark
-        if notional < _HL_MIN_NOTIONAL_USD:
-            # Rounding down took us under HL's floor: step one tick up rather
-            # than send an order the venue will reject.
-            size = round_size(size + 10.0**-sz_decimals, sz_decimals)
-            notional = size * mark
+        limit_price, size = post_only_geometry(mark, sz_decimals, side)
 
         intent_id = deterministic_id(
             "hl_post_only_cancel",
@@ -193,6 +215,9 @@ class HLTraceExecutor:
             f"{limit_price:.4f}",
             datetime.now(UTC).isoformat(timespec="seconds"),
         )
+        # Chosen and journaled before anything is sent: it is the only name the
+        # order has if the answer never comes back.
+        cloid = make_cloid(intent_id)
         await self._insert_pending_intent(
             intent_id,
             params={
@@ -201,6 +226,7 @@ class HLTraceExecutor:
                 "size": size,
                 "limit_price": limit_price,
                 "mark_at_placement": mark,
+                "cloid": cloid.to_raw(),
             },
         )
 
@@ -237,6 +263,7 @@ class HLTraceExecutor:
 
         order_ms: float | None = None
         cancel_ms: float | None = None
+        order_id: int | None = None
         try:
             is_buy = side == "buy"
             order_started = now_perf()
@@ -246,17 +273,18 @@ class HLTraceExecutor:
                 is_buy,
                 size,
                 limit_price,
+                cloid,
             )
-            # A rejected order comes back as an error envelope, not an
-            # exception. Left unchecked, `_extract_order_id` simply returns
-            # None, the cancel is skipped and the intent is journaled as
-            # confirmed — putting a P1/P2 latency sample in the M1 report for
-            # an order that was never placed.
-            ensure_ok(order_response, "ordre post-only")
+            # A rejected order comes back as an error envelope — sometimes
+            # nested inside `status: ok` — not as an exception. Left unchecked,
+            # the cancel is skipped and the intent journaled as confirmed,
+            # putting a P1/P2 latency sample in the M1 report for an order
+            # that was never placed.
+            outcome = parse_order_response(order_response, "ordre post-only")
             # Stopped here on purpose: everything after this point is cleanup.
             order_ms = elapsed_ms(order_started)
-            order_id = self._extract_order_id(order_response)
-            fill_size = self._extract_fill_size(order_response)
+            order_id = outcome.order_id
+            fill_size = outcome.filled_size
             if fill_size > 0:
                 log.warning(
                     "hl_post_only_filled",
@@ -267,17 +295,26 @@ class HLTraceExecutor:
                     fill_size=fill_size,
                     coin=self._coin,
                 )
-            # Cancel immediately.
-            if order_id is not None:
-                cancel_started = now_perf()
-                await self._call_exchange_cancel(exchange, self._coin, order_id)
-                cancel_ms = elapsed_ms(cancel_started)
-        except Exception:
-            await self._mark_intent_status(intent_id, "failed", None)
+            # Cancel immediately. A refused cancel leaves the order resting on
+            # the book, 10 % from mark: harmless at this size, but never
+            # silent. The intent fails and the alert names the order to cancel
+            # by hand.
+            cancel_started = now_perf()
+            cancel_response = await self._call_exchange_cancel(exchange, self._coin, order_id)
+            ensure_ok(cancel_response, f"annulation de l'ordre {order_id}")
+            cancel_ms = elapsed_ms(cancel_started)
+        except Exception as e:
+            if order_id is None:
+                # No order id came back: the order may still be resting under
+                # the only name it has. Tried before journaling, so the failure
+                # that matters is the one raised below, never this cleanup's.
+                await self._cancel_by_cloid_best_effort(exchange, cloid)
+            entry = await self._journal_failure(intent_id, e)
             log.exception(
                 "hl_op_failed",
                 message="hl_post_only_cancel: échec du round-trip",
                 intent_id=intent_id,
+                failure=entry,
             )
             raise
 
@@ -318,6 +355,7 @@ class HLTraceExecutor:
         is_buy: bool,
         size: float,
         limit_price: float,
+        cloid: Any,
     ) -> dict[str, Any]:
         """Place a post-only ALO order via the HL SDK (sync -> await via thread)."""
         order_type = {"limit": {"tif": "Alo"}}
@@ -328,7 +366,40 @@ class HLTraceExecutor:
             size,
             limit_price,
             order_type,
+            cloid=cloid,
         )
+
+    async def _cancel_by_cloid_best_effort(self, exchange: Any, cloid: Any) -> None:
+        """Try to take back an order that may rest on the book under its client id.
+
+        Best effort, and never raising: it runs while another failure is being
+        handled, and that one is what the caller must see. A venue refusal here
+        usually means the order never reached the book, which is the good news.
+        """
+        try:
+            result = await asyncio.to_thread(exchange.cancel_by_cloid, self._coin, cloid)
+        except failure.OPERATIONAL_ERRORS:
+            log.exception(
+                "hl_cancel_by_cloid_failed",
+                message=(
+                    f"annulation par cloid {cloid.to_raw()} impossible — "
+                    "vérifier les ordres ouverts à la main"
+                ),
+                cloid=cloid.to_raw(),
+            )
+            return
+        if is_ok(result):
+            log.warning(
+                "hl_cancel_by_cloid",
+                message=f"ordre retrouvé par son cloid {cloid.to_raw()} et annulé",
+                cloid=cloid.to_raw(),
+            )
+        else:
+            log.info(
+                "hl_cancel_by_cloid_nothing",
+                message=f"aucun ordre à annuler sous ce cloid : {response_detail(result)}",
+                cloid=cloid.to_raw(),
+            )
 
     async def _call_exchange_cancel(
         self,
@@ -337,38 +408,6 @@ class HLTraceExecutor:
         order_id: int,
     ) -> dict[str, Any]:
         return await asyncio.to_thread(exchange.cancel, coin, order_id)
-
-    @staticmethod
-    def _extract_order_id(response: dict[str, Any]) -> int | None:
-        # HL SDK response shape:
-        #   {"status": "ok", "response": {"type": "order", "data": {"statuses": [...]}}}
-        # Each status entry is either {"resting": {"oid": int}} or {"filled": {...}}.
-        try:
-            statuses = response["response"]["data"]["statuses"]
-            for entry in statuses:
-                if isinstance(entry, dict):
-                    if "resting" in entry:
-                        return int(entry["resting"]["oid"])
-                    if "filled" in entry:
-                        return int(entry["filled"]["oid"])
-        except (KeyError, TypeError, ValueError):
-            return None
-        return None
-
-    @staticmethod
-    def _extract_fill_size(response: dict[str, Any]) -> float:
-        try:
-            statuses = response["response"]["data"]["statuses"]
-        except (KeyError, TypeError):
-            return 0.0
-        total = 0.0
-        for entry in statuses:
-            if isinstance(entry, dict) and "filled" in entry:
-                try:
-                    total += float(entry["filled"].get("totalSz", 0.0))
-                except (TypeError, ValueError):
-                    continue
-        return total
 
     # --- Journal helpers ------------------------------------------------------
 
@@ -388,6 +427,20 @@ class HLTraceExecutor:
             (intent_id, now, json.dumps(params, sort_keys=True, default=str), now),
         )
         await self._store._conn.commit()
+
+    async def _journal_failure(self, intent_id: str, exc: BaseException) -> str:
+        """Mark the intent failed AND record why, then hand back the entry.
+
+        Hyperliquid nests a refusal inside a `status: ok` envelope, so
+        `ensure_ok` turns it into an exception whose message already carries
+        the venue's own words (voir memory/hl_findings.md). The two writes
+        belong together: a failed intent without its cause is what left the M1
+        campaign unreadable.
+        """
+        entry = failure.from_exception(exc).journal_entry()
+        await self._mark_intent_status(intent_id, "failed", None)
+        await self._store.record_intent_failure(intent_id, entry)
+        return entry
 
     async def _mark_intent_status(
         self,

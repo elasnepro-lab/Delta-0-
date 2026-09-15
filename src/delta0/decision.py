@@ -60,29 +60,141 @@ class OperationalContext:
 # --- Target-state solver ------------------------------------------------------
 
 
-def target_state(equity: float, config: Config) -> TargetState:
+def target_state(equity: float, config: Config, *, cushion_usd: float) -> TargetState:
     """Solve for the target state given current equity.
 
-    README section 3:
-        spot_target     = equity * exposure_mult
+    README section 3, with m = exposure_mult and r = emergency.hl_reserve_pct:
+        spot_target     = m * deployable / (1 + m * r)
         notional_target = spot_target
         margin_target   = spot_target * target_margin_ratio
+        reserve_target  = spot_target * r
         debt_target     = target_ltv * spot_target
+
+    The HL reserve is capital held idle, like the cushion, so it cannot also be
+    leveraged. It is sized on the notional, which depends on what is deployed,
+    which depends on the reserve — hence the division rather than a subtraction.
+    Leaving it out built a spot 7 % larger than `scripts/classeur.py` (44 706 $
+    against 41 758 $ on 20 000 $) and kept nothing aside for P2, the only fast
+    defence of the up flank. The classeur showed the gap on every run; nothing
+    failed on it.
+
+    `deployable` is equity MINUS the cushion. The cushion is emergency reserve:
+    leveraging it would mean borrowing against the very money kept aside to
+    repay a loan. Feeding raw equity in asked for a machine 5 % larger than the
+    balance sheet it was calibrated on, so the first skim-and-recompose would
+    have borrowed an extra 1 750 $ and grown the short to match — compounding
+    every time. With the cushion removed the reference balance sheet is an
+    exact fixed point, which is what `test_target_state` now pins.
+
+    `cushion_usd` is keyword-only and has no default on purpose: a caller that
+    forgets it must fail to compile rather than silently over-lever.
+
+    Note on `target_ltv`: the debt is sized against the spot alone, not against
+    spot + cushion. That is deliberate — sizing on the full collateral would let
+    the cushion carry its own debt, which costs more band than it buys once
+    spent. See memory/aave_findings.md §11.
     """
     if equity <= 0.0:
         raise ValueError(f"equity must be positive, got {equity}")
+    if cushion_usd < 0.0:
+        raise ValueError(f"cushion must not be negative, got {cushion_usd}")
 
-    spot_target = equity * config.exposure_mult
+    deployable = equity - cushion_usd
+    if deployable <= 0.0:
+        raise ValueError(f"cushion {cushion_usd} leaves no deployable equity out of {equity}")
+
+    mult = config.exposure_mult
+    reserve_pct = config.emergency.hl_reserve_pct
+    spot_target = mult * deployable / (1.0 + mult * reserve_pct)
     notional_target = spot_target
     margin_target = spot_target * config.target_margin_ratio
+    reserve_target = spot_target * reserve_pct
     debt_target = config.target_ltv * spot_target
 
     return TargetState(
         spot_target_usd=spot_target,
         notional_target_usd=notional_target,
         margin_target_usd=margin_target,
+        reserve_target_usd=reserve_target,
         debt_target_usd=debt_target,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class Bands:
+    """The down-flank thresholds, derived from the liquidation threshold.
+
+    Aave governance moves the liquidation threshold several times a year, and
+    it differs per chain — Arbitrum's wstETH sits at 0.79 where Ethereum's is
+    0.81. Thresholds written as absolute LTVs in a file therefore decay into
+    fiction: the shipped config had the cushion exactly ON the liquidation
+    point and the deleverage two points past it, so neither could ever fire in
+    time. Deriving them from the value read on-chain each cycle keeps them
+    honest, and makes a governance change move the bands instead of silently
+    invalidating them.
+
+    Both forms are exposed: LTV for reading and reporting, health factor for
+    deciding. The health factor is what README §9.2 requires — it comes from
+    the chain already combined with the oracle prices Aave applies, so it
+    cannot drift from the number that can liquidate us.
+    """
+
+    lt: float
+    ltv_pump: float
+    ltv_cushion: float
+    ltv_deleverage: float
+
+    @property
+    def hf_pump(self) -> float:
+        return self.lt / self.ltv_pump
+
+    @property
+    def hf_cushion(self) -> float:
+        return self.lt / self.ltv_cushion
+
+    @property
+    def hf_deleverage(self) -> float:
+        return self.lt / self.ltv_deleverage
+
+    def price_drop_to(self, ltv_threshold: float, target_ltv: float) -> float:
+        """Fraction the collateral price must fall for `ltv_threshold` to be hit."""
+        if ltv_threshold <= 0.0:
+            return 0.0
+        return max(0.0, 1.0 - target_ltv / ltv_threshold)
+
+
+def derive_bands(lt: float, config: Config) -> Bands:
+    """Build the down-flank thresholds from the on-chain liquidation threshold.
+
+    Pure: same inputs, same bands. `lt` comes from `Snapshot.aave_lt_wsteth`,
+    which Aave reports as the collateral-weighted threshold for this account.
+    """
+    margins = config.emergency
+    return Bands(
+        lt=lt,
+        ltv_pump=lt - margins.ltv_margin_pump,
+        ltv_cushion=lt - margins.ltv_margin_cushion,
+        ltv_deleverage=lt - margins.ltv_margin_deleverage,
+    )
+
+
+def bands_incoherence(lt: float, config: Config) -> str | None:
+    """Return why the bands are unusable against this LT, or None if they hold.
+
+    Called at boot to refuse starting, and worth re-checking when the observed
+    LT moves: a governance cut can push the pump under the target, at which
+    point the bot would try to deleverage a position that is already at rest.
+    """
+    if lt <= 0.0:
+        return "liquidation threshold read as 0 — Aave data unavailable or asset unlisted"
+    bands = derive_bands(lt, config)
+    if bands.ltv_pump <= config.target_ltv:
+        return (
+            f"pump threshold {bands.ltv_pump:.4f} is at or below target LTV "
+            f"{config.target_ltv:.4f} (LT {lt:.4f}): the bot would pump at rest. "
+            "Lower target_ltv or narrow emergency.ltv_margin_pump."
+        )
+    return None
 
 
 def cushion_tranche_size(config: Config) -> float:
@@ -133,8 +245,10 @@ def _blind_action(snapshot: Snapshot, config: Config, blind: BlindState) -> Acti
 def _p1_liquidation(ctx: OperationalContext, snapshot: Snapshot) -> Action | None:
     if not ctx.liquidation_event:
         return None
-    # Match short size to remaining spot after the liquidation.
-    target = snapshot.wsteth_atoken_balance  # in ETH terms — assumes wstETH ≈ ETH
+    # Match short size to remaining spot after the liquidation, in ETH terms.
+    # The balance is in wstETH, which is worth ~1.24 ETH: using it directly
+    # would have left ~20 % of the spot unhedged right after a liquidation.
+    target = snapshot.spot_eth_equivalent
     return Action(
         kind="LIQUIDATION_RESPONSE",
         priority=Priority.P1_LIQUIDATION_DETECTED,
@@ -144,26 +258,71 @@ def _p1_liquidation(ctx: OperationalContext, snapshot: Snapshot) -> Action | Non
 
 
 def _p2_emergency_reduce(snapshot: Snapshot, config: Config) -> Action | None:
-    if snapshot.margin_ratio > config.emergency.margin_ratio_reduce:
+    """Fast defence of the up flank: add isolated margin from the HL reserve.
+
+    The README specified a partial close here, on the assumption that shrinking
+    the short pushes the liquidation price away. Measured on 2026-09-08, it does
+    not: Hyperliquid releases margin in proportion to the size closed, so
+    margin/notional is unchanged and `liquidationPx` moves by -0.012 %. Closing
+    30 % three times in a row would therefore have emptied the short without
+    ever improving the position — the bot manufacturing the naked leg it exists
+    to prevent. See memory/hl_findings.md §10.
+
+    What does work, measured the same day: `update_isolated_margin(+5 USDC)` on
+    an 86.8 USD notional moved the liquidation price +5.24 %. One request, local,
+    no bridge, and an agent can sign it (§11, §9).
+
+    So the reserve is not a comfort — it is the only real defence this flank
+    has. When it is empty the fallback closes the short, but that is damage
+    limitation, not rescue: it shrinks what a liquidation would take without
+    moving the price at which it happens. It carries an alert for that reason.
+    """
+    reduce_at = config.emergency.margin_ratio_reduce
+    if snapshot.margin_ratio > reduce_at:
         return None
+
+    notional = snapshot.notional_usd
+    # Enough to reach the nominal margin ratio, capped by what is on hand.
+    wanted = max(0.0, (config.target_margin_ratio - snapshot.margin_ratio) * notional)
+    add = min(wanted, snapshot.hl_free_usdc)
+    # Below this, adding leaves the ratio under the trigger and P2 fires again
+    # next cycle for nothing — spending the reserve without leaving the danger.
+    clears_trigger = max(0.0, (reduce_at - snapshot.margin_ratio) * notional)
+
+    if add > clears_trigger:
+        return Action(
+            kind="ADD_ISOLATED_MARGIN",
+            priority=Priority.P2_EMERGENCY_REDUCE,
+            reason=(
+                f"marge {snapshot.margin_ratio:.4f} <= seuil {reduce_at} "
+                f"— ajout local de {add:.0f} USDC depuis la réserve "
+                f"({snapshot.hl_free_usdc:.0f} disponibles)"
+            ),
+            params={"add_margin_amount_usdc": add},
+        )
+
     close_fraction = config.emergency.reduce_fraction
     target = snapshot.short_size_eth * (1.0 - close_fraction)
     return Action(
         kind="REDUCE",
         priority=Priority.P2_EMERGENCY_REDUCE,
         reason=(
-            f"marge {snapshot.margin_ratio:.4f} <= seuil réduction "
-            f"{config.emergency.margin_ratio_reduce} — IOC {close_fraction:.0%}"
+            f"marge {snapshot.margin_ratio:.4f} <= seuil {reduce_at} et réserve "
+            f"insuffisante ({snapshot.hl_free_usdc:.0f} USDC) — fermeture "
+            f"{close_fraction:.0%} pour limiter la perte, le prix de liquidation "
+            "ne bouge pas"
         ),
         params={
             "close_fraction": close_fraction,
             "target_short_size_eth": target,
+            "reserve_exhausted": 1,
         },
     )
 
 
 def _p3_repay_from_cushion(snapshot: Snapshot, config: Config) -> Action | None:
-    if snapshot.ltv < config.emergency.ltv_cushion:
+    bands = derive_bands(snapshot.aave_lt_wsteth, config)
+    if snapshot.hf > bands.hf_cushion:
         return None
     tranche = cushion_tranche_size(config)
     if snapshot.cushion_usd < tranche:
@@ -172,15 +331,16 @@ def _p3_repay_from_cushion(snapshot: Snapshot, config: Config) -> Action | None:
         kind="REPAY_FROM_CUSHION",
         priority=Priority.P3_EMERGENCY_REPAY,
         reason=(
-            f"LTV {snapshot.ltv:.4f} >= seuil coussin {config.emergency.ltv_cushion} "
-            f"— remboursement d'une tranche ({tranche:.0f} USDC)"
+            f"HF {snapshot.hf:.4f} <= seuil coussin {bands.hf_cushion:.4f} "
+            f"(LT {bands.lt:.4f}) — remboursement d'une tranche ({tranche:.0f} USDC)"
         ),
         params={"repay_amount_usdc": tranche},
     )
 
 
 def _p4_stepwise_deleverage(snapshot: Snapshot, config: Config) -> Action | None:
-    if snapshot.ltv < config.emergency.ltv_deleverage:
+    bands = derive_bands(snapshot.aave_lt_wsteth, config)
+    if snapshot.hf > bands.hf_deleverage:
         return None
     tranche = cushion_tranche_size(config)
     if snapshot.cushion_usd >= tranche:
@@ -190,8 +350,8 @@ def _p4_stepwise_deleverage(snapshot: Snapshot, config: Config) -> Action | None
         kind="STEPWISE_DELEVERAGE",
         priority=Priority.P4_DELEVERAGE,
         reason=(
-            f"LTV {snapshot.ltv:.4f} >= seuil désendettement "
-            f"{config.emergency.ltv_deleverage} et coussin épuisé "
+            f"HF {snapshot.hf:.4f} <= seuil désendettement {bands.hf_deleverage:.4f} "
+            f"(LT {bands.lt:.4f}) et coussin épuisé "
             f"({snapshot.cushion_usd:.0f} < {tranche:.0f}) — boucle repay/withdraw/swap"
         ),
         params={"target_ltv_after": config.target_ltv + 0.01},
@@ -217,7 +377,8 @@ def _p5_pump_up(snapshot: Snapshot, config: Config) -> Action | None:
 
 
 def _p6_pump_down(snapshot: Snapshot, config: Config) -> Action | None:
-    if snapshot.ltv < config.emergency.ltv_pump:
+    bands = derive_bands(snapshot.aave_lt_wsteth, config)
+    if snapshot.hf > bands.hf_pump:
         return None
     # Repay enough to bring LTV back to target + 1%.
     target_ltv_after = config.target_ltv + 0.01
@@ -227,8 +388,8 @@ def _p6_pump_down(snapshot: Snapshot, config: Config) -> Action | None:
         kind="PUMP_DOWN",
         priority=Priority.P6_PUMP_DOWN,
         reason=(
-            f"LTV {snapshot.ltv:.4f} >= seuil pompe {config.emergency.ltv_pump} "
-            f"— withdraw HL + bridge + repay ({repay_amount:.0f} USDC)"
+            f"HF {snapshot.hf:.4f} <= seuil pompe {bands.hf_pump:.4f} "
+            f"(LT {bands.lt:.4f}) — withdraw HL + bridge + repay ({repay_amount:.0f} USDC)"
         ),
         params={"repay_amount_usdc": repay_amount},
     )
@@ -264,9 +425,10 @@ def _p7_recenter(snapshot: Snapshot, config: Config, ctx: OperationalContext) ->
 def _p8_delta_retrue(snapshot: Snapshot, config: Config) -> Action | None:
     if abs(snapshot.delta_pct) <= config.delta_tolerance:
         return None
-    # Bring notional back to spot (delta-neutral).
-    # Short size in ETH = spot_usd / mark_price.
-    target = snapshot.spot_usd / snapshot.mark_price
+    # Bring the short back to the collateral's ETH equivalent. Dividing a USD
+    # spot by the perp mark would reintroduce the two-price mix the ETH basis
+    # exists to avoid.
+    target = snapshot.spot_eth_equivalent
     return Action(
         kind="RETRUE_SHORT",
         priority=Priority.P8_DELTA_RETRUE,

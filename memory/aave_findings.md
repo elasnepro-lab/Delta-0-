@@ -166,3 +166,222 @@ a lancer a la main pour refermer ce que le traceur a laisse en plan.
 Aave v3 utilise des erreurs personnalisees : web3 ne remonte que le selecteur.
 Pour en decoder un nouveau, hacher les signatures candidates en keccak et
 comparer les 4 premiers octets.
+
+## 9. Parametres de reserve lus on-chain (chantier 0.1, bloc 503134105)
+
+Lecture du 2026-09-08 sur `AaveProtocolDataProvider`
+(`0x7F23D86Ee20D869112572136221e173428DD740B`), reproductible avec
+`scripts/read_aave_params.py`.
+
+```
+wstETH  LTV max 0.7500   LT 0.7900   bonus 1.0720 (penalite 7,2 %)
+        frais de protocole 10 %   collateral oui   emprunt non
+        actif, non gele, non en pause
+        supply cap 34 000 (18 217 deposes, 53,6 %)   marge 15 783
+USDC    LTV max 0.7500   LT 0.7800   bonus 1.0500
+        borrow cap 225 000 000 (141 724 563 empruntes, 63,0 %)
+```
+
+**Le LT du wstETH vaut exactement 0,79.** Les seuils du YAML sont donc faux :
+
+```
+ltv_pump        0.75   marge au LT +0.04   OK
+ltv_cushion     0.79   marge au LT  0.00   EST le seuil de liquidation
+ltv_deleverage  0.81   marge au LT -0.02   AU-DELA de la liquidation
+```
+
+P4 ne peut mathematiquement pas se declencher avant la liquidation. La bande
+basse reelle est de **-11,39 %** depuis LTV 0,70 (le classeur annonce -15,7 %,
+valeur qui correspond a un LT de 0,81 : celui du wstETH sur Ethereum, pas sur
+Arbitrum).
+
+E-mode : trois categories existent (Stablecoins, ETH correlated,
+ezETH/wstETH/WETH), toutes en LTV 0,93 / LT 0,95, mais une dette USDC contre un
+collateral wstETH n'y est pas eligible. La strategie tourne donc en e-mode 0,
+LT 0,79. Le champ `getReserveEModeCategory` n'existe pas sur cette version du
+data provider.
+
+Caps : sans contrainte a l'echelle du chassis 20 000 $ (il faut ~16,5 wstETH
+pour 15 783 disponibles). A verifier au boot malgre tout, pas avant.
+
+## 10. `stEthPerToken()` n'existe pas sur le wstETH d'Arbitrum
+
+Les trois fonctions de taux de Lido revertent sur
+`0x5979D7b546E38E414F7E9822514be443A4800529` : `stEthPerToken()`,
+`tokensPerStEth()`, `getStETHByWstETH()`. C'est un jeton ponte, il ne porte pas
+le taux de conversion — celui-ci vit sur L1.
+
+Consequence : le ratio doit venir de l'oracle Aave lui-meme, ce qui est de toute
+facon preferable puisque c'est le prix qui fait foi pour le HF.
+
+```
+AaveOracle  0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7   (base 1e8)
+getAssetPrice(wstETH) = 3 093,02      source 0xb4a28DF1b926646f94e6fE6f15828c491b4def5F
+getAssetPrice(WETH)   = 2 487,23      source 0xbD41b1548a5A06544cBcf87c0c54864312842C00
+ratio wstETH/ETH = 3093,02 / 2487,23 = 1,243559
+```
+
+Erreur actuelle du snapshot (`watcher.py:127` pose
+`wsteth_price_usd = mark_price`), au prix du jour :
+
+```
+16,5 wstETH  reel 51 035 $   vu par le bot 41 039 $   ecart -19,59 %
+LTV sur 35 000 $ de dette :  reel 0,6858   vu par le bot 0,8528
+```
+
+Le bot verrait donc **0,8528 sur une position saine a 0,6858**, soit au-dessus
+du LT de 0,79 : des le premier cycle apres BUILD, il declencherait P4 sur une
+position qui n'a aucun probleme.
+
+## 11. Le coussin se leviérise lui-même
+
+Constat de conception, tire du calcul des bandes le 2026-09-09 avec LT 0,79.
+
+Le coussin est de l'USDC depose sur Aave. Il compte donc dans le collateral, et
+a LTV cible constant il **porte de la dette supplementaire**. Chassis a capital
+20 000 constant, cible 0,70 :
+
+```
+coussin    spot    dette   bande (coussin plein)   bande (coussin consomme)
+ 1 000   49 250   35 175          -11,62 %                 -9,59 %
+ 2 000   48 500   35 350          -11,86 %                 -7,74 %
+ 3 500   47 375   35 612          -12,23 %                 -4,85 %
+```
+
+Grossir le coussin achete quelques dixiemes de point tant qu'il est plein, et en
+coute plusieurs une fois vide — **au moment precis ou P3 vient de s'en servir**.
+La defense se paie en marge de securite, et plus le coussin est gros, plus elle
+coute cher.
+
+Deux consequences :
+
+1. Le solveur ne doit pas dimensionner la dette sur un collateral qui inclut le
+   coussin (chantier 1.3, point K10). Sinon le coussin finance sa propre dette.
+2. Le classeur doit afficher **les deux bandes**, pleine et consommee. La seconde
+   est celle qui vaut apres la premiere tranche de P3, donc celle qui compte.
+
+Note sur les chiffres publies : la bande depend du LTV de depart. Le chassis
+d'illustration de l'audit (spot 50 000, dette 35 000, coussin 1 000) est en fait
+a LTV 0,686 et non 0,70 — le coussin adoucit le ratio — d'ou son -13,39 %. Un
+chassis reellement construit a 0,70 donne -11,62 %. Les deux sont justes ; ils ne
+partent pas du meme point. Que le chassis de reference ne soit pas a sa propre
+cible est le point K10.
+
+## 12. Arbitrage chiffre de la cible LTV
+
+Meme modele, capital 20 000, coussin 1 000, levier short 10x :
+
+```
+cible    exposition   bande    coussin vide   carry relatif
+0,700       2,51     -11,62 %     -9,59 %        100,0 %
+0,675       2,36     -14,87 %    -12,71 %         94,0 %
+0,650       2,23     -18,13 %    -15,84 %         88,7 %
+```
+
+Descendre de 0,70 a 0,65 achete **6,5 points de bande** contre 11 % de carry,
+soit environ 575 $/an sur les 5 100 $ bruts attendus. A comparer aux 1 300 $
+d'une liquidation « propre » (point A3 de l'audit), sachant que l'ETH fait -13 %
+en une journee plusieurs fois par an. Le depeg stETH (F7) s'ajoute a cette
+bande, il ne s'en deduit pas.
+
+Decision a prendre au chantier 1.5. Elle remet en cause la decision figee n° 3.
+
+## 11 bis. Correction du point 11 : un coussin consomme n'est pas un coussin perdu
+
+Verifie le 2026-09-09 en suivant un seul chassis dans le temps, au lieu de
+comparer deux chassis differents comme le faisait le point 11.
+
+Quand P3 depense le coussin, il **rembourse de la dette**. Le bilan ne perd pas
+le coussin, il le convertit :
+
+```
+tampons pleins      dette 28 187   marge 4 176   bande basse -16,95 %
+tampons consommes   dette 27 187   marge 5 429   bande basse -17,59 %
+```
+
+Les deux bandes s'**elargissent**. Le point 11 comparait la bande d'un chassis
+avec coussin a celle du meme chassis dont le coussin aurait disparu **sans
+rembourser** — ce qui n'arrive jamais. Lu ainsi, sa conclusion « le coussin
+coute plusieurs points une fois vide » est fausse.
+
+Ce qui reste vrai du point 11, et qui a motive le chantier 1.3 : a LTV cible
+constant, un chassis dote d'un plus gros coussin porte **plus de dette**, parce
+que le coussin compte dans le collateral. Le solveur ne doit donc pas
+dimensionner la dette sur un collateral qui l'inclut. C'est une remarque sur le
+dimensionnement initial, pas sur ce que devient le coussin une fois utilise.
+
+## 13. Le couplage des defenses ne fait pas de cliquet
+
+Autre intuition infirmee le meme jour. Sans tampons, chaque defense puise dans
+l'autre jambe : P5 emprunte sur Aave pour recharger la marge (le LTV monte), P6
+retire de la marge pour rembourser (le ratio baisse). J'en avais conclu qu'une
+oscillation de prix ferait deriver la position vers un coin.
+
+Simulation d'une oscillation de +/-14 %, tampons vides :
+
+```
+tour     dette    marge  bande bas  bande haut
+   0    27 187    5 429    -17,59%      10,78%
+   1    24 600    3 259    -25,43%       5,69%
+   2    24 600    5 846    -25,43%      11,76%
+   3    24 600    5 846    -25,43%      11,76%
+```
+
+La position se stabilise des le deuxieme tour et repete le meme cycle. **P5 et
+P6 sont exactement inverses** : l'une emprunte X et le met en marge, l'autre
+retire X et rembourse. Sur un aller-retour, elles s'annulent.
+
+Le cout reel d'un marche qui oscille n'est donc pas la solvabilite mais les
+**frais** : chaque aller-retour paie deux traversees de pont pour des defenses
+qui se neutralisent. C'est le whipsaw du point F2 de l'audit, a chiffrer au
+backtest M2b et non au harnais de stress.
+
+Lecon de methode, la deuxieme du meme genre : regarder une demi-oscillation et
+extrapoler donne une conclusion inverse de la realite. Simuler le cycle entier.
+
+## 14. La cascade du §7 s'est produite en vrai, et personne ne l'a vue
+
+Constate le 2026-09-10 en diagnostiquant la marche a blanc. Ce n'est plus un
+scenario : c'est un incident, avec ses horaires.
+
+```
+aave_repay     dernier succes  2026-09-08 20:09     puis 35 echecs
+aave_withdraw  dernier succes  2026-09-08 20:09     puis  3 echecs
+aave_supply    dernier succes  2026-09-09 13:41     puis 58 echecs
+bridge_out     dernier succes  2026-09-09 08:26     puis  2 echecs
+```
+
+**Enchainement.** Le cycle du 8 septembre a 20h39 a repay rate. Comme
+`OpResult` renvoie `failed` au lieu de lever (point C7 de l'audit, chantier
+4.4), la sequence a continue : le withdraw a echoue a son tour, HF sous le
+seuil, et la position est restee ouverte. Les cycles suivants ont continue a
+deposer 5 USDC sans jamais les recuperer, jusqu'a vider le portefeuille.
+
+**Etat au moment du diagnostic**, 46 heures plus tard :
+
+```
+USDC libre du wallet   2,97      (un cycle en demande 5, un pont 5)
+ETH pour le gaz        0,0278    (largement au-dessus du seuil, ce n'etait pas ca)
+position Aave ouverte  collateral 175 $   dette 35 $   HF 3,90
+```
+
+Aucun danger de liquidation a cette echelle, mais la jambe Aave et le pont
+n'ont plus produit un seul echantillon pendant deux jours.
+
+**Ce que l'incident demontre.** La boucle tournait parfaitement pendant ce
+temps : 96 167 snapshots, p95 a 951 ms, deux gels seulement au-dessus de 10 s
+sur six jours. Le processus etait vivant, la base s'ecrivait, Hyperliquid
+repondait. **Rien ne distinguait un bot casse d'un bot calme** — le point K8 de
+l'audit, verifie sur notre propre run avec de l'argent reel.
+
+Consequences a traiter :
+
+1. Le rapport M1 doit dire que les chemins Aave et pont couvrent **5 jours et
+   non 7**. Leurs echantillons restent valables (250 supply, 215 repay, 11
+   allers-retours), mais le critere de continuite n'est pas tenu pour eux. Il
+   l'est pour P1/P2, qui a 917 echantillons et tournait encore.
+2. Refermer la position avec `scripts/unwind_aave.py` apres la cloture.
+3. Le chantier 5.1 (alertes) monte en priorite : sans lui, le meme silence se
+   reproduira en M2 sur un chassis a 20 000 $ au lieu de 175.
+4. Le garde-fou manquant n'est pas seulement C7 : un controle de solde avant
+   chaque cycle aurait refuse de demarrer plutot que d'echouer 58 fois.
