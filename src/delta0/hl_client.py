@@ -28,11 +28,13 @@ it in unstructured English.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from hyperliquid.info import Info
 from hyperliquid.utils.error import Error as _SdkTransportError
+from hyperliquid.utils.types import Cloid
 
 from delta0.errors import VenueError
 
@@ -64,9 +66,16 @@ class HLReadError(VenueError):
 # --- Clients ------------------------------------------------------------------
 
 
+# Hyperliquid answers in a few hundred milliseconds (M1: 237 ms of processing,
+# 22 ms of network). The SDK's default is no timeout at all
+# (`API.__init__(timeout=None)`, SDK 0.24.0), so one silent socket froze the
+# loop — the KILL file included (audit dev 2026-09-16, 4.1).
+HL_HTTP_TIMEOUT_S = 5.0
+
+
 def make_info(api_url: str, *, websocket: bool) -> Info:
     """Read client. `websocket=True` starts the SDK's WebSocket thread."""
-    return Info(api_url, skip_ws=not websocket)
+    return Info(api_url, skip_ws=not websocket, timeout=HL_HTTP_TIMEOUT_S)
 
 
 def make_exchange(private_key: str, api_url: str) -> Exchange:
@@ -80,7 +89,19 @@ def make_exchange(private_key: str, api_url: str) -> Exchange:
     from eth_account import Account  # noqa: PLC0415
     from hyperliquid.exchange import Exchange as _Exchange  # noqa: PLC0415
 
-    return _Exchange(Account.from_key(private_key), api_url)
+    return _Exchange(Account.from_key(private_key), api_url, timeout=HL_HTTP_TIMEOUT_S)
+
+
+def make_cloid(seed: str) -> Cloid:
+    """Client order id derived from `seed`, the intent it belongs to.
+
+    Hyperliquid names an order by the id it returns. When the call fails after
+    the venue received the order — a timeout, a reset connection, an answer we
+    cannot read — that id never arrives, and nothing local can cancel the order.
+    A client id chosen before sending can (audit dev 2026-09-16, 1.6). Derived,
+    not random, so the same intent always names the same order.
+    """
+    return Cloid.from_str("0x" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32])
 
 
 # --- Reading responses ----------------------------------------------------------

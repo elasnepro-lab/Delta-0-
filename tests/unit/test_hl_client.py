@@ -16,9 +16,13 @@ from typing import Any
 import pytest
 
 from delta0.hl_client import (
+    HL_HTTP_TIMEOUT_S,
     HLActionRefused,
     ensure_ok,
     is_ok,
+    make_cloid,
+    make_exchange,
+    make_info,
     parse_order_response,
     response_detail,
 )
@@ -35,6 +39,43 @@ SRC = Path(__file__).resolve().parents[2] / "src" / "delta0"
 
 def _order(*statuses: Any) -> dict[str, Any]:
     return {"status": "ok", "response": {"type": "order", "data": {"statuses": list(statuses)}}}
+
+
+# --- Clients: a timeout on every socket (audit dev 2026-09-16, 4.1) ---------------
+
+
+def test_the_read_client_carries_a_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def _fake_info(api_url: str, **kwargs: Any) -> object:
+        _ = api_url
+        seen.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("delta0.hl_client.Info", _fake_info)
+    make_info("https://api.hyperliquid.xyz", websocket=False)
+    assert seen == {"skip_ws": True, "timeout": HL_HTTP_TIMEOUT_S}
+
+
+def test_the_signing_client_carries_a_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def _fake_exchange(wallet: object, api_url: str, **kwargs: Any) -> object:
+        _ = wallet, api_url
+        seen.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("hyperliquid.exchange.Exchange", _fake_exchange)
+    # A throwaway key: nothing is signed, the client is never used.
+    make_exchange("0x" + "11" * 32, "https://api.hyperliquid.xyz")
+    assert seen == {"timeout": HL_HTTP_TIMEOUT_S}
+
+
+def test_a_client_order_id_is_derived_from_its_intent() -> None:
+    first = make_cloid("intent-a").to_raw()
+    assert re.fullmatch(r"0x[0-9a-f]{32}", first)
+    assert make_cloid("intent-a").to_raw() == first
+    assert make_cloid("intent-b").to_raw() != first
 
 
 # --- First level ----------------------------------------------------------------

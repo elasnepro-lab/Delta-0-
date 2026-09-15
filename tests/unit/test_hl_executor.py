@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -10,7 +11,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from delta0.config import Config
-from delta0.hl_client import HLActionRefused
+from delta0.failure import OPERATIONAL_ERRORS
+from delta0.hl_client import HLActionRefused, HLReadError, make_cloid
 from delta0.hl_executor import (
     LATENCY_PATH_CANCEL,
     LATENCY_PATH_ORDER,
@@ -458,3 +460,84 @@ async def test_a_rehearsal_exercises_all_three_paths(
         assert stats["count"] == 1, path
         # Rehearsal samples never enter the critical-path statistics.
         assert (await store.latency_stats(path))["count"] == 0
+
+
+# --- Audit dev 2026-09-16 : 1.6 (cloid) et 4.2 (mark nul) -----------------------
+
+
+@pytest.mark.asyncio
+async def test_the_order_carries_the_client_id_of_its_intent(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+) -> None:
+    executor, _, exchange = _make_executor(tmp_path, store, config, dry_run=False)
+    result = await executor.post_and_cancel()
+
+    sent = exchange.order.call_args.kwargs["cloid"]
+    assert re.fullmatch(r"0x[0-9a-f]{32}", sent.to_raw())
+    assert sent.to_raw() == make_cloid(result.intent_id).to_raw()
+
+
+@pytest.mark.asyncio
+async def test_an_order_lost_in_transit_is_cancelled_by_its_client_id(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+) -> None:
+    """The order call fails after Hyperliquid may have received the order.
+
+    No order id comes back, so the cancel by id cannot run. Before the client
+    id, a sell resting 10 % above mark stayed on the book with nothing local
+    able to name it.
+    """
+    executor, _, exchange = _make_executor(tmp_path, store, config, dry_run=False)
+    exchange.order.side_effect = TimeoutError("read timed out")
+    exchange.cancel_by_cloid.return_value = {
+        "status": "ok",
+        "response": {"type": "cancel", "data": {"statuses": ["success"]}},
+    }
+
+    with pytest.raises(TimeoutError):
+        await executor.post_and_cancel()
+
+    sent = exchange.order.call_args.kwargs["cloid"]
+    exchange.cancel_by_cloid.assert_called_once_with("ETH", sent)
+    exchange.cancel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_cancel_by_client_id_does_not_hide_the_original_failure(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+) -> None:
+    executor, _, exchange = _make_executor(tmp_path, store, config, dry_run=False)
+    exchange.order.side_effect = TimeoutError("read timed out")
+    exchange.cancel_by_cloid.side_effect = ConnectionError("still down")
+
+    with pytest.raises(TimeoutError, match="read timed out"):
+        await executor.post_and_cancel()
+
+
+@pytest.mark.parametrize("mark", [0.0, float("nan")])
+@pytest.mark.asyncio
+async def test_an_unusable_mark_is_a_venue_error_and_sends_nothing(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+    mark: float,
+) -> None:
+    executor, _, exchange = _make_executor(tmp_path, store, config, dry_run=False)
+
+    async def _bad_mark(_coin: str) -> float:
+        return mark
+
+    executor._get_mark_price = _bad_mark
+
+    with pytest.raises(HLReadError, match="inutilisable"):
+        await executor.post_and_cancel()
+
+    exchange.order.assert_not_called()
+    # A venue error the loop survives, not the ZeroDivisionError that stopped it.
+    assert issubclass(HLReadError, OPERATIONAL_ERRORS)

@@ -30,7 +30,7 @@ from delta0.decision import target_state
 from delta0.errors import BootRefused
 from delta0.executor import AaveTraceExecutor
 from delta0.failure import OPERATIONAL_ERRORS
-from delta0.hl_client import make_exchange, make_info
+from delta0.hl_client import HLReadError, make_exchange, make_info
 from delta0.hl_executor import HLTraceExecutor
 from delta0.latency import (
     M1_REPORT_STAMP_KEY,
@@ -761,14 +761,24 @@ def _wire_micro_op_executors(
         master_address=settings.bot_master_address,
         chain_id=ARBITRUM_CHAIN_ID,
         private_key=pkey,
+        # Without it the funding guard of 4.7 logs `balance_check_absent` and
+        # lets every supply and repay through: the check existed, its tests
+        # passed, and production never ran it (audit dev 2026-09-16, 1.1).
+        balances=balances,
     )
 
     hl_info = make_info(cfg.venues.hl_api, websocket=False)
 
     async def _mark_price(coin: str) -> float:
-        mids = hl_info.all_mids()
-        raw = mids.get(coin)
-        return float(raw) if raw is not None else 0.0
+        # Off the event loop like every other SDK call: a synchronous
+        # `all_mids()` froze the loop for as long as Hyperliquid took to answer.
+        # And an absent coin raised nothing, it returned 0.0, which the order
+        # sizing then divided by (audit dev 2026-09-16, 4.1 and 4.2).
+        mids = await asyncio.to_thread(hl_info.all_mids)
+        try:
+            return float(mids[coin])
+        except (KeyError, TypeError, ValueError) as e:
+            raise HLReadError(f"prix mark de {coin!r} absent ou illisible") from e
 
     def _make_exchange() -> object:
         if pkey is None:

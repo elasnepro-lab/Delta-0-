@@ -8,6 +8,7 @@ taken the bot down.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
@@ -36,6 +37,31 @@ def _reader(**answers: Any) -> HyperliquidReader:
     reader._user = "0x000000000000000000000000000000000000dEaD"
     reader._info = _FakeInfo(**answers)
     return reader
+
+
+class _HungInfo:
+    def all_mids(self) -> dict[str, str]:
+        time.sleep(0.3)
+        return {"ETH": "2500"}
+
+
+@pytest.mark.asyncio
+async def test_a_hung_call_is_a_timeout_the_loop_survives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A socket that never answers froze the snapshot, and the KILL file with it.
+
+    Audit dev 2026-09-16, 4.1: the SDK has no HTTP timeout by default, and the
+    thread offload was never bounded.
+    """
+    monkeypatch.setattr("delta0.venues.hyperliquid._CALL_DEADLINE_S", 0.05)
+    reader = HyperliquidReader.__new__(HyperliquidReader)
+    reader._user = "0x000000000000000000000000000000000000dEaD"
+    reader._info = _HungInfo()
+
+    with pytest.raises(TimeoutError) as excinfo:
+        await reader.read_mark_price("ETH")
+    assert issubclass(excinfo.type, OPERATIONAL_ERRORS)
 
 
 @pytest.mark.asyncio

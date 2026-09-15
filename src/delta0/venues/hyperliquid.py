@@ -33,6 +33,11 @@ _HOURS_PER_YEAR = 24 * 365
 # What a malformed answer raises while it is being picked apart.
 _SHAPE_ERRORS = (KeyError, TypeError, ValueError, IndexError, AttributeError)
 
+# The whole call, on top of the client's HTTP timeout (hl_client.HL_HTTP_TIMEOUT_S):
+# that one bounds each socket read, not an answer that trickles in. A snapshot
+# stuck here is a loop that no longer reads the KILL file.
+_CALL_DEADLINE_S = 8.0
+
 
 @dataclass(frozen=True, slots=True)
 class HLPosition:
@@ -58,7 +63,7 @@ class HyperliquidReader:
         self._info = make_info(api_url, websocket=False)
 
     async def _run(self, what: str, fn: Any, *args: Any) -> Any:
-        result = await asyncio.to_thread(fn, *args)
+        result = await asyncio.wait_for(asyncio.to_thread(fn, *args), _CALL_DEADLINE_S)
         # The SDK returns this instead of raising when the body is not JSON.
         if isinstance(result, dict) and set(result) == {"error"}:
             raise HLReadError(f"lecture Hyperliquid {what} en échec : {result['error']}")
