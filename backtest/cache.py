@@ -57,7 +57,7 @@ class CacheMissError(ArchiveError):
 
 
 def month_path(root: Path, series: Series, year: int, month: int) -> Path:
-    return root / series.name / archive_name(year, month)
+    return root / series.name / archive_name(series, year, month)
 
 
 def checksum_path(root: Path, series: Series, year: int, month: int) -> Path:
@@ -85,7 +85,7 @@ def stored_digest(root: Path, series: Series, year: int, month: int) -> str | No
     if not path.is_file():
         return None
     try:
-        return parse_checksum(path.read_text(encoding="ascii"), archive_name(year, month))
+        return parse_checksum(path.read_text(encoding="ascii"), archive_name(series, year, month))
     except (ArchiveError, UnicodeDecodeError, OSError):
         return None
 
@@ -110,7 +110,9 @@ def store(root: Path, series: Series, year: int, month: int, payload: bytes, dig
 
     checksum = checksum_path(root, series, year, month)
     partial_checksum = checksum.with_name(checksum.name + _PARTIAL_SUFFIX)
-    partial_checksum.write_text(f"{digest}  {archive_name(year, month)}\n", encoding="ascii")
+    partial_checksum.write_text(
+        f"{digest}  {archive_name(series, year, month)}\n", encoding="ascii"
+    )
     os.replace(partial_checksum, checksum)
     return path
 
@@ -125,13 +127,19 @@ def ensure_month(
     return store(root, series, year, month, payload, digest), True
 
 
-def read_month(root: Path, series: Series, year: int, month: int) -> list[Candle]:
-    """Candles of a cached month, verified once more against its stored checksum."""
+def cached_bytes(root: Path, series: Series, year: int, month: int) -> tuple[bytes, str]:
+    """The stored archive and the digest it was stored with: the only door into the cache."""
     expected = stored_digest(root, series, year, month)
     path = month_path(root, series, year, month)
     if expected is None or not path.is_file():
         raise CacheMissError(f"{series.name} {year:04d}-{month:02d} absent du cache {root}")
-    return read_archive(path.read_bytes(), expected, year, month)
+    return path.read_bytes(), expected
+
+
+def read_month(root: Path, series: Series, year: int, month: int) -> list[Candle]:
+    """Candles of a cached month, verified once more against its stored checksum."""
+    payload, expected = cached_bytes(root, series, year, month)
+    return read_archive(payload, expected, year, month)
 
 
 @dataclass(slots=True)

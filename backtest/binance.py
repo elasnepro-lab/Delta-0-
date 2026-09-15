@@ -1,11 +1,14 @@
-"""Binance one-minute archives: the price series of the backtest (README §15.3).
+"""Binance monthly archives: the price and funding series of the backtest (README §15.3).
 
-Three ETHUSDT series from data.binance.vision, one minute each:
+Four ETHUSDT series from data.binance.vision — three of one-minute candles, one
+of funding rates:
 
 - `spot`    : proxy for the Chainlink ETH/USD behind Aave's oracle;
 - `futures` : last traded price on the USDⓈ-M perpetual, kept for the wick studies;
 - `mark`    : futures mark price, proxy for Hyperliquid's mark, which has no
-              public history (docs/backtest/inventaire-prix-funding.md).
+              public history (docs/backtest/inventaire-prix-funding.md);
+- `funding` : what the perpetual actually charged, the proxy for Hyperliquid's
+              own funding over the years when Hyperliquid did not exist.
 
 The formats were read from the files themselves on 2026-09-16, and two of them
 move under your feet:
@@ -20,6 +23,12 @@ skips a header wherever one appears, rather than trusting a date for either
 change. Every archive has a `.CHECKSUM` sibling, `<sha256>  <file name>`, and a
 download that does not match it is refused: a truncated month would read as a
 calm one.
+
+The funding archives are a family of their own, read on 2026-09-16 too: no
+interval folder in their path, a header of their own, and — the useful part —
+`funding_interval_hours` written on every row, so the period a rate covers is
+read rather than assumed. Their timestamps carry a few milliseconds of drift
+(`1761926400007`), so they sit on no grid at all. They start in 2020-01.
 """
 
 from __future__ import annotations
@@ -58,12 +67,22 @@ class Series:
     name: str
     market: str  # path segment under ARCHIVE_BASE
     kind: str  # archive family
+    marker: str  # what the file name carries between the symbol and the month
+    nested: bool  # candles live under an extra interval folder, funding does not
 
+    @property
+    def is_candles(self) -> bool:
+        """Funding archives hold rates, not candles, and parse differently."""
+        return self.kind != FUNDING_KIND
+
+
+FUNDING_KIND = "fundingRate"
 
 SERIES: dict[str, Series] = {
-    "spot": Series("spot", "spot", "klines"),
-    "futures": Series("futures", "futures/um", "klines"),
-    "mark": Series("mark", "futures/um", "markPriceKlines"),
+    "spot": Series("spot", "spot", "klines", "1m", nested=True),
+    "futures": Series("futures", "futures/um", "klines", "1m", nested=True),
+    "mark": Series("mark", "futures/um", "markPriceKlines", "1m", nested=True),
+    "funding": Series("funding", "futures/um", FUNDING_KIND, FUNDING_KIND, nested=False),
 }
 
 
@@ -76,15 +95,15 @@ class Candle:
     close: float
 
 
-def archive_name(year: int, month: int) -> str:
-    return f"{SYMBOL}-1m-{year:04d}-{month:02d}.zip"
+def archive_name(series: Series, year: int, month: int) -> str:
+    return f"{SYMBOL}-{series.marker}-{year:04d}-{month:02d}.zip"
 
 
 def archive_url(series: Series, year: int, month: int) -> str:
-    return (
-        f"{ARCHIVE_BASE}/{series.market}/monthly/{series.kind}/{SYMBOL}/1m/"
-        f"{archive_name(year, month)}"
-    )
+    folder = f"{ARCHIVE_BASE}/{series.market}/monthly/{series.kind}/{SYMBOL}"
+    if series.nested:
+        folder = f"{folder}/{series.marker}"
+    return f"{folder}/{archive_name(series, year, month)}"
 
 
 def months(start: tuple[int, int], end: tuple[int, int]) -> Iterator[tuple[int, int]]:
@@ -139,8 +158,8 @@ def parse_checksum(text: str, expected_name: str) -> str:
     return digest
 
 
-def read_archive(zip_bytes: bytes, expected_sha256: str, year: int, month: int) -> list[Candle]:
-    """Verify, unzip and parse one monthly archive; refuse what does not fit its month."""
+def verified_text(zip_bytes: bytes, expected_sha256: str) -> str:
+    """The single CSV held by an archive whose sha256 is the one announced for it."""
     actual = hashlib.sha256(zip_bytes).hexdigest()
     if actual != expected_sha256:
         raise ArchiveError(f"sha256 {actual} ≠ annoncé {expected_sha256} : archive tronquée ?")
@@ -148,9 +167,12 @@ def read_archive(zip_bytes: bytes, expected_sha256: str, year: int, month: int) 
         names = archive.namelist()
         if len(names) != 1:
             raise ArchiveError(f"archive à {len(names)} fichiers, un seul attendu : {names}")
-        text = archive.read(names[0]).decode("ascii")
+        return archive.read(names[0]).decode("ascii")
 
-    candles = parse_klines_csv(text)
+
+def read_archive(zip_bytes: bytes, expected_sha256: str, year: int, month: int) -> list[Candle]:
+    """Verify, unzip and parse one monthly archive; refuse what does not fit its month."""
+    candles = parse_klines_csv(verified_text(zip_bytes, expected_sha256))
     start, end = month_bounds_ms(year, month)
     previous = start - MINUTE_MS
     for candle in candles:
@@ -170,6 +192,55 @@ def missing_minutes(candles: list[Candle], year: int, month: int) -> int:
     return (end - start) // MINUTE_MS - len(candles)
 
 
+@dataclass(frozen=True, slots=True)
+class Funding:
+    ts_ms: int  # calc_time: the instant the rate was charged, UTC
+    interval_hours: int  # written on the row, never assumed
+    rate: float  # over that whole interval, not per hour
+
+
+def parse_funding_csv(text: str) -> list[Funding]:
+    """Rows out of `calc_time,funding_interval_hours,last_funding_rate`."""
+    rows: list[Funding] = []
+    for line in text.splitlines():
+        if not line or not line[0].isdigit():
+            continue  # blank line, or the header
+        fields = line.split(",")
+        try:
+            rows.append(
+                Funding(
+                    ts_ms=to_milliseconds(int(fields[0])),
+                    interval_hours=int(fields[1]),
+                    rate=float(fields[2]),
+                ),
+            )
+        except (IndexError, ValueError) as e:
+            raise ArchiveError(f"ligne de funding illisible : {line[:80]!r}") from e
+    return rows
+
+
+def read_funding_archive(
+    zip_bytes: bytes, expected_sha256: str, year: int, month: int
+) -> list[Funding]:
+    """Verify and parse one month of funding; refuse what does not belong to it.
+
+    No minute grid is checked here: funding timestamps drift by a few
+    milliseconds, so only the month, the order and the declared interval are.
+    """
+    rows = parse_funding_csv(verified_text(zip_bytes, expected_sha256))
+    start, end = month_bounds_ms(year, month)
+    previous = -1
+    for row in rows:
+        if not start <= row.ts_ms < end:
+            raise ArchiveError(f"funding {row.ts_ms} hors du mois {year:04d}-{month:02d}")
+        if row.ts_ms <= previous:
+            raise ArchiveError(f"funding non strictement croissant à {row.ts_ms}")
+        if row.interval_hours <= 0:
+            raise ArchiveError(f"intervalle de funding impossible : {row.interval_hours} h")
+        previous = row.ts_ms
+    return rows
+
+
 def fetch_month_bytes(
     client: httpx.Client, series: Series, year: int, month: int
 ) -> tuple[bytes, str]:
@@ -183,7 +254,7 @@ def fetch_month_bytes(
     if checksum.status_code == httpx.codes.NOT_FOUND:
         raise ArchiveMissingError(f"{series.name} {year:04d}-{month:02d} pas encore publié")
     checksum.raise_for_status()
-    expected = parse_checksum(checksum.text, archive_name(year, month))
+    expected = parse_checksum(checksum.text, archive_name(series, year, month))
 
     body = client.get(url)
     body.raise_for_status()

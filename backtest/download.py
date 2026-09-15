@@ -28,6 +28,7 @@ import httpx
 
 from backtest.binance import SERIES, ArchiveError, Series, missing_minutes
 from backtest.cache import DEFAULT_ROOT, Month, ensure_range, read_month
+from backtest.funding import gaps, intervals, read_funding_month
 
 DEFAULT_START: Month = (2021, 1)
 WORST_MONTHS_SHOWN = 5
@@ -61,13 +62,29 @@ def last_published_month(today: dt.date | None = None) -> Month:
     return previous.year, previous.month
 
 
+def verify_funding(root: Path, taken: Sequence[Month], out: TextIO) -> None:
+    """Décrire la série de funding : combien de versements, sur quelles périodes, et les trous."""
+    rows = []
+    for year, month in taken:
+        rows.extend(read_funding_month(root, year, month))
+    periods = ", ".join(f"{hours} h x {count}" for hours, count in sorted(intervals(rows).items()))
+    holes = gaps(rows)
+    manque = (
+        "aucun trou" if not holes else f"{len(holes)} trou(s), {sum(h for _, h in holes):.0f} h"
+    )
+    print(f"  vérification : {len(rows)} versements, périodes {periods}, {manque}", file=out)
+
+
 def verify(root: Path, series: Series, taken: Sequence[Month], out: TextIO) -> None:
-    """Relire chaque mois pris et compter ses minutes manquantes.
+    """Relire chaque mois pris et compter ce qui manque dedans.
 
     Informatif, jamais bloquant : une minute absente peut être une vraie panne
     de la place, que le backtest doit voir plutôt que subir. Ce qui bloque,
     c'est un MOIS manquant au milieu de la plage.
     """
+    if not series.is_candles:
+        verify_funding(root, taken, out)
+        return
     holes = {}
     for year, month in taken:
         gap = missing_minutes(read_month(root, series, year, month), year, month)

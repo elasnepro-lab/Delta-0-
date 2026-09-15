@@ -76,7 +76,7 @@ def test_an_empty_range_is_refused_before_any_request() -> None:
     assert main(["--from", "2025-10", "--to", "2025-09"]) == EXIT_USAGE
 
 
-def test_all_is_the_three_series(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_all_is_every_series_prices_and_funding(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[list[str]] = []
 
     def fake_download(client, root, series, start, end, **kwargs):  # type: ignore[no-untyped-def]
@@ -86,7 +86,7 @@ def test_all_is_the_three_series(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("backtest.download.download", fake_download)
     assert main(["--to", "2021-01"]) == EXIT_OK
     assert main(["--series", "mark", "--to", "2021-01"]) == EXIT_OK
-    assert seen == [["spot", "futures", "mark"], ["mark"]]
+    assert seen == [["spot", "futures", "mark", "funding"], ["mark"]]
 
 
 # --- Filling the cache --------------------------------------------------------
@@ -154,3 +154,24 @@ def test_the_verification_says_so_when_nothing_is_missing(tmp_path: Path) -> Non
 
     assert code == EXIT_OK
     assert "aucune minute manquante" in output
+
+
+def test_the_funding_series_is_verified_on_its_own_terms(tmp_path: Path) -> None:
+    """Des versements et des périodes, pas des minutes : ce n'est pas une série de bougies."""
+    server = FakeBinance()
+    out = io.StringIO()
+    with server.client() as client:
+        code = download(
+            client,
+            tmp_path,
+            [SERIES["funding"]],
+            (2025, 10),
+            (2025, 10),
+            verify_months=True,
+            out=out,
+        )
+
+    assert code == EXIT_OK
+    assert "3 versements" in out.getvalue()
+    assert "8 h x 3" in out.getvalue()
+    assert "aucun trou" in out.getvalue()

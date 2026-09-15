@@ -149,7 +149,17 @@ def test_the_three_series_point_at_three_real_paths() -> None:
         "/futures/um/monthly/klines/ETHUSDT/1m/ETHUSDT-1m-2021-05.zip"
     )
     assert "monthly/markPriceKlines" in archive_url(SERIES["mark"], 2025, 10)
-    assert archive_name(2021, 5) == "ETHUSDT-1m-2021-05.zip"
+    assert archive_name(SERIES["spot"], 2021, 5) == "ETHUSDT-1m-2021-05.zip"
+
+
+def test_the_funding_archive_has_a_shape_of_its_own() -> None:
+    """No interval folder in its path, and its own marker in the file name."""
+    funding = SERIES["funding"]
+    assert not funding.is_candles
+    assert archive_name(funding, 2025, 10) == "ETHUSDT-fundingRate-2025-10.zip"
+    assert archive_url(funding, 2025, 10).endswith(
+        "/futures/um/monthly/fundingRate/ETHUSDT/ETHUSDT-fundingRate-2025-10.zip"
+    )
 
 
 # --- The one path that goes through the network -------------------------------
@@ -173,7 +183,7 @@ def test_a_published_month_comes_back_with_its_verified_digest() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith(".CHECKSUM"):
-            return httpx.Response(200, text=f"{digest}  {archive_name(2025, 10)}")
+            return httpx.Response(200, text=f"{digest}  {archive_name(SERIES['spot'], 2025, 10)}")
         return httpx.Response(200, content=payload)
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
