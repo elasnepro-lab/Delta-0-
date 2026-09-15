@@ -280,13 +280,17 @@ def show_oracle(w3: Web3, pool: Contract, wsteth: str, usdc: str) -> float | Non
     return ratio
 
 
-def show_verdict(lt: float, cfg: dict[str, Any], ratio: float | None) -> None:
+def show_verdict(lt: float, cfg: dict[str, Any]) -> None:
     target = cfg["target_ltv"]
     emergency = cfg["emergency"]
+    # Since chantier 1.2 the config holds margins below the liquidation
+    # threshold, not absolute LTVs: derived here the way decision.derive_bands
+    # does. The script still read the removed `ltv_pump` keys and died on a
+    # KeyError right after printing the reserves (audit dev 2026-09-16, 6.3).
     thresholds = [
-        ("ltv_pump", emergency["ltv_pump"]),
-        ("ltv_cushion", emergency["ltv_cushion"]),
-        ("ltv_deleverage", emergency["ltv_deleverage"]),
+        ("ltv_pump", lt - emergency["ltv_margin_pump"]),
+        ("ltv_cushion", lt - emergency["ltv_margin_cushion"]),
+        ("ltv_deleverage", lt - emergency["ltv_margin_deleverage"]),
     ]
 
     print("\n=== verdict sur les seuils configures ===")
@@ -304,11 +308,6 @@ def show_verdict(lt: float, cfg: dict[str, Any], ratio: float | None) -> None:
     print(f"\n  bande basse reelle : -{100 * (1 - target / lt):.2f} % depuis LTV {target}")
     for name, value in thresholds:
         print(f"    {name:<16} atteint a -{100 * (1 - target / value):.2f} %")
-
-    if ratio is not None:
-        print("\n=== erreur de valorisation actuelle (watcher.py pose wsteth_price_usd = mark) ===")
-        print(f"  le spot est sous-evalue de {100 * (1 - 1 / ratio):.2f} %")
-        print(f"  un LTV reel de {target:.4f} est vu comme {target * ratio:.4f} par le bot")
 
 
 def main() -> None:
@@ -330,9 +329,9 @@ def main() -> None:
     lt = show_reserve(dp, "wstETH (collateral)", wsteth)
     show_reserve(dp, "USDC natif (dette)", usdc)
     show_emode(pool)
-    ratio = show_oracle(w3, pool, wsteth, usdc)
+    show_oracle(w3, pool, wsteth, usdc)
     if lt is not None:
-        show_verdict(lt, cfg, ratio)
+        show_verdict(lt, cfg)
 
 
 if __name__ == "__main__":
