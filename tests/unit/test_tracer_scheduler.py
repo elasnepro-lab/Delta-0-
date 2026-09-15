@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncGenerator
-from dataclasses import dataclass
+from collections.abc import AsyncGenerator, Callable
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -24,10 +25,22 @@ def _stable_snap() -> Snapshot:
     return reference_snapshot(ts=datetime.now(UTC))
 
 
+def _empty_aave_snap() -> Snapshot:
+    """The account the tracer's Aave cycle is allowed to run on: nothing on Aave."""
+    return reference_snapshot(
+        ts=datetime.now(UTC),
+        wsteth_atoken_balance=0.0,
+        usdc_atoken_balance=0.0,
+        usdc_variable_debt_balance=0.0,
+    )
+
+
 @dataclass(slots=True)
 class _FakeWatcher:
+    make_snap: Callable[[], Snapshot] = _stable_snap
+
     async def snapshot(self) -> Snapshot:
-        return _stable_snap()
+        return self.make_snap()
 
 
 @pytest.fixture
@@ -52,7 +65,7 @@ async def test_scheduler_fires_aave_cycle_when_interval_zero(
     )
     wd = Watchdog(config=cfg.watchdog, project_root=tmp_path)
     loop = TracerLoop(
-        watcher=_FakeWatcher(),
+        watcher=_FakeWatcher(_empty_aave_snap),
         watchdog=wd,
         store=store,
         config=cfg,
@@ -146,7 +159,7 @@ async def test_scheduler_survives_safety_refused(
     )
     wd = Watchdog(config=cfg.watchdog, project_root=tmp_path)
     loop = TracerLoop(
-        watcher=_FakeWatcher(),
+        watcher=_FakeWatcher(_empty_aave_snap),
         watchdog=wd,
         store=store,
         config=cfg,
@@ -210,3 +223,45 @@ async def test_first_cycle_fires_regardless_of_machine_uptime(
     assert loop._last_bridge_cycle == float("-inf")
     await loop.run(duration_s=0.02)
     bridge.round_trip.assert_awaited()
+
+
+@pytest.mark.parametrize(
+    "holding",
+    [
+        {"wsteth_atoken_balance": 16.0},
+        {"usdc_atoken_balance": 1_000.0},
+        {"usdc_variable_debt_balance": 1.0},
+    ],
+)
+@pytest.mark.asyncio
+async def test_the_aave_cycle_never_runs_next_to_a_position(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+    holding: dict[str, Any],
+) -> None:
+    """repay_all and withdraw_all act on the whole account (audit dev 2026-09-16, 1.9).
+
+    One wstETH deposited, one USDC of cushion or one USDC of debt left by a
+    cycle that died half-way is enough to refuse the next cycle.
+    """
+    aave = AsyncMock()
+    cfg = config.model_copy(
+        update={"tracer": config.tracer.model_copy(update={"aave_cycle_every_s": 1})},
+    )
+
+    def _holding_snap() -> Snapshot:
+        return replace(_empty_aave_snap(), **holding)
+
+    loop = TracerLoop(
+        watcher=_FakeWatcher(_holding_snap),
+        watchdog=Watchdog(config=cfg.watchdog, project_root=tmp_path),
+        store=store,
+        config=cfg,
+        cadence_s=0.0,
+        aave_executor=aave,
+    )
+    await loop.run(duration_s=0.02)
+    aave.approve.assert_not_called()
+    aave.repay_all.assert_not_called()
+    aave.withdraw_all.assert_not_called()
