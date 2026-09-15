@@ -35,4 +35,4 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
-        args: ["src", "tests"]
+        args: ["src", "tests", "backtest"]
