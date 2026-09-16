@@ -56,6 +56,7 @@ class FakeNode:
         transient: int = 0,
         refuse_all: bool = False,
         call_value: Callable[[int], int] | None = None,
+        call_data: Callable[[str, str, int], str] | None = None,
     ) -> None:
         self.head = head
         self.genesis_ts = genesis_ts
@@ -68,6 +69,7 @@ class FakeNode:
         self.transient = transient
         self.refuse_all = refuse_all
         self.call_value = call_value
+        self.call_data = call_data
         self.methods: list[str] = []
         self.urls: list[str] = []
         self.queries: list[dict[str, Any]] = []
@@ -101,12 +103,17 @@ class FakeNode:
             block = int(params[0], 16)
             return self.ok({"number": params[0], "timestamp": hex(self.timestamp(block))})
         if method == "eth_call":
-            block = int(params[1], 16)
-            value = self.call_value(block) if self.call_value is not None else 10**18
-            return self.ok("0x" + f"{value:064x}")
+            return self.call(params)
         if method == "eth_getLogs":
             return self.logs(params[0])
         return self.error(f"méthode inconnue : {method}")
+
+    def call(self, params: list[Any]) -> httpx.Response:
+        block = int(params[1], 16)
+        if self.call_data is not None:
+            return self.ok(self.call_data(params[0]["to"], params[0]["data"], block))
+        value = self.call_value(block) if self.call_value is not None else 10**18
+        return self.ok("0x" + f"{value:064x}")
 
     def logs(self, query: dict[str, Any]) -> httpx.Response:
         self.queries.append(query)

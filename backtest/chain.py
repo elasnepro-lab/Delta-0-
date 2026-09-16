@@ -134,6 +134,10 @@ class Chain:
 
     def call_at(self, to: str, data: str, block: int) -> int:
         """Un appel `view` rendant un seul entier, à un bloc passé (nœud d'archive)."""
+        return int(self.call_raw(to, data, block), 16)
+
+    def call_raw(self, to: str, data: str, block: int) -> str:
+        """Le retour brut d'un appel `view` : plusieurs mots se décodent avec `word`."""
         result = self.rpc("eth_call", [{"to": to, "data": data}, hex(block)])
         if not isinstance(result, str) or not result.startswith("0x") or not result[2:]:
             # Une réponse vide n'est pas un zéro : c'est une adresse sans code à
@@ -143,7 +147,7 @@ class Chain:
                 f"eth_call a rendu {str(result)[:80]!r} au bloc {block} :"
                 " pas de code à cette adresse à ce bloc, ou appel rejeté"
             )
-        return int(result, 16)
+        return result
 
     # --- Le temps -------------------------------------------------------------
 
