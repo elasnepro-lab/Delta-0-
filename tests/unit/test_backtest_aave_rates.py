@@ -19,6 +19,8 @@ from pathlib import Path
 import pytest
 
 from backtest.aave_rates import (
+    DAY_S,
+    HOUR_S,
     RAY,
     RESERVES,
     TOPIC_RESERVE_DATA_UPDATED,
@@ -29,9 +31,9 @@ from backtest.aave_rates import (
     check,
     decode,
     ensure_range,
-    hours,
     index_at,
     is_cached,
+    mark_times,
     month_bounds_s,
     month_file,
     months,
@@ -216,7 +218,7 @@ def test_a_finished_month_is_cached_and_costs_nothing_twice(tmp_path: Path) -> N
     )
 
     assert report.fetched == [JULY_2023]
-    assert len(report.marks) == len(hours(2023, 7)) == 744
+    assert len(report.marks) == len(mark_times(2023, 7)) == 744
     assert report.missing_hours == []
     assert is_cached(tmp_path, USDC, 2023, 7)
 
@@ -282,8 +284,32 @@ def test_a_month_runs_from_its_first_second_to_the_next_one() -> None:
     assert month_bounds_s(2023, 8)[0] == end
 
 
-def test_every_hour_of_the_month_gets_a_mark() -> None:
-    marks = hours(2023, 7)
-    assert len(marks) == 744
-    assert marks[0] == month_bounds_s(2023, 7)[0]
-    assert marks[-1] == month_bounds_s(2023, 7)[1] - 3_600
+def test_the_marks_of_a_month_follow_the_step() -> None:
+    horaires = mark_times(2023, 7)
+    assert len(horaires) == 744
+    assert horaires[0] == month_bounds_s(2023, 7)[0]
+    assert horaires[-1] == month_bounds_s(2023, 7)[1] - HOUR_S
+
+    journaliers = mark_times(2023, 7, DAY_S)
+    assert len(journaliers) == 31
+    with pytest.raises(AaveRatesError, match="pas de relevé impossible"):
+        mark_times(2023, 7, 0)
+
+
+def test_two_steps_live_side_by_side_in_the_cache(tmp_path: Path) -> None:
+    """Une série journalière ne doit pas effacer une série horaire déjà payée."""
+    node = busy_node()
+    ensure_range(
+        chain_on(node, tmp_path),
+        tmp_path,
+        USDC,
+        JULY_2023,
+        JULY_2023,
+        step_s=DAY_S,
+        now_ts=AFTER_JULY,
+    )
+
+    assert is_cached(tmp_path, USDC, 2023, 7, DAY_S)
+    assert not is_cached(tmp_path, USDC, 2023, 7, HOUR_S)
+    marks, _ = read_month(tmp_path, USDC, 2023, 7, DAY_S)
+    assert len(marks) == 31

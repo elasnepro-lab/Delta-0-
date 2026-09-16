@@ -21,8 +21,18 @@ lisant une fenêtre étroite avant chaque repère horaire, le même mois coûte
 qu'elle ne trouve rien : le wstETH, bien plus calme, demande 20 000 blocs.
 
 Ce qui est gardé est toujours **un index publié**, jamais une interpolation. Un
-relevé dit de combien de blocs il précède son repère (`stale_blocks`), et une
-heure sans aucun événement est déclarée manquante plutôt que comblée.
+relevé dit de combien de blocs il précède son repère (`stale_blocks`), et un
+repère sans aucun événement est déclaré manquant plutôt que comblé.
+
+**Le pas entre deux repères est un réglage, pas une approximation.** L'exactitude
+n'en dépend pas — entre deux relevés, le rapport de leurs index est exact quel
+que soit leur écartement ; seule la finesse d'attribution à l'intérieur de la
+période en dépend. Or la dette croît d'environ 0,014 % par jour : la distinguer
+heure par heure ne change aucune décision du bot. La collecte, elle, change du
+tout au tout — les trois réserves d'USDC sur leurs fenêtres respectives coûtent
+~18 h de RPC au pas horaire contre ~45 min au pas journalier. Le pas figure dans
+le nom du fichier de cache, pour qu'une série journalière ne remplace jamais une
+série horaire en silence.
 
 Les autres garde-fous :
 
@@ -50,6 +60,7 @@ from backtest.chain import Chain, topic_for_address, word
 
 RAY = 10**27
 HOUR_S = 3_600
+DAY_S = 24 * HOUR_S
 MONTHS_IN_YEAR = 12
 
 # Largeurs de fenêtre successives, en blocs, mesurées le 2026-09-16 : 2 000
@@ -178,10 +189,12 @@ def month_bounds_s(year: int, month: int) -> tuple[int, int]:
     return start, start + days * 24 * HOUR_S
 
 
-def hours(year: int, month: int) -> list[int]:
-    """Chaque repère horaire du mois."""
+def mark_times(year: int, month: int, step_s: int = HOUR_S) -> list[int]:
+    """Chaque repère du mois, espacé de `step_s`."""
+    if step_s <= 0:
+        raise AaveRatesError(f"pas de relevé impossible : {step_s} s")
     start, end = month_bounds_s(year, month)
-    return list(range(start, end, HOUR_S))
+    return list(range(start, end, step_s))
 
 
 def months(start: Month, end: Month) -> list[Month]:
@@ -198,8 +211,9 @@ def listing_month(reserve: Reserve) -> Month:
     return listed.year, listed.month
 
 
-def month_file(root: Path, reserve: Reserve, year: int, month: int) -> Path:
-    return root / "aave" / reserve.name / f"{year:04d}-{month:02d}.json"
+def month_file(root: Path, reserve: Reserve, year: int, month: int, step_s: int = HOUR_S) -> Path:
+    """Le pas fait partie du nom : deux finesses de série cohabitent sans se détruire."""
+    return root / "aave" / reserve.name / f"{year:04d}-{month:02d}-{step_s}s.json"
 
 
 def decode(entries: Sequence[Mapping[str, object]]) -> list[RateEvent]:
@@ -273,13 +287,13 @@ def sample_hour(chain: Chain, reserve: Reserve, ts: int, *, head: int) -> Mark |
 
 
 def sample_month(
-    chain: Chain, reserve: Reserve, year: int, month: int
+    chain: Chain, reserve: Reserve, year: int, month: int, *, step_s: int = HOUR_S
 ) -> tuple[list[Mark], list[int]]:
-    """Les relevés horaires du mois, et les heures restées sans événement."""
+    """Les relevés du mois, et les repères restés sans événement."""
     head = chain.block_number()
     marks: list[Mark] = []
     missing: list[int] = []
-    for ts in hours(year, month):
+    for ts in mark_times(year, month, step_s):
         mark = sample_hour(chain, reserve, ts, head=head)
         if mark is None:
             missing.append(ts)
@@ -297,12 +311,14 @@ def store_month(
     month: int,
     marks: Sequence[Mark],
     missing: Sequence[int],
+    step_s: int = HOUR_S,
 ) -> Path:
-    path = month_file(root, reserve, year, month)
+    path = month_file(root, reserve, year, month, step_s)
     path.parent.mkdir(parents=True, exist_ok=True)
     document = {
         "reserve": reserve.name,
         "month": f"{year:04d}-{month:02d}",
+        "step_s": step_s,
         "fetched_at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
         "missing_hours": list(missing),
         "marks": [
@@ -324,8 +340,10 @@ def store_month(
     return path
 
 
-def read_month(root: Path, reserve: Reserve, year: int, month: int) -> tuple[list[Mark], list[int]]:
-    path = month_file(root, reserve, year, month)
+def read_month(
+    root: Path, reserve: Reserve, year: int, month: int, step_s: int = HOUR_S
+) -> tuple[list[Mark], list[int]]:
+    path = month_file(root, reserve, year, month, step_s)
     if not path.is_file():
         raise AaveRatesError(f"{reserve.name} {year:04d}-{month:02d} absent du cache {root}")
     document = json.loads(path.read_text(encoding="ascii"))
@@ -349,8 +367,8 @@ def read_month(root: Path, reserve: Reserve, year: int, month: int) -> tuple[lis
     return marks, [int(ts) for ts in missing] if isinstance(missing, list) else []
 
 
-def is_cached(root: Path, reserve: Reserve, year: int, month: int) -> bool:
-    return month_file(root, reserve, year, month).is_file()
+def is_cached(root: Path, reserve: Reserve, year: int, month: int, step_s: int = HOUR_S) -> bool:
+    return month_file(root, reserve, year, month, step_s).is_file()
 
 
 def ensure_range(
@@ -360,10 +378,11 @@ def ensure_range(
     start: Month,
     end: Month,
     *,
+    step_s: int = HOUR_S,
     now_ts: int | None = None,
     progress: MonthProgress | None = None,
 ) -> Report:
-    """Les relevés horaires de la plage, lus une fois et gardés — sauf le mois en cours."""
+    """Les relevés de la plage, lus une fois et gardés — sauf le mois en cours."""
     if start < listing_month(reserve):
         raise AaveRatesError(
             f"{reserve.name} n'est listée que depuis le {reserve.listed_on} :"
@@ -372,14 +391,14 @@ def ensure_range(
     stamp = now_ts if now_ts is not None else int(dt.datetime.now(dt.UTC).timestamp())
     report = Report(reserve=reserve.name)
     for year, month in months(start, end):
-        if is_cached(root, reserve, year, month):
-            marks, missing = read_month(root, reserve, year, month)
+        if is_cached(root, reserve, year, month, step_s):
+            marks, missing = read_month(root, reserve, year, month, step_s)
             report.cached.append((year, month))
             state = "cached"
         else:
-            marks, missing = sample_month(chain, reserve, year, month)
+            marks, missing = sample_month(chain, reserve, year, month, step_s=step_s)
             if month_bounds_s(year, month)[1] <= stamp:
-                store_month(root, reserve, year, month, marks, missing)
+                store_month(root, reserve, year, month, marks, missing, step_s)
                 report.fetched.append((year, month))
                 state = "fetched"
             else:

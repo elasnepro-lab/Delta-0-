@@ -17,12 +17,15 @@ from typing import Any
 
 import pytest
 
+from backtest.aave_rates import DAY_S
 from backtest.binance import SERIES
 from backtest.cache import is_cached, store
 from backtest.download import (
+    ARCHIVES,
     EXIT_INCOMPLETE,
     EXIT_OK,
     EXIT_USAGE,
+    EXTRAS,
     download,
     last_published_month,
     main,
@@ -77,7 +80,9 @@ def test_an_empty_range_is_refused_before_any_request() -> None:
     assert main(["--from", "2025-10", "--to", "2025-09"]) == EXIT_USAGE
 
 
-def test_all_is_every_series_prices_and_funding(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_all_takes_every_source_and_a_name_takes_only_that_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     seen: list[list[str]] = []
     kwargs: list[dict[str, Any]] = []
 
@@ -89,12 +94,49 @@ def test_all_is_every_series_prices_and_funding(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr("backtest.download.download", fake_download)
     assert main(["--to", "2021-01"]) == EXIT_OK
     assert main(["--series", "mark", "--to", "2021-01"]) == EXIT_OK
-    assert main(["--series", "hl-funding", "--to", "2021-01"]) == EXIT_OK
+    assert main(["--series", "lido", "--to", "2021-01"]) == EXIT_OK
+
     assert seen == [["spot", "futures", "mark", "funding"], ["mark"], []]
-    assert [call["hyperliquid"] for call in kwargs] == [True, False, True]
+    assert [call["extras"] for call in kwargs] == [list(EXTRAS), [], ["lido"]]
+
+
+def test_the_aave_step_is_a_day_by_default_and_the_reserve_is_the_one_we_borrow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Au pas horaire, collecter les réserves anciennes coûte des heures de RPC."""
+    kwargs: list[dict[str, Any]] = []
+
+    def fake_download(client, root, series, start, end, **rest):  # type: ignore[no-untyped-def]
+        kwargs.append(rest)
+        return EXIT_OK
+
+    monkeypatch.setattr("backtest.download.download", fake_download)
+    assert main(["--series", "aave", "--to", "2021-01"]) == EXIT_OK
+    assert main(["--series", "aave", "--aave-reserve", "usdce-arbitrum", "--to", "2021-01"]) == 0
+
+    assert kwargs[0]["step_s"] == DAY_S
+    assert kwargs[0]["reserve"].name == "usdc-arbitrum"
+    assert kwargs[1]["reserve"].name == "usdce-arbitrum"
 
 
 # --- Filling the cache --------------------------------------------------------
+
+
+def test_the_chain_sources_do_not_write_under_the_archive_folder(tmp_path: Path) -> None:
+    """Les archives Binance vivent dans `<racine>/binance` ; les séries de chaîne à côté.
+
+    Un tirage réel l'a montré : la commande annonçait « cache dans
+    data/backtest/binance » et disait vrai, Lido et stETH y ayant écrit.
+    """
+    server = FakeBinance()
+    out = io.StringIO()
+
+    with server.client() as client:
+        download(client, tmp_path, [SPOT], (2025, 10), (2025, 10), out=out)
+
+    assert (tmp_path / ARCHIVES / "spot").is_dir()
+    assert not (tmp_path / "spot").exists()
+    assert f"cache dans {tmp_path}" in out.getvalue()
 
 
 def test_a_range_is_downloaded_then_never_downloaded_again(tmp_path: Path) -> None:
@@ -108,7 +150,7 @@ def test_a_range_is_downloaded_then_never_downloaded_again(tmp_path: Path) -> No
     assert "3 pris" in first
     assert "3 déjà en cache" in second
     assert len(server.requests) == after_first, "une relance a repassé par le réseau"
-    assert all(is_cached(tmp_path, SPOT, 2025, month) for month in (9, 10, 11))
+    assert all(is_cached(tmp_path / ARCHIVES, SPOT, 2025, month) for month in (9, 10, 11))
 
 
 def test_a_month_not_published_yet_does_not_fail_the_command(tmp_path: Path) -> None:
@@ -141,7 +183,7 @@ def test_the_verification_counts_the_missing_minutes(tmp_path: Path) -> None:
         line + "\n" for index, line in enumerate(csv.splitlines()) if index not in {5, 6, 7}
     )
     payload = build_zip(pierced)
-    store(tmp_path, SPOT, 2025, 10, payload, hashlib.sha256(payload).hexdigest())
+    store(tmp_path / ARCHIVES, SPOT, 2025, 10, payload, hashlib.sha256(payload).hexdigest())
     server = FakeBinance()
 
     code, output = run(server, tmp_path, (2025, 10), (2025, 10), verify_months=True)
