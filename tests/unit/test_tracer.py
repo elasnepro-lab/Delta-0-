@@ -109,13 +109,24 @@ async def test_tracer_records_latency_samples(
 
 
 class _UnreachableWatcher:
-    """A venue that does not answer: the loop must ride it out."""
+    """A venue that does not answer: the loop must ride it out.
 
-    def __init__(self) -> None:
+    It counts its own retries and hangs up the KILL file when it has seen
+    enough. Counting cycles rather than waiting for a wall-clock deadline is
+    what makes the test say something: "the loop retried three times" is a
+    property of the loop, "the loop retried twice in ten milliseconds" is a
+    property of the machine that ran it.
+    """
+
+    def __init__(self, *, stop_after: int, kill_file: Path) -> None:
         self.calls = 0
+        self.stop_after = stop_after
+        self.kill_file = kill_file
 
     async def snapshot(self) -> Snapshot:
         self.calls += 1
+        if self.calls >= self.stop_after:
+            self.kill_file.touch()
         raise ConnectionError("RPC injoignable")
 
 
@@ -132,7 +143,8 @@ async def test_the_loop_survives_an_unreachable_venue(
     store: StateStore,
     tmp_path: Path,
 ) -> None:
-    watcher = _UnreachableWatcher()
+    retries = 3
+    watcher = _UnreachableWatcher(stop_after=retries, kill_file=tmp_path / "KILL")
     loop = TracerLoop(
         watcher=watcher,
         watchdog=Watchdog(config=config.watchdog, project_root=tmp_path),
@@ -140,8 +152,13 @@ async def test_the_loop_survives_an_unreachable_venue(
         config=config,
         cadence_s=0.0,
     )
-    assert await loop.run(duration_s=0.01) == 0
-    assert watcher.calls >= 2  # it kept trying, cycle after cycle
+    # La durée n'est plus le critère, seulement un filet : c'est le frein
+    # d'urgence posé par la venue muette qui arrête la boucle, au cycle près.
+    # Le test échouait une fois sur deux sur une machine chargée, parce qu'un
+    # cycle d'échec construit une trace rich complète et peut dépasser à lui
+    # seul les dix millisecondes qu'on lui accordait.
+    assert await loop.run(duration_s=30.0) == 0
+    assert watcher.calls == retries, "elle a réessayé, cycle après cycle, puis s'est arrêtée"
 
 
 @pytest.mark.asyncio
