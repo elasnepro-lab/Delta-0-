@@ -28,6 +28,13 @@ marge passe sous la marge de maintenance. Un moteur qui ne surveille que le
 premier — comme le harnais 1.6 le faisait — déclare sain un montage dont la
 jambe short a déjà été fermée par la place.
 
+**L'urgence ne préempte rien, par défaut.** Le README §6 dit que « les urgences
+préemptent tout » ; c'est une phrase, pas du code. Aujourd'hui l'ordonnanceur
+attend chaque action, donc une lente tient le sol : un re-centrage de 316 s
+empêche P2 de seulement DÉCIDER pendant cinq minutes. `preempt=True` mesure ce
+que le chantier 3.5 achèterait, et le premier tirage réel dit que ce n'est pas
+un confort.
+
 **Une campagne qui liquide s'arrête.** Le critère du README est « zéro
 liquidation avec la pompe au p95 » : un run qui liquide a déjà répondu. Ce
 qu'une liquidation LAISSE derrière elle — collatéral saisi, prime du
@@ -133,6 +140,7 @@ class Journal:
     interest_paid_usd: float = 0.0
     hf_min: float = float("inf")
     margin_ratio_min: float = float("inf")
+    preempted: int = 0
 
     @property
     def survived(self) -> bool:
@@ -186,6 +194,7 @@ class Engine:
     config: Config
     costs: Costs = DEFAULT
     one_in_flight: bool = True
+    preempt: bool = False
     anchor_price: float | None = None
     journal: Journal = field(default_factory=Journal)
     _pending: list[tuple[int, Action]] = field(default_factory=list)
@@ -224,11 +233,18 @@ class Engine:
             observed = self._observe(book, minute, moment)
             if self._dead(observed, minute):
                 return
-            if decided or (self.one_in_flight and self._pending):
+            if decided or (self.one_in_flight and self._pending and not self.preempt):
                 continue
             action = decide(observed, self.config, self._context(minute, observed))
             if action.kind == "NOOP":
                 continue
+            if self.preempt and self._pending:
+                in_flight = min(pending.priority for _, pending in self._pending)
+                if action.priority >= in_flight:
+                    continue
+                # Strictement plus urgente : elle prend la place de ce qui volait.
+                self._pending.clear()
+                self.journal.preempted += 1
             self._pending.append((minute.ts_ms + self._delay_ms(action), action))
             decided = True
 

@@ -266,3 +266,41 @@ def test_les_deux_bougies_se_lisent_au_meme_moment_dans_la_boucle() -> None:
     une = frise([wick(2_500.0, high=2_600.0, low=2_400.0)])[0]
     assert prices(une, Moment.HIGH) == (2_600.0, 2_600.0)
     assert prices(une, Moment.LOW) == (2_400.0, 2_400.0)
+
+
+# --- la préemption, ce que le chantier 3.5 achèterait ---------------------------
+
+
+def test_sans_preemption_une_lente_tient_le_sol() -> None:
+    """Le README §6 dit que « les urgences préemptent tout ». C'est une phrase, pas du code.
+
+    Un re-centrage met 316 s ; pendant ces cinq minutes, l'ordonnanceur d'aujourd'hui
+    empêche P2 de seulement DÉCIDER. Sur le segment FIDÈLE, c'est ce qui a tué la
+    campagne le 2024-05-20 : la marge est passée sous la maintenance pendant qu'un
+    RECENTER_UP volait encore.
+    """
+    # +4,52 % : assez pour P7 (seuil 4,5 %), pas encore pour la pompe P5
+    # (marge 0,0524 contre un seuil à 0,05). Puis le squeeze, pendant que le
+    # re-centrage de 316 s vole encore. À 2 670 la marge vaut 0,030 : dans la
+    # bande P2 (0,035) sans atteindre la maintenance (0,02).
+    chemin = frise([flat(2_500.0), flat(2_613.0), *[flat(2_670.0)] * 3])
+    sans = campaign(chemin, book(), preempt=False)
+    assert sans.journal.preempted == 0
+    assert sans.journal.count("ADD_ISOLATED_MARGIN") == 0, "P2 n'a pas pu décider"
+
+
+def test_avec_preemption_l_urgence_prend_la_place() -> None:
+    chemin = frise([flat(2_500.0), flat(2_613.0), *[flat(2_670.0)] * 3])
+    avec = campaign(chemin, book(), preempt=True)
+    assert avec.journal.preempted >= 1
+    assert avec.journal.count("ADD_ISOLATED_MARGIN") >= 1
+
+
+def test_une_priorite_egale_ou_moindre_ne_preempte_pas() -> None:
+    """Préempter sur une égalité ferait tourner la boucle sans jamais rien poser."""
+    engine = campaign(
+        frise([flat(2_500.0), flat(2_620.0), *[flat(2_620.0)] * 8]), book(), preempt=True
+    )
+    # Le re-centrage se re-déclencherait à chaque minute sur le même écart ;
+    # seule une priorité STRICTEMENT plus urgente a le droit de le déloger.
+    assert engine.journal.preempted == 0
