@@ -23,8 +23,10 @@ from backtest.ledger import (
     Book,
     Moment,
     accrue_debt,
+    exit_discount,
     funding_amount,
     health_factor,
+    market_price,
     oracle_price,
     prices,
     settle_funding,
@@ -48,12 +50,14 @@ def minute(
     eth: Candle | None = None,
     mark: Candle | None = None,
     borrow_apr: float = 0.05,
+    steth_market: float | None = 1.0,
 ) -> Minute:
     return Minute(
         ts_ms=1_688_169_600_000,
         eth=eth if eth is not None else candle(2_500.0, 2_520.0, 2_480.0, 2_510.0),
         mark=mark if mark is not None else candle(2_501.0, 2_530.0, 2_470.0, 2_512.0),
         ratio=ratio,
+        steth_market=steth_market,
         borrow_index=10**27,
         borrow_factor=1.0,
         borrow_apr=borrow_apr,
@@ -246,3 +250,31 @@ def test_le_backtest_ne_simule_ni_coupure_ni_panne_rpc() -> None:
     vue = observed(book(), minute())
     assert vue.rpc_ok
     assert vue.ws_last_tick_age_s == 0.0
+
+
+# --- le prix de sortie, celui que l'oracle ignore -------------------------------
+
+
+def test_le_prix_de_sortie_a_un_etage_de_plus_que_l_oracle() -> None:
+    """Le decrochage ne liquide pas : il se paie a la vente, et seulement la."""
+    eth, lido = 1_200.0, 1.13
+    assert oracle_price(eth, lido) == pytest.approx(1_356.0)
+    # Le plus bas Chainlink du 2022-06-18 : 0,93502.
+    assert market_price(eth, lido, 0.93502) == pytest.approx(1_356.0 * 0.93502)
+
+
+def test_a_la_parite_la_sortie_vaut_l_oracle() -> None:
+    assert market_price(2_000.0, 1.25, 1.0) == pytest.approx(oracle_price(2_000.0, 1.25))
+    assert exit_discount(1.0) == 0.0
+
+
+def test_une_prime_ne_se_compte_pas_comme_une_decote() -> None:
+    """Le stETH s'est deja paye au-dessus de l'ETH ; en faire un gain de sortie
+    serait un cadeau que le montage n'encaisse pas."""
+    assert exit_discount(1.02) == 0.0
+
+
+def test_sans_flux_de_marche_la_sortie_refuse_de_se_pricer() -> None:
+    """Poser 1,0 avant le 2021-08-25 affirmerait une parite que personne n'a vue."""
+    with pytest.raises(ValueError, match="2021-08-25"):
+        market_price(2_000.0, 1.25, None)

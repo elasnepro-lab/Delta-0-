@@ -45,7 +45,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Generic, TypeVar
 
-from backtest import aave_rates, hl_funding, lido
+from backtest import aave_rates, hl_funding, lido, steth
 from backtest.binance import MINUTE_MS, SERIES, Candle, Funding, Series, month_bounds_ms, months
 from backtest.cache import CacheMissError, Month
 from backtest.cache import read_month as read_candles
@@ -184,6 +184,7 @@ class Minute:
     eth: Candle  # spot Binance — le proxy de l'ETH/USD que l'oracle Aave applique
     mark: Candle  # mark futures Binance — le proxy du mark Hyperliquid
     ratio: float  # ETH par wstETH (`stEthPerToken`), relevé du jour
+    steth_market: float | None  # stETH/ETH au marché — None avant que le flux existe
     borrow_index: int  # `variableBorrowIndex` en ray, dernier relevé
     borrow_factor: float  # croissance de la dette depuis la minute précédente
     borrow_apr: float  # l'APR AFFICHÉ au dernier relevé — pour la porte de régime, pas pour le coût
@@ -254,6 +255,20 @@ class Cursor(Generic[T]):
         if self._series[self._at][0] > ts_ms:
             raise TimelineError(f"curseur {self._what} ramené en arrière jusqu'à {ts_ms}")
         return self._series[self._at][1]
+
+    def at_or_none(self, ts_ms: int) -> T | None:
+        """Comme `at`, mais rend None avant le premier relevé au lieu de refuser.
+
+        Réservé aux séries qui n'existaient PAS encore : le flux stETH/ETH ne
+        publie qu'à partir du 2021-08-25, et poser 1,0 avant reviendrait à
+        affirmer une parité que personne n'a observée.
+        """
+        try:
+            return self.at(ts_ms)
+        except TimelineError:
+            if self._at < 0:
+                return None
+            raise
 
 
 def lido_series(points: Sequence[lido.Point]) -> list[tuple[int, float]]:
@@ -344,8 +359,11 @@ class Timeline:
             )
         self._index = None
         self._reserve = None
+        # Le flux stETH/ETH ne commence qu'au 2021-08-25 : un cache vide n'est
+        # pas un refus, c'est une periode ou le prix de sortie ne se connait pas.
+        market = [(round_.ts * 1000, round_.ratio) for round_ in steth.all_rounds(self.root)]
         for year, month in months(start, end):
-            yield from self._month(year, month, points)
+            yield from self._month(year, month, points, market)
 
     def _factor(self, index: int, reserve: str, ts_ms: int) -> float:
         """La croissance de la dette depuis la minute précédente.
@@ -365,7 +383,13 @@ class Timeline:
         self._reserve = reserve
         return factor
 
-    def _month(self, year: int, month: int, points: Sequence[lido.Point]) -> Iterator[Minute]:
+    def _month(
+        self,
+        year: int,
+        month: int,
+        points: Sequence[lido.Point],
+        market: Sequence[tuple[int, float]],
+    ) -> Iterator[Minute]:
         """Un mois : bougies jointes, séries lentes résolues, versements posés."""
         archives = self.root / ARCHIVES
         try:
@@ -382,6 +406,7 @@ class Timeline:
 
         first, stop = month_bounds_ms(year, month)
         ratios: Cursor[float] = Cursor(lido_series(points), "Lido")
+        sold: Cursor[float] = Cursor(market, "stETH/ETH de marché")
 
         # Un mois peut être à cheval sur deux marchés : l'USDC natif arrive le
         # 2023-06-28, en plein mois de juin. Prendre la réserve du 1er du mois
@@ -414,6 +439,7 @@ class Timeline:
                     eth=here,
                     mark=there,
                     ratio=ratios.at(ts_ms),
+                    steth_market=sold.at_or_none(ts_ms),
                     borrow_index=index,
                     borrow_factor=self._factor(index, reserve.name, ts_ms),
                     borrow_apr=reading.variable_borrow_apr,

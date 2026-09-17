@@ -174,6 +174,36 @@ def oracle_price(eth_price: float, ratio: float) -> float:
     return eth_price * ratio
 
 
+def market_price(eth_price: float, ratio: float, steth_market: float | None) -> float:
+    """Ce qu'un vendeur de wstETH encaisse vraiment. Trois étages, pas deux.
+
+        wstETH -> stETH   au taux de conversion Lido, exact et rachetable
+        stETH  -> ETH     au prix du MARCHÉ, 0,935 au plus bas du 2022-06-18
+        ETH    -> USD     au comptant
+
+    Aave suppose la parité stETH/ETH et saute donc le deuxième étage : c'est
+    exactement pourquoi un décrochage ne liquide pas. Il coûte à la VENTE, et
+    c'est ici qu'il se paie — un désendettement d'urgence en juin 2022 aurait
+    vendu 6,5 % moins cher que ce que le facteur de santé laissait croire.
+
+    Avant le 2021-08-25 le flux ne publie pas, et rien ne se vend : poser 1,0
+    reviendrait à affirmer une parité que personne n'a observée.
+    """
+    if steth_market is None:
+        raise ValueError(
+            "aucun prix de marché stETH/ETH à cet instant — le flux Chainlink "
+            "commence le 2021-08-25 ; une sortie ne se price pas sans lui"
+        )
+    return eth_price * ratio * steth_market
+
+
+def exit_discount(steth_market: float | None) -> float:
+    """Ce que la sortie perd face à l'oracle, en proportion. Zéro à la parité."""
+    if steth_market is None:
+        return 0.0
+    return max(0.0, 1.0 - steth_market)
+
+
 def snapshot(
     book: Book,
     minute: Minute,

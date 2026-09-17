@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from backtest import aave_rates, hl_funding, lido
+from backtest import aave_rates, hl_funding, lido, steth
 from backtest.binance import MINUTE_MS, SERIES, month_bounds_ms
 from backtest.cache import store
 from backtest.timeline import (
@@ -444,3 +444,25 @@ def test_le_raccord_de_reserve_ne_divise_pas_deux_index_etrangers(tmp_path: Path
     assert minutes[1].borrow_factor == 1.0
     assert timeline.gaps.reserve_splices == [minutes[1].ts_ms]
     assert "1 raccord(s) de réserve" in timeline.gaps.describe()
+
+
+# --- le prix de marché du stETH, celui de la sortie ----------------------------
+
+
+def test_sans_flux_publie_le_prix_de_sortie_reste_inconnu(tmp_path: Path) -> None:
+    """Poser 1,0 avant le 2021-08-25 affirmerait une parité que personne n'a observée."""
+    build_cache(tmp_path)
+    minutes, _ = walked(tmp_path)
+    assert all(minute.steth_market is None for minute in minutes)
+
+
+def test_le_dernier_round_publie_voyage_avec_la_minute(tmp_path: Path) -> None:
+    build_cache(tmp_path)
+    veille = ms("2023-06-30") // 1000
+    steth.save_rounds(
+        tmp_path,
+        1,
+        [steth.Round(phase=1, number=7, ts=veille, raw=998_500_000_000_000_000)],
+    )
+    minutes, _ = walked(tmp_path)
+    assert all(minute.steth_market == pytest.approx(0.9985) for minute in minutes)
