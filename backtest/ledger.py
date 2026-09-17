@@ -38,7 +38,9 @@ from enum import StrEnum
 from backtest.binance import Candle
 from backtest.costs import BPS, Charge, Costs, charge
 from backtest.timeline import FundingEvent, Minute
-from delta0.types import Action, ActionKind, Snapshot
+from delta0.config import Config
+from delta0.decision import target_state
+from delta0.types import Action, ActionKind, Snapshot, equity_usd
 
 # Les paramètres Aave d'AUJOURD'HUI, appliqués au passé faute de mieux. Lus
 # on-chain le 2026-09-08 (memory/aave_findings.md §9), rejouables par
@@ -256,14 +258,31 @@ def snapshot(
 
 # --- Ce qu'une action fait au bilan, et ce qu'elle paie pour le faire -----------
 
-# Les actions qui re-dimensionnent tout le montage. Elles passent par le solveur
-# de cible, enchaînent quatre jambes et méritent leur propre travail : tant
-# qu'elles ne sont pas écrites, elles REFUSENT. Les laisser tomber dans un
-# `pass` ferait un backtest où le re-centrage est gratuit et instantané — soit
-# la moitié des coûts du montage effacée en silence.
-REBALANCING: frozenset[str] = frozenset(
+# Les actions qui REPLACENT le bilan entier, par opposition à celles qui
+# l'ajustent. Elles passent toutes par le solveur de cible et par le même effet :
+# le bot les distingue par ce qui les déclenche, pas par ce qu'elles font. Le
+# rapport, lui, veut pouvoir les compter à part, parce que ce sont elles qui
+# paient un échange, un pont et un ordre à chaque fois.
+REBALANCING: frozenset[ActionKind] = frozenset(
     {"RECENTER_UP", "RECENTER_DOWN", "SKIM_RECOMPOSE", "REGIME_STEP"}
 )
+
+
+@dataclass(frozen=True, slots=True)
+class World:
+    """Ce qu'un effet a besoin de savoir du monde, en un seul paramètre.
+
+    Les deux prix sont lus UNE fois, au moment demandé, et voyagent ensemble :
+    un effet qui relirait la bougie pourrait la relire à un autre moment, et
+    deux moments dans la même action feraient un monde qui n'a pas existé.
+    """
+
+    minute: Minute
+    moment: Moment
+    eth: float
+    mark: float
+    costs: Costs
+    config: Config
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,9 +332,7 @@ def _resize_short(book: Book, target_eth: float, mark: float) -> float:
     return traded * mark
 
 
-def _add_margin(
-    book: Book, action: Action, minute: Minute, eth: float, mark: float, costs: Costs
-) -> Applied:
+def _add_margin(book: Book, action: Action, world: World) -> Applied:
     """P2, la seule défense rapide du flanc haut : un appel local, gratuit."""
     asked = float(action.params["add_margin_amount_usdc"])
     amount = min(asked, book.hl_free_usdc)
@@ -329,15 +346,13 @@ def _add_margin(
     )
 
 
-def _repay_cushion(
-    book: Book, action: Action, minute: Minute, eth: float, mark: float, costs: Costs
-) -> Applied:
+def _repay_cushion(book: Book, action: Action, world: World) -> Applied:
     asked = float(action.params["repay_amount_usdc"])
     amount = min(asked, book.cushion_usd, book.debt_usd)
     book.debt_usd -= amount
     book.cushion_usd -= amount
-    spent = charge("REPAY_FROM_CUSHION", costs, eth_price=eth)
-    _burn_gas(book, spent, eth)
+    spent = charge("REPAY_FROM_CUSHION", world.costs, eth_price=world.eth)
+    _burn_gas(book, spent, world.eth)
     return Applied(
         kind="REPAY_FROM_CUSHION",
         charge=spent,
@@ -346,31 +361,27 @@ def _repay_cushion(
     )
 
 
-def _pump_up(
-    book: Book, action: Action, minute: Minute, eth: float, mark: float, costs: Costs
-) -> Applied:
+def _pump_up(book: Book, action: Action, world: World) -> Applied:
     """Emprunter, ponter, ajouter en marge.
 
     Ce qui arrive est ce qui reste après le pont : le facturer au départ ferait
     croire qu'on a ajouté plus de marge qu'il n'en est arrivé.
     """
     amount = max(0.0, float(action.params["add_margin_amount_usdc"]))
-    spent = charge("PUMP_UP", costs, eth_price=eth, bridged_usd=amount)
+    spent = charge("PUMP_UP", world.costs, eth_price=world.eth, bridged_usd=amount)
     book.debt_usd += amount
     book.margin_usd += max(0.0, amount - spent.bridge_usd)
-    _burn_gas(book, spent, eth)
+    _burn_gas(book, spent, world.eth)
     return Applied(kind="PUMP_UP", charge=spent, moved_usd=amount)
 
 
-def _pump_down(
-    book: Book, action: Action, minute: Minute, eth: float, mark: float, costs: Costs
-) -> Applied:
+def _pump_down(book: Book, action: Action, world: World) -> Applied:
     asked = float(action.params["repay_amount_usdc"])
     amount = min(asked, book.margin_usd)
-    spent = charge("PUMP_DOWN", costs, eth_price=eth, bridged_usd=amount)
+    spent = charge("PUMP_DOWN", world.costs, eth_price=world.eth, bridged_usd=amount)
     book.margin_usd -= amount
     book.debt_usd -= min(book.debt_usd, max(0.0, amount - spent.bridge_usd))
-    _burn_gas(book, spent, eth)
+    _burn_gas(book, spent, world.eth)
     return Applied(
         kind="PUMP_DOWN",
         charge=spent,
@@ -379,27 +390,21 @@ def _pump_down(
     )
 
 
-def _retrue(
-    book: Book, action: Action, minute: Minute, eth: float, mark: float, costs: Costs
-) -> Applied:
+def _retrue(book: Book, action: Action, world: World) -> Applied:
     """Re-dimensionner le short. P1 traverse le carnet, le re-truage poste (README §9.1)."""
     maker = action.kind == "RETRUE_SHORT"
-    traded = _resize_short(book, float(action.params["target_short_size_eth"]), mark)
-    spent = charge(action.kind, costs, eth_price=eth, order_usd=traded, maker=maker)
+    traded = _resize_short(book, float(action.params["target_short_size_eth"]), world.mark)
+    spent = charge(action.kind, world.costs, eth_price=world.eth, order_usd=traded, maker=maker)
     book.margin_usd -= spent.fee_usd
-    _burn_gas(book, spent, eth)
+    _burn_gas(book, spent, world.eth)
     return Applied(kind=action.kind, charge=spent, moved_usd=traded)
 
 
-def _nothing(
-    book: Book, action: Action, minute: Minute, eth: float, mark: float, costs: Costs
-) -> Applied:
+def _nothing(book: Book, action: Action, world: World) -> Applied:
     return Applied(kind=action.kind, charge=Charge())
 
 
-def _reduce(
-    book: Book, action: Action, minute: Minute, eth: float, mark: float, costs: Costs
-) -> Applied:
+def _reduce(book: Book, action: Action, world: World) -> Applied:
     """P2 de repli : fermer une part du short quand la réserve est vide.
 
     Limitation de dégâts, pas sauvetage : la place rend la marge au prorata de
@@ -410,15 +415,15 @@ def _reduce(
     fraction = min(1.0, max(0.0, float(action.params["close_fraction"])))
     closed_eth = book.short_eth * fraction
     posted = book.margin_usd * fraction
-    realized = closed_eth * (book.short_entry_px - mark)
-    traded = _resize_short(book, book.short_eth - closed_eth, mark)
+    realized = closed_eth * (book.short_entry_px - world.mark)
+    traded = _resize_short(book, book.short_eth - closed_eth, world.mark)
     # `_resize_short` a déjà porté le résultat réalisé à la marge ; ici on ne
     # libère que la marge POSTÉE, celle que la place rend au prorata.
     book.margin_usd -= posted
     book.hl_free_usdc += posted
-    spent = charge("REDUCE", costs, eth_price=eth, order_usd=traded, maker=False)
+    spent = charge("REDUCE", world.costs, eth_price=world.eth, order_usd=traded, maker=False)
     book.margin_usd -= spent.fee_usd
-    _burn_gas(book, spent, eth)
+    _burn_gas(book, spent, world.eth)
     return Applied(
         kind="REDUCE",
         charge=spent,
@@ -427,9 +432,7 @@ def _reduce(
     )
 
 
-def _deleverage(
-    book: Book, action: Action, minute: Minute, eth: float, mark: float, costs: Costs
-) -> Applied:
+def _deleverage(book: Book, action: Action, world: World) -> Applied:
     """P4 : vendre du collatéral pour rembourser, jusqu'à la cible.
 
     Deux prix cohabitent ici, et c'est tout l'intérêt de cette branche. L'excédent
@@ -438,27 +441,27 @@ def _deleverage(
     la décote du stETH s'il y en a une. En juin 2022 il aurait donc fallu vendre
     nettement plus de collatéral que le facteur de santé ne le laissait attendre.
     """
-    oracle = oracle_price(eth, minute.ratio)
+    oracle = oracle_price(world.eth, world.minute.ratio)
     target_ltv = float(action.params["target_ltv_after"])
     collateral = book.wsteth * oracle + book.cushion_usd
     excess = book.debt_usd - target_ltv * collateral
     if excess <= 0.0 or book.wsteth <= 0.0:
         return Applied(kind="STEPWISE_DELEVERAGE", charge=Charge(), note="rien à vendre")
 
-    sale = market_price(eth, minute.ratio, minute.steth_market)
-    kept = 1.0 - (costs.swap_fee.value + costs.swap_slippage.value) * BPS
+    sale = market_price(world.eth, world.minute.ratio, world.minute.steth_market)
+    kept = 1.0 - (world.costs.swap_fee.value + world.costs.swap_slippage.value) * BPS
     if kept <= 0.0:
         raise ValueError("frais d'échange au-delà de 100 % : barème incohérent")
     wanted = excess / (sale * kept)
     sold = min(wanted, book.wsteth)
     gross = sold * sale
 
-    spent = charge("STEPWISE_DELEVERAGE", costs, eth_price=eth, swapped_usd=gross)
+    spent = charge("STEPWISE_DELEVERAGE", world.costs, eth_price=world.eth, swapped_usd=gross)
     proceeds = max(0.0, gross - spent.fee_usd - spent.slippage_usd)
     exhausted = sold >= book.wsteth
     book.wsteth -= sold
     book.debt_usd -= min(book.debt_usd, proceeds)
-    _burn_gas(book, spent, eth)
+    _burn_gas(book, spent, world.eth)
     return Applied(
         kind="STEPWISE_DELEVERAGE",
         charge=spent,
@@ -467,7 +470,156 @@ def _deleverage(
     )
 
 
-Effect = Callable[[Book, Action, Minute, float, float, Costs], Applied]
+def _rebalance(book: Book, action: Action, world: World) -> Applied:
+    """Re-dimensionner tout le montage sur la cible du solveur du bot.
+
+    Les quatre actions qui passent ici — les deux re-centrages, l'écrémage et le
+    pas de régime — font la même chose : elles ramènent le bilan au point fixe
+    que `target_state` calcule pour l'équité du moment. Le bot les distingue par
+    ce qui les DÉCLENCHE, pas par ce qu'elles font, et les écrire quatre fois
+    ferait quatre occasions de diverger.
+
+    Trois choix comptent ici, et aucun n'est neutre :
+
+    **La cible se résout sur l'équité APRÈS coûts.** Un re-centrage qui viserait
+    l'équité d'avant se retrouverait, une fois les frais payés, au-dessus de sa
+    propre cible de LTV — et il recommencerait. On estime donc le coût sur les
+    montants d'une première passe, on le retire de l'équité, puis on résout pour
+    de bon. L'écart entre les deux passes est de l'ordre du coût lui-même
+    (quelques dizaines de points de base des montants déplacés), et une
+    troisième passe le diviserait encore par cent : elle ne vaut pas sa
+    complexité, mais le principe — viser ce qu'on aura, pas ce qu'on a — n'est
+    pas une approximation, c'est la correction d'un biais.
+
+    **Le collatéral s'achète et se vend au prix du MARCHÉ, la cible s'exprime au
+    prix ORACLE.** Le bot dimensionne sur ce qu'il observe, c'est-à-dire sur
+    l'oracle ; le carnet, lui, sert au prix du marché. En période de décrochage
+    les deux diffèrent, et c'est exactement le moment où un re-centrage descendant
+    doit vendre.
+
+    **Le short vise l'équivalent ETH du collatéral, pas le notionnel en dollars.**
+    La neutralité est une égalité de quantités d'ETH (README §5) ; diviser un
+    notionnel en dollars par le mark ré-introduirait le mélange de deux prix que
+    la base ETH existe pour éviter.
+    """
+    equity = _equity(book, world)
+    try:
+        first = _legs(book, world, equity)
+        estimate = _rebalance_charge(world, first)
+        target = _legs(book, world, equity - estimate.total_usd)
+    except ValueError as refus:
+        # Le solveur refuse une équité qui ne laisse rien à déployer. Un montage
+        # réduit à son coussin ne se recentre pas : il se constate.
+        return Applied(kind=action.kind, charge=Charge(), note=f"cible insoluble : {refus}")
+    spent = _rebalance_charge(world, target)
+    _settle(book, world, target, spent)
+    return Applied(
+        kind=action.kind,
+        charge=spent,
+        moved_usd=target.swapped_usd + target.bridged_usd,
+        note=f"spot {target.spot_usd:,.0f} $, short {target.short_eth:.3f} ETH",
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class Legs:
+    """L'état visé, et ce qu'il faut déplacer pour l'atteindre."""
+
+    wsteth: float
+    spot_usd: float
+    debt_usd: float
+    short_eth: float
+    margin_usd: float
+    reserve_usd: float
+    swapped_usd: float
+    bridged_usd: float
+    order_usd: float
+
+
+def _equity(book: Book, world: World) -> float:
+    """L'équité, par la formule du bot et pas une seconde.
+
+    `equity_usd` de `delta0.types` est la même que celle dont le solveur se sert ;
+    en réécrire une ici rouvrirait exactement l'écart que le panneau `status`
+    avait affiché en annonçant 0,00 $ avec 169,80 $ en caisse.
+    """
+    oracle = oracle_price(world.eth, world.minute.ratio)
+    return equity_usd(
+        collateral_usd=book.wsteth * oracle + book.cushion_usd,
+        isolated_margin_usd=book.effective_margin(world.mark),
+        wallet_usdc=book.wallet_usdc,
+        hl_free_usdc=book.hl_free_usdc,
+        debt_usd=book.debt_usd,
+    )
+
+
+def _legs(book: Book, world: World, equity: float) -> Legs:
+    """Le point fixe du solveur pour cette équité, et les montants à déplacer."""
+    oracle = oracle_price(world.eth, world.minute.ratio)
+    target = target_state(equity, world.config, cushion_usd=book.cushion_usd)
+
+    wsteth = target.spot_target_usd / oracle
+    short_eth = wsteth * world.minute.ratio  # neutralité en ETH, pas en dollars
+    traded_wsteth = abs(wsteth - book.wsteth)
+    # Le prix de vente n'est demandé que s'il y a quelque chose à échanger :
+    # avant le 2021-08-25 il n'existe pas, et un re-centrage qui ne touche pas
+    # au collatéral n'a pas à en dépendre.
+    sale = (
+        market_price(world.eth, world.minute.ratio, world.minute.steth_market)
+        if traded_wsteth > 0.0
+        else 0.0
+    )
+    return Legs(
+        wsteth=wsteth,
+        spot_usd=target.spot_target_usd,
+        debt_usd=target.debt_target_usd,
+        short_eth=short_eth,
+        margin_usd=target.margin_target_usd,
+        reserve_usd=target.reserve_target_usd,
+        swapped_usd=traded_wsteth * sale,
+        bridged_usd=abs(
+            (target.margin_target_usd + target.reserve_target_usd)
+            - (book.margin_usd + book.hl_free_usdc)
+        ),
+        order_usd=abs(short_eth - book.short_eth) * world.mark,
+    )
+
+
+def _rebalance_charge(world: World, legs: Legs) -> Charge:
+    """Ce que ces jambes coûtent. Le re-centrage est planifié, donc il poste."""
+    return charge(
+        "RECENTER_UP",
+        world.costs,
+        eth_price=world.eth,
+        swapped_usd=legs.swapped_usd,
+        bridged_usd=legs.bridged_usd,
+        order_usd=legs.order_usd,
+        maker=True,
+    )
+
+
+def _settle(book: Book, world: World, legs: Legs, spent: Charge) -> None:
+    """Poser l'état visé sur le bilan.
+
+    Les postes s'écrivent, parce que c'est ce qu'un re-centrage FAIT : il replace
+    le bilan, il ne l'ajuste pas.
+
+    Le prix d'entrée du short repart au mark du moment, et ce n'est pas un
+    détail : le résultat latent de l'ancienne position a déjà été compté dans
+    l'équité, donc dans la cible. Le laisser courir sur la position le compterait
+    une seconde fois, et un montage qui se recentre souvent accumulerait un gain
+    imaginaire proportionnel au nombre de re-centrages.
+    """
+    book.short_eth = legs.short_eth
+    book.short_entry_px = world.mark
+    book.wsteth = legs.wsteth
+    book.debt_usd = legs.debt_usd
+    book.margin_usd = legs.margin_usd
+    book.hl_free_usdc = legs.reserve_usd
+    _burn_gas(book, spent, world.eth)
+
+
+Effect = Callable[[Book, Action, World], Applied]
 
 # Chaque action du moteur a un effet nommé sur le bilan. Une action absente de
 # cette table refuse : ne rien faire en silence est la seule issue interdite.
@@ -481,6 +633,12 @@ EFFECTS: dict[ActionKind, Effect] = {
     "PUMP_DOWN": _pump_down,
     "RETRUE_SHORT": _retrue,
     "LIQUIDATION_RESPONSE": _retrue,
+    # Les quatre qui replacent tout le montage. Le bot les distingue par ce qui
+    # les DÉCLENCHE, pas par ce qu'elles font.
+    "RECENTER_UP": _rebalance,
+    "RECENTER_DOWN": _rebalance,
+    "SKIM_RECOMPOSE": _rebalance,
+    "REGIME_STEP": _rebalance,
 }
 
 
@@ -490,6 +648,7 @@ def apply(
     minute: Minute,
     moment: Moment,
     costs: Costs,
+    config: Config,
 ) -> Applied:
     """Poser une action sur le bilan, coûts compris, bornée par ce qui est là.
 
@@ -498,13 +657,8 @@ def apply(
     total et qui rend un backtest optimiste exactement là où il ne faut pas :
     sur les chemins d'urgence, qui sont ceux qui manquent de tout.
     """
-    if action.kind in REBALANCING:
-        raise NotImplementedError(
-            f"{action.kind} re-dimensionne tout le montage et n'est pas encore écrit "
-            "— un re-centrage gratuit effacerait la moitié des coûts du montage"
-        )
     effect = EFFECTS.get(action.kind)
     if effect is None:
         raise KeyError(f"action sans effet connu sur le bilan : {action.kind}")
     eth, mark = prices(minute, moment)
-    return effect(book, action, minute, eth, mark, costs)
+    return effect(book, action, World(minute, moment, eth, mark, costs, config))

@@ -15,6 +15,7 @@ inversé si elle tombe :
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import get_args
 
 import pytest
@@ -40,6 +41,8 @@ from backtest.ledger import (
     snapshot,
 )
 from backtest.timeline import FundingEvent, Minute, Segment
+from delta0.config import load_config
+from delta0.decision import target_state
 from delta0.types import Action, ActionKind, Priority, Snapshot
 
 RATIO = 1.25
@@ -303,8 +306,12 @@ def flat_minute(**changed: object) -> Minute:
     return minute(eth=FLAT, mark=FLAT, **changed)  # type: ignore[arg-type]
 
 
+CONFIG = load_config(Path(__file__).resolve().parents[2] / "config.yaml")
+
+
 def act(livre: Book, action: Action, une: Minute | None = None) -> Applied:
-    return apply(action, livre, une if une is not None else flat_minute(), Moment.CLOSE, DEFAULT)
+    monde = une if une is not None else flat_minute()
+    return apply(action, livre, monde, Moment.CLOSE, DEFAULT, CONFIG)
 
 
 def test_l_ajout_de_marge_puise_dans_la_reserve_et_ne_coute_rien() -> None:
@@ -445,16 +452,70 @@ def test_le_collateral_epuise_se_dit() -> None:
     assert fait.note == "collatéral épuisé"
 
 
-# --- ce qui n'est pas encore écrit ---------------------------------------------
+# --- le re-centrage, qui replace tout le bilan ---------------------------------
 
 
 @pytest.mark.parametrize("kind", ["RECENTER_UP", "RECENTER_DOWN", "SKIM_RECOMPOSE", "REGIME_STEP"])
-def test_le_recentrage_refuse_plutot_que_de_ne_rien_faire(kind: ActionKind) -> None:
-    """Un re-centrage gratuit effacerait la moitié des coûts du montage."""
-    with pytest.raises(NotImplementedError, match="re-dimensionne"):
-        act(book(), acted(kind, price_move=0.05))
+def test_les_quatre_re_dimensionnements_visent_le_meme_point_fixe(kind: ActionKind) -> None:
+    """Le bot les distingue par ce qui les DÉCLENCHE, pas par ce qu'elles font."""
+    livres = [book(), book()]
+    act(livres[0], acted(kind, price_move=0.05))
+    act(livres[1], acted("RECENTER_UP", price_move=0.05))
+    assert livres[0] == livres[1]
 
 
-def test_toute_action_du_moteur_a_un_effet_ou_un_refus() -> None:
+def test_le_recentrage_ramene_le_bilan_sur_la_cible_du_solveur() -> None:
+    """Après coup, le LTV du montage est celui de la config — pas celui d'avant."""
+    livre = book()
+    fait = act(livre, acted("RECENTER_UP", price_move=0.05))
+    oracle = oracle_price(MARK, RATIO)
+    assert livre.debt_usd / (livre.wsteth * oracle) == pytest.approx(CONFIG.target_ltv)
+    assert fait.charge.total_usd > 0.0
+
+
+def test_le_recentrage_laisse_le_delta_nul() -> None:
+    """La neutralité est une égalité de quantités d'ETH, pas de dollars."""
+    livre = book()
+    act(livre, acted("RECENTER_UP", price_move=0.05))
+    assert livre.short_eth == pytest.approx(livre.wsteth * RATIO)
+
+
+def test_le_recentrage_vise_l_equite_apres_couts() -> None:
+    """Viser l'équité d'avant laisserait le montage au-dessus de sa cible, et il recommencerait."""
+    livre = book()
+    fait = act(livre, acted("RECENTER_UP", price_move=0.05))
+    oracle = oracle_price(MARK, RATIO)
+    equite = (
+        livre.wsteth * oracle
+        + livre.cushion_usd
+        + livre.margin_usd
+        + livre.hl_free_usdc
+        + livre.wallet_usdc
+        - livre.debt_usd
+    )
+    vise = target_state(equite, CONFIG, cushion_usd=livre.cushion_usd)
+    assert livre.wsteth * oracle == pytest.approx(vise.spot_target_usd, rel=1e-6)
+    assert fait.charge.total_usd > 0.0
+
+
+def test_le_recentrage_rebase_le_prix_d_entree_du_short() -> None:
+    """Le résultat latent est déjà compté dans l'équité ; le laisser courir
+    sur la position le compterait une seconde fois."""
+    plus_haut = candle(2_600.0, 2_600.0, 2_600.0, 2_600.0)
+    livre = book()
+    act(livre, acted("RECENTER_UP", price_move=0.05), minute(eth=plus_haut, mark=plus_haut))
+    assert livre.short_entry_px == pytest.approx(2_600.0)
+    assert livre.unrealized_pnl(2_600.0) == pytest.approx(0.0)
+
+
+def test_un_montage_reduit_a_son_coussin_ne_se_recentre_pas() -> None:
+    livre = book(wsteth=0.0, debt_usd=0.0, margin_usd=0.0, hl_free_usdc=0.0, short_eth=0.0)
+    fait = act(livre, acted("RECENTER_UP", price_move=0.05))
+    assert "insoluble" in fait.note
+    assert fait.charge.total_usd == 0.0
+
+
+def test_toute_action_du_moteur_a_un_effet() -> None:
     """Ne rien faire en silence est la seule issue interdite."""
-    assert set(get_args(ActionKind)) == set(EFFECTS) | REBALANCING
+    assert set(get_args(ActionKind)) == set(EFFECTS)
+    assert set(EFFECTS) >= REBALANCING
