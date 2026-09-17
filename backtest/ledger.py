@@ -30,13 +30,15 @@ marqué comme tel plutôt que passé sous silence.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 
 from backtest.binance import Candle
+from backtest.costs import BPS, Charge, Costs, charge
 from backtest.timeline import FundingEvent, Minute
-from delta0.types import Snapshot
+from delta0.types import Action, ActionKind, Snapshot
 
 # Les paramètres Aave d'AUJOURD'HUI, appliqués au passé faute de mieux. Lus
 # on-chain le 2026-09-08 (memory/aave_findings.md §9), rejouables par
@@ -52,7 +54,6 @@ LTV_MAX_TODAY = 0.75
 # tombe jamais, le RPC répond toujours. Couper le lien est le travail du chaos
 # (README §15.4), pas celui du rejeu long.
 LIVE_FEED = 0.0
-GAS_STOCKED_ETH = 1.0
 
 
 class Moment(StrEnum):
@@ -89,6 +90,11 @@ class Book:
     margin_usd: float
     hl_free_usdc: float
     wallet_usdc: float
+    # La flotte de gaz, en ETH. Elle vit hors du montage (README §4) mais elle
+    # s'epuise : le run M1 a fini avec une flotte entamee et personne ne l'avait
+    # prevu. La tenir ici rend le garde-fou `gas_min_eth` du bot rejouable, et
+    # une campagne qui manque de gaz devient un resultat au lieu d'une surprise.
+    gas_eth: float
     lt: float
 
     def unrealized_pnl(self, mark: float) -> float:
@@ -242,7 +248,263 @@ def snapshot(
         funding_last_hour=funding_last_hour,
         funding_30d_annualized=funding_30d_annualized,
         borrow_apr=minute.borrow_apr,
-        gas_eth=GAS_STOCKED_ETH,
+        gas_eth=book.gas_eth,
         ws_last_tick_age_s=LIVE_FEED,
         rpc_ok=True,
     )
+
+
+# --- Ce qu'une action fait au bilan, et ce qu'elle paie pour le faire -----------
+
+# Les actions qui re-dimensionnent tout le montage. Elles passent par le solveur
+# de cible, enchaînent quatre jambes et méritent leur propre travail : tant
+# qu'elles ne sont pas écrites, elles REFUSENT. Les laisser tomber dans un
+# `pass` ferait un backtest où le re-centrage est gratuit et instantané — soit
+# la moitié des coûts du montage effacée en silence.
+REBALANCING: frozenset[str] = frozenset(
+    {"RECENTER_UP", "RECENTER_DOWN", "SKIM_RECOMPOSE", "REGIME_STEP"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class Applied:
+    """Ce qu'une action a vraiment fait, et ce qu'elle a coûté.
+
+    `moved_usd` est ce qui a bougé pour de bon, pas ce qui était demandé : une
+    action bornée par un solde a fait moins, et `note` dit pourquoi. C'est ce
+    qui distingue « la défense a joué » de « la défense a essayé ».
+
+    Les frais, le glissement et le pont sont DÉJÀ retranchés des soldes ; ils
+    figurent dans `charge` pour le rapport, pas pour être soustraits une
+    seconde fois. Le gaz, lui, sort de la flotte en ETH.
+    """
+
+    kind: ActionKind
+    charge: Charge
+    moved_usd: float = 0.0
+    note: str = ""
+
+
+def _burn_gas(book: Book, spent: Charge, eth_price: float) -> None:
+    """Retirer le gaz de la flotte. Une flotte vide ne bloque pas : elle se voit."""
+    if spent.gas_usd > 0.0 and eth_price > 0.0:
+        book.gas_eth -= spent.gas_usd / eth_price
+
+
+def _resize_short(book: Book, target_eth: float, mark: float) -> float:
+    """Porter le short à `target_eth`. Rend le notionnel échangé.
+
+    Réduire réalise le résultat de la SEULE part fermée et laisse le prix
+    d'entrée du reste intact ; agrandir moyenne l'entrée. Réaliser tout le
+    résultat à chaque re-dimensionnement — ce que fait le harnais 1.6 pour
+    rester lisible — ferait apparaître des gains que la place n'a pas versés.
+    """
+    target = max(0.0, target_eth)
+    traded = abs(target - book.short_eth)
+    if traded == 0.0:
+        return 0.0
+    if target < book.short_eth:
+        closed = book.short_eth - target
+        book.margin_usd += closed * (book.short_entry_px - mark)
+    else:
+        added = target - book.short_eth
+        book.short_entry_px = (book.short_eth * book.short_entry_px + added * mark) / target
+    book.short_eth = target
+    return traded * mark
+
+
+def _add_margin(
+    book: Book, action: Action, minute: Minute, eth: float, mark: float, costs: Costs
+) -> Applied:
+    """P2, la seule défense rapide du flanc haut : un appel local, gratuit."""
+    asked = float(action.params["add_margin_amount_usdc"])
+    amount = min(asked, book.hl_free_usdc)
+    book.margin_usd += amount
+    book.hl_free_usdc -= amount
+    return Applied(
+        kind="ADD_ISOLATED_MARGIN",
+        charge=Charge(),
+        moved_usd=amount,
+        note="" if amount >= asked else "réserve épuisée",
+    )
+
+
+def _repay_cushion(
+    book: Book, action: Action, minute: Minute, eth: float, mark: float, costs: Costs
+) -> Applied:
+    asked = float(action.params["repay_amount_usdc"])
+    amount = min(asked, book.cushion_usd, book.debt_usd)
+    book.debt_usd -= amount
+    book.cushion_usd -= amount
+    spent = charge("REPAY_FROM_CUSHION", costs, eth_price=eth)
+    _burn_gas(book, spent, eth)
+    return Applied(
+        kind="REPAY_FROM_CUSHION",
+        charge=spent,
+        moved_usd=amount,
+        note="" if amount >= asked else "coussin insuffisant",
+    )
+
+
+def _pump_up(
+    book: Book, action: Action, minute: Minute, eth: float, mark: float, costs: Costs
+) -> Applied:
+    """Emprunter, ponter, ajouter en marge.
+
+    Ce qui arrive est ce qui reste après le pont : le facturer au départ ferait
+    croire qu'on a ajouté plus de marge qu'il n'en est arrivé.
+    """
+    amount = max(0.0, float(action.params["add_margin_amount_usdc"]))
+    spent = charge("PUMP_UP", costs, eth_price=eth, bridged_usd=amount)
+    book.debt_usd += amount
+    book.margin_usd += max(0.0, amount - spent.bridge_usd)
+    _burn_gas(book, spent, eth)
+    return Applied(kind="PUMP_UP", charge=spent, moved_usd=amount)
+
+
+def _pump_down(
+    book: Book, action: Action, minute: Minute, eth: float, mark: float, costs: Costs
+) -> Applied:
+    asked = float(action.params["repay_amount_usdc"])
+    amount = min(asked, book.margin_usd)
+    spent = charge("PUMP_DOWN", costs, eth_price=eth, bridged_usd=amount)
+    book.margin_usd -= amount
+    book.debt_usd -= min(book.debt_usd, max(0.0, amount - spent.bridge_usd))
+    _burn_gas(book, spent, eth)
+    return Applied(
+        kind="PUMP_DOWN",
+        charge=spent,
+        moved_usd=amount,
+        note="" if amount >= asked else "marge insuffisante",
+    )
+
+
+def _retrue(
+    book: Book, action: Action, minute: Minute, eth: float, mark: float, costs: Costs
+) -> Applied:
+    """Re-dimensionner le short. P1 traverse le carnet, le re-truage poste (README §9.1)."""
+    maker = action.kind == "RETRUE_SHORT"
+    traded = _resize_short(book, float(action.params["target_short_size_eth"]), mark)
+    spent = charge(action.kind, costs, eth_price=eth, order_usd=traded, maker=maker)
+    book.margin_usd -= spent.fee_usd
+    _burn_gas(book, spent, eth)
+    return Applied(kind=action.kind, charge=spent, moved_usd=traded)
+
+
+def _nothing(
+    book: Book, action: Action, minute: Minute, eth: float, mark: float, costs: Costs
+) -> Applied:
+    return Applied(kind=action.kind, charge=Charge())
+
+
+def _reduce(
+    book: Book, action: Action, minute: Minute, eth: float, mark: float, costs: Costs
+) -> Applied:
+    """P2 de repli : fermer une part du short quand la réserve est vide.
+
+    Limitation de dégâts, pas sauvetage : la place rend la marge au prorata de
+    la taille fermée, donc le ratio marge/notionnel ne bouge pas et le prix de
+    liquidation non plus (mesuré le 2026-09-08, -0,012 %). Ce que cette branche
+    doit rendre exact, c'est ce que la fermeture RÉALISE.
+    """
+    fraction = min(1.0, max(0.0, float(action.params["close_fraction"])))
+    closed_eth = book.short_eth * fraction
+    posted = book.margin_usd * fraction
+    realized = closed_eth * (book.short_entry_px - mark)
+    traded = _resize_short(book, book.short_eth - closed_eth, mark)
+    # `_resize_short` a déjà porté le résultat réalisé à la marge ; ici on ne
+    # libère que la marge POSTÉE, celle que la place rend au prorata.
+    book.margin_usd -= posted
+    book.hl_free_usdc += posted
+    spent = charge("REDUCE", costs, eth_price=eth, order_usd=traded, maker=False)
+    book.margin_usd -= spent.fee_usd
+    _burn_gas(book, spent, eth)
+    return Applied(
+        kind="REDUCE",
+        charge=spent,
+        moved_usd=traded,
+        note=f"résultat réalisé {realized:+.0f} $",
+    )
+
+
+def _deleverage(
+    book: Book, action: Action, minute: Minute, eth: float, mark: float, costs: Costs
+) -> Applied:
+    """P4 : vendre du collatéral pour rembourser, jusqu'à la cible.
+
+    Deux prix cohabitent ici, et c'est tout l'intérêt de cette branche. L'excédent
+    à rembourser se mesure au prix ORACLE, parce que c'est la vue d'Aave qui
+    décide du LTV. Ce qu'on encaisse en vendant se mesure au prix du MARCHÉ, avec
+    la décote du stETH s'il y en a une. En juin 2022 il aurait donc fallu vendre
+    nettement plus de collatéral que le facteur de santé ne le laissait attendre.
+    """
+    oracle = oracle_price(eth, minute.ratio)
+    target_ltv = float(action.params["target_ltv_after"])
+    collateral = book.wsteth * oracle + book.cushion_usd
+    excess = book.debt_usd - target_ltv * collateral
+    if excess <= 0.0 or book.wsteth <= 0.0:
+        return Applied(kind="STEPWISE_DELEVERAGE", charge=Charge(), note="rien à vendre")
+
+    sale = market_price(eth, minute.ratio, minute.steth_market)
+    kept = 1.0 - (costs.swap_fee.value + costs.swap_slippage.value) * BPS
+    if kept <= 0.0:
+        raise ValueError("frais d'échange au-delà de 100 % : barème incohérent")
+    wanted = excess / (sale * kept)
+    sold = min(wanted, book.wsteth)
+    gross = sold * sale
+
+    spent = charge("STEPWISE_DELEVERAGE", costs, eth_price=eth, swapped_usd=gross)
+    proceeds = max(0.0, gross - spent.fee_usd - spent.slippage_usd)
+    exhausted = sold >= book.wsteth
+    book.wsteth -= sold
+    book.debt_usd -= min(book.debt_usd, proceeds)
+    _burn_gas(book, spent, eth)
+    return Applied(
+        kind="STEPWISE_DELEVERAGE",
+        charge=spent,
+        moved_usd=proceeds,
+        note="collatéral épuisé" if exhausted else "",
+    )
+
+
+Effect = Callable[[Book, Action, Minute, float, float, Costs], Applied]
+
+# Chaque action du moteur a un effet nommé sur le bilan. Une action absente de
+# cette table refuse : ne rien faire en silence est la seule issue interdite.
+EFFECTS: dict[ActionKind, Effect] = {
+    "NOOP": _nothing,
+    "ADD_ISOLATED_MARGIN": _add_margin,
+    "REDUCE": _reduce,
+    "REPAY_FROM_CUSHION": _repay_cushion,
+    "STEPWISE_DELEVERAGE": _deleverage,
+    "PUMP_UP": _pump_up,
+    "PUMP_DOWN": _pump_down,
+    "RETRUE_SHORT": _retrue,
+    "LIQUIDATION_RESPONSE": _retrue,
+}
+
+
+def apply(
+    action: Action,
+    book: Book,
+    minute: Minute,
+    moment: Moment,
+    costs: Costs,
+) -> Applied:
+    """Poser une action sur le bilan, coûts compris, bornée par ce qui est là.
+
+    Chaque effet borne son montant par le solde qui le porte. Une action qui
+    dépense plus qu'elle n'a est le genre d'erreur qui ne se voit jamais dans un
+    total et qui rend un backtest optimiste exactement là où il ne faut pas :
+    sur les chemins d'urgence, qui sont ceux qui manquent de tout.
+    """
+    if action.kind in REBALANCING:
+        raise NotImplementedError(
+            f"{action.kind} re-dimensionne tout le montage et n'est pas encore écrit "
+            "— un re-centrage gratuit effacerait la moitié des coûts du montage"
+        )
+    effect = EFFECTS.get(action.kind)
+    if effect is None:
+        raise KeyError(f"action sans effet connu sur le bilan : {action.kind}")
+    eth, mark = prices(minute, moment)
+    return effect(book, action, minute, eth, mark, costs)
