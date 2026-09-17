@@ -139,12 +139,25 @@ def request_page(client: httpx.Client, start_ms: int, end_ms: int) -> list[dict[
 
 
 def fetch_month_rows(client: httpx.Client, year: int, month: int) -> list[dict[str, Any]]:
-    """Un mois entier, page après page, dans l'ordre et sans doublon."""
+    """Un mois entier, page après page, dans l'ordre et sans doublon.
+
+    `endTime` est INCLUSIF chez Hyperliquid, alors que la borne d'un mois est
+    exclusive : demander `end` ramène le versement de 00:00:00.000 du mois
+    suivant. On demande donc la milliseconde d'avant.
+
+    Ce n'est pas une précaution théorique. Les horodatages dérivent de quelques
+    millisecondes, ce qui masque le défaut la plupart du temps ; juin 2025 est
+    tombé pile sur la seconde ronde et a rendu 721 lignes pour 720 heures. Le
+    mois se relisait alors en erreur — « funding HL 1751328000000 hors du mois
+    2025-06 » — et la campagne s'arrêtait. Un décalage d'une milliseconde qui,
+    sans le contrôle d'appartenance au mois, aurait simplement compté un
+    versement deux fois, dans deux mois voisins.
+    """
     start, end = month_bounds_ms(year, month)
     rows: list[dict[str, Any]] = []
     cursor = start
     while cursor < end:
-        page = request_page(client, cursor, end)
+        page = request_page(client, cursor, end - 1)
         if not page:
             break
         rows.extend(page)

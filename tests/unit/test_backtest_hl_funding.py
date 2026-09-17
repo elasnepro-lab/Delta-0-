@@ -65,7 +65,13 @@ class FakeHyperliquid:
         body = json.loads(request.content)
         self.calls.append(body)
         start, end = body["startTime"], body["endTime"]
-        window = [r for r in self.rows if start <= int(r["time"]) < end]
+        # `endTime` est INCLUSIF, comme chez la vraie place. Le faux serveur a
+        # longtemps été plus gentil qu'elle (borne exclusive), ce qui a laissé
+        # passer le versement de 00:00:00.000 du mois suivant : juin 2025 est
+        # tombé pile sur la seconde ronde et la campagne s'est arrêtée dessus.
+        # Un faux plus indulgent que la place cache précisément les défauts
+        # qu'il existe pour attraper.
+        window = [r for r in self.rows if start <= int(r["time"]) <= end]
         return httpx.Response(200, json=window[:500])
 
     def client(self) -> httpx.Client:
@@ -227,3 +233,20 @@ def test_a_missing_hour_is_still_a_hole() -> None:
         HlFunding(HOURLY_SINCE_MS + 2 * HOUR_MS, 0.00001, 0.0003),
     ]
     assert gaps(as_funding(kept)) == [(HOURLY_SINCE_MS, 1.0)]
+
+
+def test_le_versement_pile_sur_la_frontiere_reste_au_mois_suivant() -> None:
+    """`endTime` est inclusif : demander la borne du mois ramènerait le mois d'après.
+
+    Les horodatages dérivent de quelques millisecondes, ce qui masque le défaut
+    la plupart du temps. Juin 2025 est tombé pile sur 2025-07-01T00:00:00.000 :
+    721 lignes pour 720 heures, et un mois qui ne se relit plus.
+    """
+    juin, juillet = month_bounds_ms(2025, 6)
+    api = FakeHyperliquid([*hourly(juin, 720, step_ms=HOUR_MS), row(juillet)])
+    # Les 720 lignes horaires portent la dérive de 42 ms ; celle de juillet est ronde.
+    with api.client() as client:
+        rows = fetch_month_rows(client, 2025, 6)
+
+    assert len(rows) == 720
+    assert all(int(r["time"]) < juillet for r in rows)
