@@ -11,8 +11,12 @@ from delta0.config import Config
 from delta0.decision import (
     BlindState,
     OperationalContext,
+    Regime,
     cushion_tranche_size,
     decide,
+    exposure_mult_of,
+    regime_candidate,
+    regime_step,
     target_state,
 )
 from delta0.types import Priority, Snapshot
@@ -422,3 +426,92 @@ def _snap_with_ltv(base: Snapshot, ltv: float) -> Snapshot:
     debt = ltv * collateral
     hf = float("inf") if debt == 0 else base.aave_lt_wsteth * collateral / debt
     return replace(base, usdc_variable_debt_balance=debt, hf=hf)
+
+
+# --- La porte de régime : l'évaluateur, enfin écrit ----------------------------
+
+
+def test_exposure_mult_of_inverse_exactement_le_solveur(config: Config) -> None:
+    """Les deux expositions doivent se mesurer pareil, sinon P10 vise un point
+    qu'il ne peut jamais rapporter avoir atteint."""
+    cushion = config.capital_usd * config.cushion_pct
+    target = target_state(config.capital_usd, config, cushion_usd=cushion)
+    held = exposure_mult_of(target.spot_target_usd, config.capital_usd, cushion, config)
+    assert held == pytest.approx(config.exposure_mult)
+
+
+def test_exposure_mult_of_rend_zero_sur_un_bilan_a_plat(config: Config) -> None:
+    assert exposure_mult_of(0.0, 20_000.0, 1_000.0, config) == 0.0
+
+
+def test_target_state_sait_dimensionner_a_une_autre_exposition(config: Config) -> None:
+    """Sans ce paramètre, P10 émettait une exposition que rien ne savait poser."""
+    cushion = 1_000.0
+    plein = target_state(20_000.0, config, cushion_usd=cushion)
+    moitie = target_state(
+        20_000.0, config, cushion_usd=cushion, exposure_mult=config.exposure_mult_half
+    )
+    assert moitie.spot_target_usd < plein.spot_target_usd
+    assert moitie.debt_target_usd == pytest.approx(config.target_ltv * moitie.spot_target_usd)
+
+
+def test_une_exposition_nulle_donne_un_bilan_a_plat(config: Config) -> None:
+    """PARKED n'est pas un cas particulier : c'est la cible zéro, résolue comme les autres."""
+    plat = target_state(20_000.0, config, cushion_usd=1_000.0, exposure_mult=0.0)
+    assert plat.spot_target_usd == 0.0
+    assert plat.debt_target_usd == 0.0
+    assert plat.reserve_target_usd == 0.0
+
+
+def test_une_exposition_negative_est_refusee(config: Config) -> None:
+    with pytest.raises(ValueError, match="must not be negative"):
+        target_state(20_000.0, config, cushion_usd=1_000.0, exposure_mult=-1.0)
+
+
+@pytest.mark.parametrize(
+    ("spread", "attendu"),
+    [
+        (0.08, "plein"),  # 800 bps, au-dessus du seuil de 500
+        (0.05, "plein"),  # pile sur le seuil : la borne est incluse
+        (0.02, "moitie"),
+        (0.0, "moitie"),  # carry nul mais pas négatif
+        (-0.01, "zero"),
+    ],
+)
+def test_le_regime_lit_le_spread_par_bandes(config: Config, spread: float, attendu: str) -> None:
+    attendus = {
+        "plein": config.exposure_mult,
+        "moitie": config.exposure_mult_half,
+        "zero": 0.0,
+    }
+    assert regime_candidate(spread, config) == attendus[attendu]
+
+
+def test_la_porte_ne_bouge_pas_avant_la_confirmation(config: Config) -> None:
+    """Le funding traverse zéro sans arrêt ; une porte sans mémoire re-bâtirait
+    tout le montage sur un mauvais après-midi."""
+    state = Regime(target=config.exposure_mult, candidate=config.exposure_mult, days=30)
+    for jour in range(1, config.regime.hysteresis_days):
+        state = regime_step(state, -0.01, config)
+        assert state.target == config.exposure_mult, f"jour {jour} : trop tôt"
+        assert state.candidate == 0.0
+    state = regime_step(state, -0.01, config)
+    assert state.target == 0.0
+    assert state.parked
+
+
+def test_un_regime_qui_change_d_avis_repart_de_un(config: Config) -> None:
+    state = Regime(target=config.exposure_mult, candidate=config.exposure_mult, days=30)
+    for _ in range(config.regime.hysteresis_days - 1):
+        state = regime_step(state, -0.01, config)
+    state = regime_step(state, 0.08, config)  # le carry redevient large
+    assert state.days == 1
+    assert state.target == config.exposure_mult, "rien n'a jamais été confirmé"
+
+
+def test_un_regime_confirme_qui_dure_ne_re_declenche_rien(config: Config) -> None:
+    state = Regime(target=config.exposure_mult, candidate=config.exposure_mult, days=30)
+    for _ in range(20):
+        state = regime_step(state, 0.08, config)
+    assert state.target == config.exposure_mult
+    assert state.days == 50

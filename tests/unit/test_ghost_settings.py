@@ -31,11 +31,8 @@ SRC = Path(__file__).resolve().parents[2] / "src" / "delta0"
 
 # Declared and validated, deliberately not consumed yet.
 AWAITING_READER: dict[str, str] = {
-    "exposure_mult_half": "8.6 — porte de régime, exposition intermédiaire",
     "maintenance_margin": "8.4 — comparaison au démarrage avec la maintenance lue via l'API",
     "skim_policy": "8.5 — écrémage-recomposition",
-    "regime.spread_full_bps": "8.6 — porte de régime",
-    "regime.hysteresis_days": "8.6 — porte de régime",
     "slippage_max_bps": "8.1 — agrégateur de swap",
     "order_style": "8.3 — ordres maker puis traversée du spread",
     "live_small_cap_pct": "8.4 — plafond de capital en LIVE_SMALL",

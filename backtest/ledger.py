@@ -503,10 +503,16 @@ def _rebalance(book: Book, action: Action, world: World) -> Applied:
     la base ETH existe pour éviter.
     """
     equity = _equity(book, world)
+    # P10 porte l'exposition visée dans ses paramètres ; les trois autres
+    # re-dimensionnements visent celle de la config. Jusqu'ici ce paramètre
+    # était produit par `decide` et lu par personne : la porte de régime ne
+    # pouvait pas fonctionner même une fois branchée.
+    step = action.params.get("step_target_exposure_mult")
+    mult = None if step is None else float(step)
     try:
-        first = _legs(book, world, equity)
+        first = _legs(book, world, equity, mult)
         estimate = _rebalance_charge(world, first)
-        target = _legs(book, world, equity - estimate.total_usd)
+        target = _legs(book, world, equity - estimate.total_usd, mult)
     except ValueError as refus:
         # Le solveur refuse une équité qui ne laisse rien à déployer. Un montage
         # réduit à son coussin ne se recentre pas : il se constate.
@@ -525,6 +531,7 @@ def _rebalance(book: Book, action: Action, world: World) -> Applied:
 class Legs:
     """L'état visé, et ce qu'il faut déplacer pour l'atteindre."""
 
+    equity_usd: float  # l'équité que ce bilan doit peser une fois posé
     wsteth: float
     spot_usd: float
     debt_usd: float
@@ -553,10 +560,10 @@ def _equity(book: Book, world: World) -> float:
     )
 
 
-def _legs(book: Book, world: World, equity: float) -> Legs:
+def _legs(book: Book, world: World, equity: float, mult: float | None = None) -> Legs:
     """Le point fixe du solveur pour cette équité, et les montants à déplacer."""
     oracle = oracle_price(world.eth, world.minute.ratio)
-    target = target_state(equity, world.config, cushion_usd=book.cushion_usd)
+    target = target_state(equity, world.config, cushion_usd=book.cushion_usd, exposure_mult=mult)
 
     wsteth = target.spot_target_usd / oracle
     short_eth = wsteth * world.minute.ratio  # neutralité en ETH, pas en dollars
@@ -570,6 +577,7 @@ def _legs(book: Book, world: World, equity: float) -> Legs:
         else 0.0
     )
     return Legs(
+        equity_usd=equity,
         wsteth=wsteth,
         spot_usd=target.spot_target_usd,
         debt_usd=target.debt_target_usd,
@@ -609,6 +617,13 @@ def _settle(book: Book, world: World, legs: Legs, spent: Charge) -> None:
     l'équité, donc dans la cible. Le laisser courir sur la position le compterait
     une seconde fois, et un montage qui se recentre souvent accumulerait un gain
     imaginaire proportionnel au nombre de re-centrages.
+
+    **Ce que la cible ne réclame pas revient en caisse.** Un re-centrage est une
+    redistribution, pas une dépense : l'équité d'après vaut celle d'avant moins
+    les coûts, et le solde qui ne trouve pas de poste va dans le portefeuille.
+    Sans cette ligne, un pas de régime vers l'exposition NULLE poserait des zéros
+    partout et l'argent disparaîtrait — la porte de régime rendrait un montage
+    qui se désendette en s'appauvrissant de tout son capital.
     """
     book.short_eth = legs.short_eth
     book.short_entry_px = world.mark
@@ -616,6 +631,14 @@ def _settle(book: Book, world: World, legs: Legs, spent: Charge) -> None:
     book.debt_usd = legs.debt_usd
     book.margin_usd = legs.margin_usd
     book.hl_free_usdc = legs.reserve_usd
+    placed = (
+        legs.wsteth * oracle_price(world.eth, world.minute.ratio)
+        + book.cushion_usd
+        + legs.margin_usd
+        + legs.reserve_usd
+        - legs.debt_usd
+    )
+    book.wallet_usdc = legs.equity_usd - placed
     _burn_gas(book, spent, world.eth)
 
 

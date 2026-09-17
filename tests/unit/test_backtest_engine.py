@@ -32,6 +32,7 @@ from backtest.engine import LATENCY_S, Engine, Funding30d, Venue
 from backtest.ledger import LT_TODAY, Book, Moment, prices
 from backtest.timeline import FundingEvent, Minute, Segment
 from delta0.config import load_config
+from delta0.decision import target_state
 
 CONFIG = load_config(Path(__file__).resolve().parents[2] / "config.yaml")
 RATIO = 1.25
@@ -304,3 +305,94 @@ def test_une_priorite_egale_ou_moindre_ne_preempte_pas() -> None:
     # Le re-centrage se re-déclencherait à chaque minute sur le même écart ;
     # seule une priorité STRICTEMENT plus urgente a le droit de le déloger.
     assert engine.journal.preempted == 0
+
+
+# --- la porte de régime dans la boucle -----------------------------------------
+
+
+def monte(pas: float, minutes: int) -> list[Minute]:
+    """Un marché qui monte doucement, avec un funding large tous les heures."""
+    verse = {
+        index: FundingEvent(
+            ts_ms=START_MS + index * MINUTE_MS,
+            rate=0.00005,  # ~44 % annualisé : carry très au-dessus du seuil
+            interval_hours=1,
+            venue="hyperliquid",
+        )
+        for index in range(0, minutes, 60)
+    }
+    return frise([flat(2_500.0 + index * pas) for index in range(minutes)], funding=verse)
+
+
+def test_porte_fermee_la_table_ne_parle_jamais_de_regime() -> None:
+    engine = campaign(monte(0.0, 200), book(), regime=False)
+    assert engine.journal.count("REGIME_STEP") == 0
+    assert engine.journal.regime_changes == []
+
+
+def test_la_porte_ne_s_evalue_qu_une_fois_par_jour() -> None:
+    """Une porte qui compte les minutes ferait d'une hystérésis de sept jours
+    une hystérésis de sept minutes — soit aucune."""
+    engine = campaign(monte(0.0, 600), book(), regime=True)
+    assert engine.journal.regime_changes == [], "600 minutes ne font pas sept jours"
+
+
+def book_at_target(*, drift: float = 1.0) -> Book:
+    """Le bilan posé EXACTEMENT sur le point fixe du solveur, puis dérivé un peu.
+
+    C'est le seul endroit où la zone morte se teste : sur un bilan au repos,
+    l'écart d'exposition ne vient plus d'un régime à rejoindre mais du bruit de
+    virgule flottante que tout re-centrage laisse derrière lui.
+    """
+    equity, cushion = 20_000.0, 20_000.0 * CONFIG.cushion_pct
+    cible = target_state(equity, CONFIG, cushion_usd=cushion)
+    oracle = 2_500.0 * RATIO
+    wsteth = cible.spot_target_usd / oracle * drift
+    place = (
+        wsteth * oracle
+        + cushion
+        + cible.margin_target_usd
+        + cible.reserve_target_usd
+        - cible.debt_target_usd
+    )
+    return Book(
+        wsteth=wsteth,
+        cushion_usd=cushion,
+        debt_usd=cible.debt_target_usd,
+        short_eth=wsteth * RATIO,
+        short_entry_px=2_500.0,
+        margin_usd=cible.margin_target_usd,
+        hl_free_usdc=cible.reserve_target_usd,
+        wallet_usdc=equity - place,
+        gas_eth=0.05,
+        lt=LT_TODAY,
+    )
+
+
+def test_un_bilan_au_repos_ne_reste_jamais_sur_le_point_fixe() -> None:
+    """Et c'est tout le sujet de la zone morte.
+
+    Posé EXACTEMENT sur le point fixe du solveur, le bilan en sort dès l'heure
+    suivante : le funding tombe, l'intérêt court, l'équité bouge, et l'exposition
+    tenue n'est plus celle qui est voulue. `_EXPOSURE_EPS` vaut 1e-6 dans le
+    moteur du bot, soit deux centimes de spot sur 20 000 $ : sans zone morte, P10
+    tire sur cette dérive-là. Mesuré sur le segment FIDÈLE : 19 913 pas en quatre
+    mois, 20 384 $ de frais sur 20 000 $ de capital.
+    """
+    engine = campaign(monte(0.0, 300), book_at_target(), regime=True)
+    assert engine.journal.regime_suppressed > 0, "la dérive existe bel et bien"
+    assert engine.journal.count("REGIME_STEP") == 0, "et aucun pas n'est posé pour autant"
+
+
+def test_un_vrai_ecart_de_regime_passe_la_zone_morte() -> None:
+    """La zone morte étouffe le bruit, pas un régime à rejoindre."""
+    engine = campaign(monte(0.0, 300), book(), regime=True)
+    assert engine.journal.count("REGIME_STEP") >= 1
+
+
+def test_la_cadence_d_une_tranche_par_heure_est_tenue() -> None:
+    """README §8.9, écrit noir sur blanc et implémenté nulle part jusqu'ici."""
+    engine = campaign(monte(0.0, 300), book(), regime=True)
+    poses = [e for e in engine.journal.done if e.kind == "REGIME_STEP"]
+    for avant, apres in pairwise(poses):
+        assert apres.decided_ms - avant.decided_ms >= 3_600_000

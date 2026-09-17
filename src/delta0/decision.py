@@ -60,7 +60,13 @@ class OperationalContext:
 # --- Target-state solver ------------------------------------------------------
 
 
-def target_state(equity: float, config: Config, *, cushion_usd: float) -> TargetState:
+def target_state(
+    equity: float,
+    config: Config,
+    *,
+    cushion_usd: float,
+    exposure_mult: float | None = None,
+) -> TargetState:
     """Solve for the target state given current equity.
 
     README section 3, with m = exposure_mult and r = emergency.hl_reserve_pct:
@@ -93,6 +99,13 @@ def target_state(equity: float, config: Config, *, cushion_usd: float) -> Target
     spot + cushion. That is deliberate — sizing on the full collateral would let
     the cushion carry its own debt, which costs more band than it buys once
     spent. See memory/aave_findings.md §11.
+
+    `exposure_mult` overrides the config's multiplier. The regime gate is the
+    reason it exists: P10 emits a target exposition, and until now nothing could
+    size a balance sheet at anything other than full exposure — the parameter
+    was produced and consumed by no one, so the gate could not have worked even
+    if it had been wired. Zero is a legitimate value: it solves to a flat sheet,
+    which is what PARKED means.
     """
     if equity <= 0.0:
         raise ValueError(f"equity must be positive, got {equity}")
@@ -103,7 +116,9 @@ def target_state(equity: float, config: Config, *, cushion_usd: float) -> Target
     if deployable <= 0.0:
         raise ValueError(f"cushion {cushion_usd} leaves no deployable equity out of {equity}")
 
-    mult = config.exposure_mult
+    mult = config.exposure_mult if exposure_mult is None else exposure_mult
+    if mult < 0.0:
+        raise ValueError(f"exposure multiplier must not be negative, got {mult}")
     reserve_pct = config.emergency.hl_reserve_pct
     spot_target = mult * deployable / (1.0 + mult * reserve_pct)
     notional_target = spot_target
@@ -118,6 +133,70 @@ def target_state(equity: float, config: Config, *, cushion_usd: float) -> Target
         reserve_target_usd=reserve_target,
         debt_target_usd=debt_target,
     )
+
+
+def exposure_mult_of(spot_usd: float, equity: float, cushion_usd: float, config: Config) -> float:
+    """The exposition a balance sheet is actually holding — the inverse of the solver.
+
+    Comparing the held exposition to the one the gate wants only works if both
+    are measured the same way. Dividing the spot by equity would not be it: the
+    solver keeps the cushion and the HL reserve out of what gets leveraged, so
+    that ratio never equals `m` even at rest, and P10 would step for ever
+    towards a target it can never report reaching.
+
+    Inverting the solver instead:
+        spot = m (E - c) / (1 + m r)   ->   m = spot / (E - c - spot r)
+
+    which returns exactly the config's multiplier on the reference sheet.
+    """
+    deployable = equity - cushion_usd - spot_usd * config.emergency.hl_reserve_pct
+    if deployable <= 0.0:
+        return 0.0
+    return spot_usd / deployable
+
+
+@dataclass(frozen=True, slots=True)
+class Regime:
+    """The gate's memory: what it holds, what it is watching, and for how long.
+
+    The hysteresis is the whole point. Funding crosses zero constantly; a gate
+    without memory would deleverage and rebuild the entire montage on a single
+    bad afternoon, paying a swap, a bridge and two orders each time. README §8.9
+    asks for `hysteresis_days` of confirmation, so the candidate regime is
+    carried, not acted on, until it has held.
+    """
+
+    target: float
+    candidate: float
+    days: int = 0
+
+    @property
+    def parked(self) -> bool:
+        return self.target == 0.0
+
+
+def regime_candidate(carry_spread: float, config: Config) -> float:
+    """The exposition this carry calls for, before any hysteresis. README §8.9."""
+    if carry_spread >= config.regime.spread_full_bps * 1e-4:
+        return config.exposure_mult
+    if carry_spread >= 0.0:
+        return config.exposure_mult_half
+    return 0.0
+
+
+def regime_step(state: Regime, carry_spread: float, config: Config) -> Regime:
+    """One daily evaluation. Pure: same state and same spread, same answer.
+
+    A candidate that repeats gains a day; a candidate that changes resets the
+    count to one — its own first day. Only a candidate confirmed for
+    `hysteresis_days` moves the held target, and once it has moved the count
+    keeps running rather than resetting, so a regime that stays put does not
+    re-trigger anything.
+    """
+    candidate = regime_candidate(carry_spread, config)
+    days = state.days + 1 if candidate == state.candidate else 1
+    target = candidate if days >= config.regime.hysteresis_days else state.target
+    return Regime(target=target, candidate=candidate, days=days)
 
 
 @dataclass(frozen=True, slots=True)

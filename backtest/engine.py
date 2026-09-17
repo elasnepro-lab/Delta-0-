@@ -56,7 +56,15 @@ from backtest.costs import DEFAULT, Charge, Costs
 from backtest.ledger import Book, Moment
 from backtest.timeline import FundingEvent, Minute, Segment, Timeline
 from delta0.config import Config
-from delta0.decision import BlindState, OperationalContext, decide
+from delta0.decision import (
+    BlindState,
+    OperationalContext,
+    Regime,
+    decide,
+    exposure_mult_of,
+    regime_candidate,
+    regime_step,
+)
 from delta0.types import Action, ActionKind, Snapshot
 
 HOUR_MS = 3_600_000
@@ -141,6 +149,9 @@ class Journal:
     hf_min: float = float("inf")
     margin_ratio_min: float = float("inf")
     preempted: int = 0
+    regime_changes: list[tuple[int, float]] = field(default_factory=list)
+    regime_suppressed: int = 0
+    regime_rate_limited: int = 0
 
     @property
     def survived(self) -> bool:
@@ -195,12 +206,16 @@ class Engine:
     costs: Costs = DEFAULT
     one_in_flight: bool = True
     preempt: bool = False
+    regime: bool = False
     anchor_price: float | None = None
     journal: Journal = field(default_factory=Journal)
     _pending: list[tuple[int, Action]] = field(default_factory=list)
     _funding: Funding30d = field(default_factory=Funding30d)
     _last_funding: FundingEvent | None = None
     _last_skim: datetime | None = None
+    _regime: Regime | None = None
+    _regime_day: int | None = None
+    _regime_step_ms: int | None = None
 
     def run(self, timeline: Timeline, book: Book, start: Month, end: Month) -> Journal:
         for minute in timeline.walk(start, end):
@@ -227,6 +242,10 @@ class Engine:
         self._land(minute, book)
         if minute.funding is not None:
             self._settle(minute, book)
+        # Après le versement, pas avant : la porte lit la moyenne 30 jours, et
+        # l'évaluer d'abord la ferait décider sur une fenêtre à laquelle il
+        # manque le versement de la minute même.
+        self._evaluate_regime(minute)
 
         decided = False
         for moment in MOMENTS:
@@ -237,6 +256,8 @@ class Engine:
                 continue
             action = decide(observed, self.config, self._context(minute, observed))
             if action.kind == "NOOP":
+                continue
+            if action.kind == "REGIME_STEP" and not self._worth_stepping(action, observed, minute):
                 continue
             if self.preempt and self._pending:
                 in_flight = min(pending.priority for _, pending in self._pending)
@@ -311,13 +332,88 @@ class Engine:
             # s'ouvre alors normalement. Poser « maintenant » fermerait P9 pour
             # toute la campagne sans que rien ne le dise.
             last_skim_at=self._last_skim,
-            # Porte de régime NEUTRE : exposition voulue = exposition tenue, donc
-            # P10 ne se déclenche pas. C'est le côté « porte OFF » de l'A/B du
-            # chantier 7.4 ; l'évaluateur de régime, qui lit la moyenne 30 jours
-            # avec hystérésis, y sera branché ici.
-            current_exposure_mult=self.config.exposure_mult,
-            desired_exposure_mult=self.config.exposure_mult,
+            # Porte OUVERTE : l'exposition tenue se mesure en inversant le
+            # solveur, la voulue sort de l'évaluateur. Porte FERMÉE : les deux
+            # sont égales, donc P10 se tait — c'est le côté « OFF » de l'A/B.
+            current_exposure_mult=self._held(observed),
+            desired_exposure_mult=self._wanted(observed),
         )
+
+    def _held(self, observed: Snapshot) -> float:
+        if not self.regime:
+            return self.config.exposure_mult
+        return exposure_mult_of(
+            observed.spot_usd, observed.equity, observed.cushion_usd, self.config
+        )
+
+    def _wanted(self, observed: Snapshot) -> float:
+        if not self.regime or self._regime is None:
+            return self.config.exposure_mult
+        return self._regime.target
+
+    def _evaluate_regime(self, minute: Minute) -> None:
+        """Une évaluation par jour à 00:00 UTC, comme le README §8.9 le demande.
+
+        Une fois par jour et pas une fois par minute : le spread traverse ses
+        seuils plusieurs fois dans une journée agitée, et une porte qui compte
+        les minutes ferait de l'hystérésis de sept jours une hystérésis de sept
+        minutes — soit aucune.
+        """
+        if not self.regime:
+            return
+        day = minute.ts_ms // DAY_MS
+        if day == self._regime_day:
+            return
+        self._regime_day = day
+        spread = self._funding.annualized(minute.ts_ms) - minute.borrow_apr
+        if self._regime is None:
+            # Au premier jour la porte tient ce que le montage tient déjà : elle
+            # arbitre la suite, elle ne re-dimensionne pas au démarrage sur une
+            # moyenne 30 jours qui n'a encore qu'un jour de données.
+            self._regime = Regime(
+                target=self.config.exposure_mult,
+                candidate=regime_candidate(spread, self.config),
+                days=1,
+            )
+            return
+        before = self._regime.target
+        self._regime = regime_step(self._regime, spread, self.config)
+        if self._regime.target != before:
+            self.journal.regime_changes.append((minute.ts_ms, self._regime.target))
+
+    def _worth_stepping(self, action: Action, observed: Snapshot, minute: Minute) -> bool:
+        """Les deux garde-fous que le README §8.9 demande et que le moteur du bot n'a pas.
+
+        **Une tranche par heure au maximum**, écrit noir sur blanc au §8.9, et
+        implémenté nulle part : `decide` est pur et n'a pas d'horloge pour ça.
+        C'est la boucle qui la tient.
+
+        **Une zone morte.** `_EXPOSURE_EPS` vaut 1e-6 dans `delta0/decision.py`,
+        soit deux centimes de spot sur 20 000 $. Or un re-centrage ne pose jamais
+        l'exposition au millionième : les coûts sont estimés en deux passes et le
+        gaz sort d'une flotte hors bilan, ce qui laisse un résidu de l'ordre de
+        1e-3. Mesuré : la porte a tiré 19 913 fois en quatre mois sur un écart de
+        0,001 entre tenue (2,3518x) et voulue (2,3529x), et brûlé 20 384 $ de
+        frais sur 20 000 $ de capital. Le seuil retenu ici est celui que le projet
+        a déjà tranché pour « trop petit pour valoir une opération » :
+        `skim_min_usd`, en dollars de spot déplacés.
+
+        Les deux refus sont COMPTÉS. Un garde-fou qui travaille en silence est un
+        garde-fou dont personne ne saura qu'il a tenu la campagne debout.
+        """
+        step = float(action.params["step_target_exposure_mult"])
+        held = self._held(observed)
+        moved = abs(step - held) * max(0.0, observed.equity - observed.cushion_usd)
+        if moved < self.config.skim_min_usd:
+            # La zone morte passe AVANT la cadence : un pas qui ne vaut rien n'a
+            # pas à consommer le créneau horaire d'un pas qui vaudrait quelque chose.
+            self.journal.regime_suppressed += 1
+            return False
+        if self._regime_step_ms is not None and minute.ts_ms - self._regime_step_ms < HOUR_MS:
+            self.journal.regime_rate_limited += 1
+            return False
+        self._regime_step_ms = minute.ts_ms
+        return True
 
     def _dead(self, observed: Snapshot, minute: Minute) -> bool:
         """Les deux façons de mourir, guettées à chaque point de la minute."""
