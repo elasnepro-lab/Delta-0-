@@ -233,6 +233,9 @@ def test_une_minute_porte_tout_ce_que_le_moteur_demande(tmp_path: Path) -> None:
     assert first.reserve == "usdc-arbitrum"
     assert first.ratio == pytest.approx(1.2)
     assert first.borrow_index == aave_rates.RAY
+    # L'APR affiché voyage avec la minute : la porte de régime le compare au
+    # funding, alors que le COÛT se lit sur les index. Deux usages, deux champs.
+    assert first.borrow_apr == pytest.approx(0.05)
     assert first.eth.close > 0
     assert first.mark.close > 0
     assert timeline.gaps.minutes == 5

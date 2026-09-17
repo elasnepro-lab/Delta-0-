@@ -186,6 +186,7 @@ class Minute:
     ratio: float  # ETH par wstETH (`stEthPerToken`), relevé du jour
     borrow_index: int  # `variableBorrowIndex` en ray, dernier relevé
     borrow_factor: float  # croissance de la dette depuis la minute précédente
+    borrow_apr: float  # l'APR AFFICHÉ au dernier relevé — pour la porte de régime, pas pour le coût
     reserve: str  # la réserve d'où vient cet index
     segment: Segment
     funding: FundingEvent | None = None
@@ -387,11 +388,8 @@ class Timeline:
         # ferait lire trois jours du segment FIDÈLE sur le marché de l'USDC.e,
         # juste là où le montage devient exact.
         for begins, ends, reserve in spans(first, stop):
-            indices: Cursor[int] = Cursor(
-                [
-                    (reading.ts * 1000, reading.variable_borrow_index)
-                    for reading in self._marks(reserve, year, month)
-                ],
+            readings: Cursor[aave_rates.Mark] = Cursor(
+                [(reading.ts * 1000, reading) for reading in self._marks(reserve, year, month)],
                 f"Aave {reserve.name}",
             )
             for ts_ms in range(begins, ends, MINUTE_MS):
@@ -405,7 +403,8 @@ class Timeline:
                     else:
                         self.gaps.absent += 1
                     continue
-                index = indices.at(ts_ms)
+                reading = readings.at(ts_ms)
+                index = reading.variable_borrow_index
                 event = due.get(ts_ms // MINUTE_MS)
                 self.gaps.minutes += 1
                 if event is not None and event.unverified:
@@ -417,6 +416,7 @@ class Timeline:
                     ratio=ratios.at(ts_ms),
                     borrow_index=index,
                     borrow_factor=self._factor(index, reserve.name, ts_ms),
+                    borrow_apr=reading.variable_borrow_apr,
                     reserve=reserve.name,
                     segment=segment_at(ts_ms),
                     funding=event,
