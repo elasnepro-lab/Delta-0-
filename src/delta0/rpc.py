@@ -62,6 +62,24 @@ NON_FAILOVER_METHODS: frozenset[str] = frozenset({"eth_sendRawTransaction"})
 _CHAIN_ID = RPCEndpoint("eth_chainId")
 
 
+def _http_status(error: BaseException | None) -> int | None:
+    """The HTTP status behind a transport error, when it carries one.
+
+    Alchemy refused every `eth_call` for two days at the end of September 2026
+    and the journal said `ClientResponseError sur eth_call`, 828 times, with
+    nothing else. A 429 of exhausted quota and a 401 of revoked key read
+    identically there, and they call for opposite repairs: one waits for the
+    month to turn, the other needs a new key within the minute. Diagnosing it
+    meant going back to the provider by hand, days later.
+
+    aiohttp carries the code on `.status`. An error without one answers None
+    rather than a number we invented — an absent field is honest, a zero is
+    not.
+    """
+    status = getattr(error, "status", None)
+    return status if isinstance(status, int) else None
+
+
 @dataclass
 class _Endpoint:
     url: str
@@ -123,14 +141,26 @@ class FailoverProvider(AsyncBaseProvider):
         # refusing outright. A stale bench is not a reason to stop trying.
         return 0
 
-    def _bench(self, ep: _Endpoint, reason: str) -> None:
+    def _bench(
+        self,
+        ep: _Endpoint,
+        reason: str,
+        *,
+        error: BaseException | None = None,
+    ) -> None:
         ep.unhealthy_until = time.monotonic() + self._cooldown_s
+        status = _http_status(error)
+        detail = reason if status is None else f"{reason} (HTTP {status})"
+        # Absent rather than null when there is no status: a field that only
+        # appears when it means something stays greppable in the journal.
+        extra: dict[str, Any] = {} if status is None else {"http_status": status}
         log.warning(
             "rpc_endpoint_benched",
-            message=(f"RPC {ep.label} écarté pour {self._cooldown_s:.0f} s — {reason}"),
+            message=(f"RPC {ep.label} écarté pour {self._cooldown_s:.0f} s — {detail}"),
             endpoint=ep.label,
-            reason=reason,
+            reason=detail,
             cooldown_s=self._cooldown_s,
+            **extra,
         )
 
     async def _attempt(self, ep: _Endpoint, method: RPCEndpoint, params: Any) -> RPCResponse:
@@ -176,7 +206,7 @@ class FailoverProvider(AsyncBaseProvider):
                 # in web3 — propagates: benching every endpoint for it would read
                 # as an outage and hide the traceback.
                 last_error = e
-                self._bench(ep, f"{type(e).__name__} sur {method}")
+                self._bench(ep, f"{type(e).__name__} sur {method}", error=e)
             else:
                 if ep is not self._endpoints[start]:
                     log.info(

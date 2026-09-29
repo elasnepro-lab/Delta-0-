@@ -10,12 +10,14 @@ from __future__ import annotations
 import asyncio
 import json
 
+import aiohttp
 import pytest
+from structlog.testing import capture_logs
 from web3.types import RPCEndpoint
 
 from delta0.errors import RpcResponseError
 from delta0.failure import OPERATIONAL_ERRORS
-from delta0.rpc import FailoverProvider
+from delta0.rpc import FailoverProvider, _http_status
 
 _OK = {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
 _BLOCK_NUMBER = RPCEndpoint("eth_blockNumber")
@@ -45,8 +47,29 @@ class _FakeChild:
         return self.behaviour == "ok"
 
 
+class _Refusing:
+    """A child that refuses with an HTTP status, the way aiohttp reports one."""
+
+    def __init__(self, status: int) -> None:
+        self.status = status
+        self.calls: list[str] = []
+
+    async def make_request(self, method: RPCEndpoint, params: object) -> dict[str, object]:
+        _ = params
+        self.calls.append(str(method))
+        raise aiohttp.ClientResponseError(
+            request_info=None,  # type: ignore[arg-type]
+            history=(),
+            status=self.status,
+        )
+
+    async def is_connected(self, show_traceback: bool = False) -> bool:
+        _ = show_traceback
+        return False
+
+
 def _provider(
-    *children: _FakeChild,
+    *children: _FakeChild | _Refusing,
     timeout_s: float = 0.05,
     cooldown_s: float = 60.0,
 ) -> FailoverProvider:
@@ -240,3 +263,63 @@ def test_the_api_key_never_reaches_a_log_line() -> None:
     label = p._endpoints[0].label
     assert "SECRET_KEY" not in label
     assert label == "https://arb-mainnet.g.alchemy.com"
+
+
+# --- naming the refusal ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_http_status_of_a_refusal_reaches_the_journal() -> None:
+    """Alchemy refused every eth_call for two days and the journal said only
+    `ClientResponseError sur eth_call`, 828 times.
+
+    A 429 of exhausted quota and a 401 of revoked key read identically there
+    and call for opposite repairs — wait for the month to turn, or replace the
+    key within the minute. Diagnosing it meant going back to the provider by
+    hand, days after the fact.
+    """
+    primary, backup = _Refusing(429), _FakeChild()
+    p = _provider(primary, backup)
+
+    with capture_logs() as entries:
+        assert await p.make_request(_BLOCK_NUMBER, []) == _OK
+
+    benched = [e for e in entries if e["event"] == "rpc_endpoint_benched"]
+    assert len(benched) == 1
+    assert benched[0]["http_status"] == 429
+    assert "HTTP 429" in benched[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_without_a_status_does_not_invent_one() -> None:
+    """An absent field is honest; a zero would be a number we made up."""
+    primary, backup = _FakeChild("raise"), _FakeChild()
+    p = _provider(primary, backup)
+
+    with capture_logs() as entries:
+        assert await p.make_request(_BLOCK_NUMBER, []) == _OK
+
+    benched = [e for e in entries if e["event"] == "rpc_endpoint_benched"]
+    assert len(benched) == 1
+    assert "http_status" not in benched[0]
+    assert "HTTP" not in benched[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_a_hang_is_still_reported_as_a_hang() -> None:
+    """The 2026-09-03 incident had no status: the endpoint answered nothing."""
+    primary, backup = _FakeChild("hang"), _FakeChild()
+    p = _provider(primary, backup)
+
+    with capture_logs() as entries:
+        assert await p.make_request(_BLOCK_NUMBER, []) == _OK
+
+    benched = [e for e in entries if e["event"] == "rpc_endpoint_benched"]
+    assert "pas de réponse" in benched[0]["message"]
+    assert "http_status" not in benched[0]
+
+
+def test_only_a_real_integer_status_is_believed() -> None:
+    assert _http_status(aiohttp.ClientResponseError(None, (), status=401)) == 401  # type: ignore[arg-type]
+    assert _http_status(ConnectionError("connexion refusée")) is None
+    assert _http_status(None) is None
