@@ -266,6 +266,14 @@ class AlertsConfig(BaseModel):
     telegram_bot_token: str = Field(default="env:TG_TOKEN")
     telegram_chat_id: str = Field(default="env:TG_CHAT")
 
+    # Collapsing — see the `delta0.alerts` docstring. The first window on a
+    # fresh incident is short; each window that closes on a condition still
+    # firing is followed by a longer one, up to the ceiling. factor = 1.0
+    # disables the escalation and restores a fixed window.
+    collapse_window_s: _PositiveFloat = 900.0
+    collapse_factor: Annotated[float, Field(ge=1.0)] = 2.0
+    collapse_max_s: _PositiveFloat = 21_600.0
+
 
 # --- Root config --------------------------------------------------------------
 

@@ -239,6 +239,123 @@ async def test_a_new_window_opens_once_the_old_one_elapsed() -> None:
     assert len(recorder.texts) == 2
 
 
+# --- backing off on a condition that will not clear ---------------------------
+
+
+class _Clock:
+    """A monotonic clock the test drives, so a week fits in a millisecond."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _alchemy_shape(sink: AlertSink, clock: _Clock, hours: float) -> None:
+    """One occurrence every 3 minutes, the cadence Alchemy's cooldown set."""
+    for _ in range(int(hours * 20)):
+        sink.emit(_alert("rpc_endpoint_benched"))
+        clock.advance(180.0)
+
+
+@pytest.mark.asyncio
+async def test_a_condition_that_never_clears_is_reported_less_and_less(
+    monkeypatch: Any,
+) -> None:
+    """The shape of the Alchemy outage: one fault, 42 hours, nothing new.
+
+    A fixed 15-minute window turned that into roughly 340 messages — 168
+    windows, a first alert and a summary each — which is how an operator
+    learns to mute the channel before the one message that matters.
+    """
+    clock = _Clock()
+    monkeypatch.setattr("delta0.alerts.time", clock)
+    recorder = _Recorder()
+    sink = AlertSink(
+        recorder,
+        max_buffered=10_000,
+        collapse_window_s=900.0,
+        collapse_factor=2.0,
+        collapse_max_s=21_600.0,
+    )
+
+    _alchemy_shape(sink, clock, hours=42)
+    await sink.stop()
+
+    assert len(recorder.texts) <= 15
+    # The first one still left on the spot: backing off must never delay the
+    # news that something broke, only the repetition of it.
+    assert "x" not in recorder.texts[0].splitlines()[0]
+
+
+@pytest.mark.asyncio
+async def test_the_escalation_stops_at_a_ceiling(monkeypatch: Any) -> None:
+    """Doubling forever would end up reporting a live fault once a month."""
+    clock = _Clock()
+    monkeypatch.setattr("delta0.alerts.time", clock)
+    sink = AlertSink(
+        _Recorder(),
+        max_buffered=10_000,
+        collapse_window_s=900.0,
+        collapse_factor=2.0,
+        collapse_max_s=21_600.0,
+    )
+
+    _alchemy_shape(sink, clock, hours=7 * 24)
+
+    assert [w.span_s for w in sink._windows.values()] == [21_600.0]
+    await sink.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_condition_that_clears_starts_over(monkeypatch: Any) -> None:
+    """Stretching the silence is only safe because it undoes itself.
+
+    Two quiet windows are needed and that is the intended reading: the first
+    delivers the summary the fault still owed, the second observes that
+    nothing happened and retires the key.
+    """
+    clock = _Clock()
+    monkeypatch.setattr("delta0.alerts.time", clock)
+    sink = AlertSink(_Recorder(), max_buffered=10_000, collapse_window_s=900.0)
+
+    _alchemy_shape(sink, clock, hours=2)
+    stretched = next(iter(sink._windows.values())).span_s
+    assert stretched > 900.0
+
+    clock.advance(stretched + 1.0)
+    sink._close_windows(force=False)  # pays the last summary, reopens
+    clock.advance(next(iter(sink._windows.values())).span_s + 1.0)
+    sink._close_windows(force=False)  # a whole window with nothing in it
+    assert sink._windows == {}
+
+    sink.emit(_alert("rpc_endpoint_benched"))
+    assert next(iter(sink._windows.values())).span_s == 900.0
+    await sink.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_factor_of_one_restores_a_fixed_window(monkeypatch: Any) -> None:
+    """The escape hatch the config comment promises."""
+    clock = _Clock()
+    monkeypatch.setattr("delta0.alerts.time", clock)
+    sink = AlertSink(
+        _Recorder(),
+        max_buffered=10_000,
+        collapse_window_s=900.0,
+        collapse_factor=1.0,
+    )
+
+    _alchemy_shape(sink, clock, hours=6)
+
+    assert [w.span_s for w in sink._windows.values()] == [900.0]
+    await sink.stop()
+
+
 # --- the guarantees ----------------------------------------------------------
 
 
@@ -395,4 +512,15 @@ async def test_a_missing_chat_id_is_as_disabling_as_a_missing_token(
 async def test_both_credentials_present_arms_the_sink(config: Config) -> None:
     sink = build_sink(config, _FakeSettings())  # type: ignore[arg-type]
     assert sink is not None
+    await sink.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_collapse_knobs_reach_the_sink(config: Config) -> None:
+    """A tunable nobody reads is the ghost-setting bug of M1, again."""
+    sink = build_sink(config, _FakeSettings())  # type: ignore[arg-type]
+    assert sink is not None
+    assert sink._collapse_window_s == config.alerts.collapse_window_s
+    assert sink._collapse_factor == config.alerts.collapse_factor
+    assert sink._collapse_max_s == config.alerts.collapse_max_s
     await sink.stop()
