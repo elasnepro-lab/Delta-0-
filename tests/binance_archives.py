@@ -41,12 +41,23 @@ def build_csv(
     return "\n".join(([HEADER] if header else []) + rows) + "\n"
 
 
+# `writestr` called with a bare name stamps `time.localtime()` into the entry,
+# in a DOS field whose granularity is two seconds. `FakeBinance` rebuilds the
+# archive once for the `.CHECKSUM` request and once for the archive itself, and
+# a full month of candles (3,7 MB) takes long enough to build that the two land
+# in different slots: the same content then hashes differently and the reader
+# refuses it for a truncated download. The reader was right; the harness was
+# varying. A fixed stamp makes the bytes a function of the content alone.
+ZIP_STAMP = (2025, 10, 1, 0, 0, 0)
+
+
 def build_zip(csv: str, *, name: str = CSV_NAME, extra: str | None = None) -> bytes:
+    """Reproducible byte for byte: same content in, same sha256 out, always."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
-        archive.writestr(name, csv)
-        if extra is not None:
-            archive.writestr(extra, csv)
+        for entry in (name, extra):
+            if entry is not None:
+                archive.writestr(zipfile.ZipInfo(entry, date_time=ZIP_STAMP), csv)
     return buffer.getvalue()
 
 

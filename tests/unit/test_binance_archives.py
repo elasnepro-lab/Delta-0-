@@ -12,6 +12,8 @@ afford.
 from __future__ import annotations
 
 import hashlib
+import io
+import zipfile
 
 import httpx
 import pytest
@@ -32,7 +34,15 @@ from backtest.binance import (
     read_archive,
     to_milliseconds,
 )
-from tests.binance_archives import OCTOBER_2025_START, build_csv, build_zip, full_month, kline_row
+from tests.binance_archives import (
+    OCTOBER_2025_START,
+    ZIP_STAMP,
+    build_csv,
+    build_zip,
+    full_month,
+    kline_row,
+    month_archive,
+)
 
 # --- The two formats that move under our feet ---------------------------------
 
@@ -191,3 +201,20 @@ def test_a_published_month_comes_back_with_its_verified_digest() -> None:
 
     assert verified == digest
     assert len(candles) == 31 * 24 * 60
+
+
+def test_the_harness_does_not_stamp_the_clock_into_an_archive() -> None:
+    """A sha256 must be a function of the content, not of the second it was built.
+
+    `writestr` given a bare name writes `time.localtime()` into the entry, with a
+    two-second granularity. `FakeBinance` builds the archive once per request, so
+    with that default the `.CHECKSUM` and the archive could disagree on the same
+    content — which is exactly how CI failed on main on 2026-10-02, and only on
+    the one test asking for a full month, the slowest to build.
+    """
+    with zipfile.ZipFile(io.BytesIO(month_archive(2025, 10, candles=3))) as archive:
+        assert all(entry.date_time == ZIP_STAMP for entry in archive.infolist())
+
+    payload = build_zip(build_csv(3), extra="second.csv")
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        assert [entry.date_time for entry in archive.infolist()] == [ZIP_STAMP, ZIP_STAMP]
