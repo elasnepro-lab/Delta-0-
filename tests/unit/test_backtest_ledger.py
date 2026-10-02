@@ -306,7 +306,7 @@ def flat_minute(**changed: object) -> Minute:
     return minute(eth=FLAT, mark=FLAT, **changed)  # type: ignore[arg-type]
 
 
-CONFIG = load_config(Path(__file__).resolve().parents[2] / "config.yaml")
+CONFIG = load_config(Path(__file__).resolve().parents[2] / "config.yaml.example")
 
 
 def act(livre: Book, action: Action, une: Minute | None = None) -> Applied:

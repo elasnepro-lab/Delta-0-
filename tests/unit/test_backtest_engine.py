@@ -34,7 +34,7 @@ from backtest.timeline import FundingEvent, Minute, Segment
 from delta0.config import load_config
 from delta0.decision import target_state
 
-CONFIG = load_config(Path(__file__).resolve().parents[2] / "config.yaml")
+CONFIG = load_config(Path(__file__).resolve().parents[2] / "config.yaml.example")
 RATIO = 1.25
 START_MS = 1_688_169_600_000  # 2023-07-01T00:00:00Z, segment FIDÈLE
 
