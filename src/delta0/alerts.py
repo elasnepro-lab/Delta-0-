@@ -21,6 +21,16 @@ one summary. The incident of 8 September would have produced one alert at
 20h39 and then a handful of "aave_supply x34" lines, instead of 86 messages
 teaching the operator to mute the channel.
 
+**And it goes quiet on its own when nothing changes.** A fixed window only
+solves the burst. Alchemy refused every `eth_call` from 28 to 30 September and
+the fault never cleared: 42 hours of 15-minute windows, about 340 messages for
+one incident the operator understood from the first. So each window that closes
+on a condition STILL firing is followed by a longer one, doubling up to six
+hours — the same 42 hours now cost about a dozen messages. A condition that
+goes quiet for one full window retires its key, so the next occurrence is a
+fresh incident again: immediate, and back to the base window. Escalating the
+silence is safe precisely because de-escalation is automatic.
+
 **It is fed from any thread.** The Hyperliquid SDK is synchronous and runs in
 worker threads, which log too, so the buffer is guarded by a plain lock rather
 than being an `asyncio.Queue`.
@@ -71,6 +81,16 @@ _BORING_FIELDS = frozenset(
 # Telegram refuses messages above 4096 characters.
 _MAX_MESSAGE = 3_500
 
+# The first window on a fresh incident. Short: a burst deserves a fast second
+# opinion telling the operator whether it was one glitch or a fault.
+DEFAULT_COLLAPSE_WINDOW_S = 900.0
+
+# Growth applied to the next window each time one closes on a condition that
+# is still firing, and the ceiling it stops at. Six hours means a permanent
+# fault costs four messages a day instead of ninety-six.
+DEFAULT_COLLAPSE_FACTOR = 2.0
+DEFAULT_COLLAPSE_MAX_S = 21_600.0
+
 # Set while the sink is formatting or sending, so that an error raised by the
 # alerting path cannot produce an alert about itself, forever.
 _in_alert: ContextVar[bool] = ContextVar("in_alert", default=False)
@@ -114,10 +134,18 @@ class Alert:
 
 @dataclass
 class _Window:
-    """Collapse state for one (level, event) key."""
+    """Collapse state for one (level, event) key.
+
+    `pending` counts the occurrences NOT yet reported, which keeps the
+    arithmetic identical for the first window — where one occurrence left
+    immediately — and for the ones that follow, where none did. `span_s` is
+    this window's own length, so escalation is carried by the window rather
+    than by a side table keyed on the same tuple.
+    """
 
     opened_at: float
-    count: int
+    span_s: float
+    pending: int
     last: Alert
 
 
@@ -136,12 +164,16 @@ class AlertSink:
         transport: AlertTransport,
         *,
         max_buffered: int = 256,
-        collapse_window_s: float = 900.0,
+        collapse_window_s: float = DEFAULT_COLLAPSE_WINDOW_S,
+        collapse_factor: float = DEFAULT_COLLAPSE_FACTOR,
+        collapse_max_s: float = DEFAULT_COLLAPSE_MAX_S,
         poll_s: float = 1.0,
     ) -> None:
         self._transport = transport
         self._max_buffered = max_buffered
         self._collapse_window_s = collapse_window_s
+        self._collapse_factor = collapse_factor
+        self._collapse_max_s = collapse_max_s
         self._poll_s = poll_s
         self._lock = threading.Lock()
         self._buffer: list[Alert] = []
@@ -167,11 +199,24 @@ class AlertSink:
         now = time.monotonic()
         with self._lock:
             window = self._windows.get(key)
-            if window is not None and now - window.opened_at < self._collapse_window_s:
-                window.count += 1
-                window.last = alert
-                return
-            self._windows[key] = _Window(opened_at=now, count=1, last=alert)
+            if window is not None:
+                if now - window.opened_at < window.span_s:
+                    window.pending += 1
+                    window.last = alert
+                    return
+                # Elapsed, and the drain task has not swept it yet. Close it
+                # here rather than overwriting it: the old code replaced the
+                # window outright, which silently dropped the summary it owed.
+                if self._sweep(key, window, now):
+                    window.pending = 1
+                    window.last = alert
+                    return
+            self._windows[key] = _Window(
+                opened_at=now,
+                span_s=self._collapse_window_s,
+                pending=0,
+                last=alert,
+            )
             self._append(alert)
 
     def _append(self, alert: Alert) -> None:
@@ -212,27 +257,43 @@ class AlertSink:
             self._close_windows(force=False)
             await self._flush()
 
+    def _sweep(self, key: tuple[str, str], window: _Window, now: float) -> bool:
+        """Close one elapsed window. Caller holds the lock.
+
+        Returns True when the key stays armed, because the condition is still
+        firing and the next window opens longer. False when it stayed quiet
+        for a whole window, which retires the key: the next occurrence is then
+        a fresh incident, alerted immediately and back at the base span.
+        """
+        if window.pending == 0:
+            del self._windows[key]
+            return False
+        self._append(
+            Alert(
+                level=window.last.level,
+                event=window.last.event,
+                message=window.last.message,
+                fields=window.last.fields,
+                count=window.pending,
+                cause=window.last.cause,
+            ),
+        )
+        window.opened_at = now
+        window.span_s = min(window.span_s * self._collapse_factor, self._collapse_max_s)
+        window.pending = 0
+        return True
+
     def _close_windows(self, *, force: bool) -> None:
         """Turn elapsed collapse windows into one summary alert each."""
         now = time.monotonic()
         with self._lock:
             for key, window in list(self._windows.items()):
-                elapsed = now - window.opened_at
-                if not force and elapsed < self._collapse_window_s:
+                if not force and now - window.opened_at < window.span_s:
                     continue
-                del self._windows[key]
-                if window.count > 1:
-                    # count - 1: the first one was already sent on its own.
-                    self._append(
-                        Alert(
-                            level=window.last.level,
-                            event=window.last.event,
-                            message=window.last.message,
-                            fields=window.last.fields,
-                            count=window.count - 1,
-                            cause=window.last.cause,
-                        ),
-                    )
+                # On the way out nothing will reopen: sweep for the summary,
+                # then retire the key whatever it wanted.
+                if self._sweep(key, window, now) and force:
+                    del self._windows[key]
 
     async def _flush(self) -> None:
         with self._lock:
@@ -377,4 +438,9 @@ def build_sink(config: Config, settings: Settings) -> AlertSink | None:
     chat = resolve_secret(config.alerts.telegram_chat_id, settings)
     if not token or not chat:
         return None
-    return AlertSink(TelegramTransport(token, chat))
+    return AlertSink(
+        TelegramTransport(token, chat),
+        collapse_window_s=config.alerts.collapse_window_s,
+        collapse_factor=config.alerts.collapse_factor,
+        collapse_max_s=config.alerts.collapse_max_s,
+    )

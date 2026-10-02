@@ -333,7 +333,7 @@ Escalade :
 - I7, ou un transfert en transit depuis plus d'une heure : CRITICAL et gel des opérations non critiques.
 - I5 : WARN et gel des opérations non critiques.
 
-Chaque invariant émet son propre événement d'alerte : le regroupement de quinze minutes ne doit jamais cacher un invariant derrière un autre.
+Chaque invariant émet son propre événement d'alerte : le regroupement ne doit jamais cacher un invariant derrière un autre.
 
 ---
 
@@ -341,6 +341,7 @@ Chaque invariant émet son propre événement d'alerte : le regroupement de quin
 
 - Journal structuré (JSON lines) : chaque snapshot décisionnel, chaque intention, chaque tx (hash, gas, statut), chaque fill, chaque traversée de pont, chaque alerte.
 - Alertes Telegram à trois niveaux : INFO (digest quotidien), WARN (invariant mou violé, pont lent, re-centrage exécuté), CRITICAL (P1 à P4 déclenchés, BLIND, transfert perdu).
+- Regroupement des alertes identiques : la première part immédiatement, les répétitions sont comptées, et la fenêtre se ferme sur un résumé. Une fenêtre qui se ferme sur une condition TOUJOURS active ouvre la suivante plus longue, jusqu'à un plafond ; une condition silencieuse pendant une fenêtre entière repart à la fenêtre de base, et l'occurrence suivante est de nouveau immédiate. La règle existe parce qu'une panne fournisseur de 42 heures, avec une fenêtre fixe de quinze minutes, a produit environ 340 messages pour un incident compris dès le premier — un canal qu'on apprend à ignorer ne protège plus rien.
 - Export comptable : CSV quotidien des flux (funding, intérêts courus, staking estimé, frais, écrémages, recompositions) avec cumuls mensuels. Base du suivi de performance et de la déclaration fiscale.
 
 Le digest quotidien EST le tableau d'exactitude, cinq dimensions, cinq chiffres, rien d'autre :
