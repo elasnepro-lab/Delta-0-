@@ -72,7 +72,7 @@ def test_reject_ltv_margin_order(example_config_path: Path, tmp_path: Path) -> N
 def test_reject_margin_too_close_to_liquidation(example_config_path: Path, tmp_path: Path) -> None:
     """The shipped config used to put the cushion exactly ON the threshold."""
     raw = yaml.safe_load(example_config_path.read_text())
-    raw["emergency"]["ltv_margin_deleverage"] = 0.002
+    raw["emergency"]["ltv_margin_cushion"] = 0.002
     bad = tmp_path / "bad.yaml"
     bad.write_text(yaml.safe_dump(raw))
     with pytest.raises(ValidationError, match=r"at least 0\.01"):

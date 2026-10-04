@@ -58,7 +58,7 @@ EVALUATORS: tuple[_Evaluator, ...] = (
     _p7_recenter,
     lambda s, c, x: _p8_delta_retrue(s, c),
     _p9_skim,
-    lambda s, c, x: _p10_regime_step(x),
+    _p10_regime_step,
 )
 
 

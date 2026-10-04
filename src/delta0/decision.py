@@ -22,6 +22,10 @@ from delta0.types import NOOP, Action, Priority, Snapshot, TargetState
 # Tolerance for float equality on desired-vs-current exposure comparison.
 _EXPOSURE_EPS = 1e-6
 
+# README §8.9: tranches of 25 % of the gap, one per hour at most.
+_REGIME_TRANCHE = 0.25
+_REGIME_STEP_INTERVAL = timedelta(hours=1)
+
 
 class BlindState(StrEnum):
     """Watchdog verdict on venue reachability (README section 11)."""
@@ -46,6 +50,11 @@ class OperationalContext:
     - `blind_state`: watchdog verdict.
     - `liquidation_event`: True if the watcher observed a LiquidationCall
       (Aave) or a liquidation user event (HL) for our address.
+    - `last_regime_step_at`: when the last P10 tranche was emitted (None if
+      never), for the one-tranche-per-hour cap of README §8.9.
+    - `regime_origin_exposure_mult`: the exposition held when the current
+      regime transition began; tranches are 25 % of THAT gap. None falls back
+      to the current exposition, which is right on the transition's first step.
     """
 
     now_utc: datetime
@@ -55,6 +64,8 @@ class OperationalContext:
     last_skim_at: datetime | None = None
     desired_exposure_mult: float | None = None
     current_exposure_mult: float | None = None
+    last_regime_step_at: datetime | None = None
+    regime_origin_exposure_mult: float | None = None
 
 
 # --- Target-state solver ------------------------------------------------------
@@ -221,7 +232,6 @@ class Bands:
     lt: float
     ltv_pump: float
     ltv_cushion: float
-    ltv_deleverage: float
 
     @property
     def hf_pump(self) -> float:
@@ -230,10 +240,6 @@ class Bands:
     @property
     def hf_cushion(self) -> float:
         return self.lt / self.ltv_cushion
-
-    @property
-    def hf_deleverage(self) -> float:
-        return self.lt / self.ltv_deleverage
 
     def price_drop_to(self, ltv_threshold: float, target_ltv: float) -> float:
         """Fraction the collateral price must fall for `ltv_threshold` to be hit."""
@@ -253,25 +259,52 @@ def derive_bands(lt: float, config: Config) -> Bands:
         lt=lt,
         ltv_pump=lt - margins.ltv_margin_pump,
         ltv_cushion=lt - margins.ltv_margin_cushion,
-        ltv_deleverage=lt - margins.ltv_margin_deleverage,
     )
+
+
+# P4 and P6 stop repaying one point above the target, on the spot (README §8.7).
+RESTORE_HEADROOM = 0.01
 
 
 def bands_incoherence(lt: float, config: Config) -> str | None:
     """Return why the bands are unusable against this LT, or None if they hold.
 
-    Called at boot to refuse starting, and worth re-checking when the observed
-    LT moves: a governance cut can push the pump under the target, at which
-    point the bot would try to deleverage a position that is already at rest.
+    Called at boot to refuse starting, and on every snapshot by I9: a
+    governance cut can push the pump under the level P6 repays down to, at
+    which point P6 fires again the moment it lands — or, under the target
+    itself, a pump of nothing on every cycle that starves P7 to P10.
+    Revue finance 2026-10-02, F8.
     """
     if lt <= 0.0:
         return "liquidation threshold read as 0 — Aave data unavailable or asset unlisted"
     bands = derive_bands(lt, config)
-    if bands.ltv_pump <= config.target_ltv:
+    restore = config.target_ltv + RESTORE_HEADROOM
+    if bands.ltv_pump <= restore:
         return (
-            f"pump threshold {bands.ltv_pump:.4f} is at or below target LTV "
-            f"{config.target_ltv:.4f} (LT {lt:.4f}): the bot would pump at rest. "
+            f"pump threshold {bands.ltv_pump:.4f} is at or below the level P6 repays "
+            f"down to, {restore:.4f} (LT {lt:.4f}): the bot would pump in a loop. "
             "Lower target_ltv or narrow emergency.ltv_margin_pump."
+        )
+    return None
+
+
+def hl_margin_incoherence(maintenance_margin: float, config: Config) -> str | None:
+    """Return why the up-flank thresholds cannot hold against Hyperliquid's MM.
+
+    P2 must fire while the position lives, so its trigger has to sit above the
+    maintenance margin the place applies — and the place derives it from
+    `maxLeverage`, which its governance can lower. At 15x the gap between P2
+    and the liquidation fell to 0.17 point without a word; under ~14.3x P2
+    could never fire first. README §4, revue finance 2026-10-02, F5.
+    """
+    if maintenance_margin <= 0.0:
+        return "maintenance margin read as 0 — Hyperliquid market meta unavailable"
+    reduce_at = config.emergency.margin_ratio_reduce
+    if reduce_at <= maintenance_margin:
+        return (
+            f"margin_ratio_reduce {reduce_at:.4f} is at or below the maintenance margin "
+            f"{maintenance_margin:.4f} read from Hyperliquid: P2 would fire after the "
+            "liquidation. Raise the emergency margin ratios or lower short_leverage."
         )
     return None
 
@@ -418,22 +451,29 @@ def _p3_repay_from_cushion(snapshot: Snapshot, config: Config) -> Action | None:
 
 
 def _p4_stepwise_deleverage(snapshot: Snapshot, config: Config) -> Action | None:
+    """P3's threshold, taken over the moment the cushion cannot pay a tranche.
+
+    It used to wait for a deeper threshold of its own. Between the two, with
+    the cushion empty, neither P3 nor P4 fired and only the bridge pump P6
+    answered — slower than I2's grace, which then deflated a book the table
+    was handling. Sharing the threshold closes that gap with a local action.
+    README §7, revue finance 2026-10-02, F9.
+    """
     bands = derive_bands(snapshot.aave_lt_wsteth, config)
-    if snapshot.hf > bands.hf_deleverage:
+    if snapshot.hf > bands.hf_cushion:
         return None
     tranche = cushion_tranche_size(config)
     if snapshot.cushion_usd >= tranche:
-        # P3 will handle this; P4 is reserved for cushion-exhausted case.
-        return None
+        return None  # P3's case
     return Action(
         kind="STEPWISE_DELEVERAGE",
         priority=Priority.P4_DELEVERAGE,
         reason=(
-            f"HF {snapshot.hf:.4f} <= seuil désendettement {bands.hf_deleverage:.4f} "
+            f"HF {snapshot.hf:.4f} <= seuil coussin {bands.hf_cushion:.4f} "
             f"(LT {bands.lt:.4f}) et coussin épuisé "
             f"({snapshot.cushion_usd:.0f} < {tranche:.0f}) — boucle repay/withdraw/swap"
         ),
-        params={"target_ltv_after": config.target_ltv + 0.01},
+        params={"target_ltv_after": config.target_ltv + RESTORE_HEADROOM},
     )
 
 
@@ -459,10 +499,14 @@ def _p6_pump_down(snapshot: Snapshot, config: Config) -> Action | None:
     bands = derive_bands(snapshot.aave_lt_wsteth, config)
     if snapshot.hf > bands.hf_pump:
         return None
-    # Repay enough to bring LTV back to target + 1%.
-    target_ltv_after = config.target_ltv + 0.01
-    target_debt = target_ltv_after * snapshot.collateral_usd
+    # Repay down to target + 1 point on the SPOT, the solver's base (F7).
+    target_ltv_after = config.target_ltv + RESTORE_HEADROOM
+    target_debt = target_ltv_after * snapshot.spot_usd
     repay_amount = max(0.0, snapshot.debt_usd - target_debt)
+    if repay_amount <= 0.0:
+        # A pump of nothing defends nothing, and as the first answer of the
+        # table it would starve P7 to P10 on every cycle (F8). I9 says why.
+        return None
     return Action(
         kind="PUMP_DOWN",
         priority=Priority.P6_PUMP_DOWN,
@@ -541,15 +585,52 @@ def _p9_skim(snapshot: Snapshot, config: Config, ctx: OperationalContext) -> Act
     return None
 
 
-def _p10_regime_step(ctx: OperationalContext) -> Action | None:
+def _p10_regime_step(snapshot: Snapshot, config: Config, ctx: OperationalContext) -> Action | None:
+    """One tranche toward the regime's exposition, with the two guards of README §8.9.
+
+    Revue finance 2026-10-02, F10. The step used to be 25 % of the REMAINING
+    gap, re-emitted on every cycle: four tranches covered 68.4 % of the way,
+    convergence took 48, and nothing capped the cadence. With no dead zone
+    either, the backtest fired 19 913 times in four months on a 0.001 drift
+    left by every rebalance, and burnt 20 384 USD of fees on 20 000. Both
+    guards lived in the backtest loop only; production had neither.
+
+    A held tranche is not silent: it comes back as a NOOP carrying why, so a
+    loop can count what the guards held back.
+    """
     if ctx.desired_exposure_mult is None or ctx.current_exposure_mult is None:
         return None
-    # Change exposure by 25 % of the gap per tick, per README section 8.9.
-    delta = ctx.desired_exposure_mult - ctx.current_exposure_mult
+    current = ctx.current_exposure_mult
+    delta = ctx.desired_exposure_mult - current
     if abs(delta) < _EXPOSURE_EPS:
         return None
-    step_fraction = 0.25
-    step_target = ctx.current_exposure_mult + step_fraction * delta
+    origin = ctx.regime_origin_exposure_mult
+    full_gap = abs(ctx.desired_exposure_mult - (current if origin is None else origin))
+    tranche = min(abs(delta), _REGIME_TRANCHE * max(full_gap, abs(delta)))
+    step_target = current + (tranche if delta > 0 else -tranche)
+
+    # Dead zone first: a step worth nothing must not use up the hourly slot of
+    # one that would. The threshold is the one the project already uses for
+    # "too small to be worth an operation": skim_min_usd of spot moved.
+    moved_usd = tranche * max(0.0, snapshot.equity - snapshot.cushion_usd)
+    if moved_usd < config.skim_min_usd:
+        return Action(
+            kind="NOOP",
+            priority=Priority.P10_REGIME,
+            reason=(
+                f"porte de régime : écart {delta:+.4f}x, {moved_usd:.0f} $ à déplacer "
+                f"< {config.skim_min_usd:.0f} $ — tranche retenue (zone morte)"
+            ),
+            params={"regime_held": "dead_zone"},
+        )
+    last = ctx.last_regime_step_at
+    if last is not None and ctx.now_utc - last < _REGIME_STEP_INTERVAL:
+        return Action(
+            kind="NOOP",
+            priority=Priority.P10_REGIME,
+            reason="porte de régime : une tranche par heure au plus — tranche retenue",
+            params={"regime_held": "rate_limited"},
+        )
     return Action(
         kind="REGIME_STEP",
         priority=Priority.P10_REGIME,
@@ -643,7 +724,7 @@ def decide(snapshot: Snapshot, config: Config, ctx: OperationalContext) -> Actio
         _p7_recenter(snapshot, config, ctx),
         _p8_delta_retrue(snapshot, config),
         _p9_skim(snapshot, config, ctx),
-        _p10_regime_step(ctx),
+        _p10_regime_step(snapshot, config, ctx),
     )
     for candidate in candidates:
         if candidate is not None:

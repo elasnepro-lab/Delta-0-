@@ -90,7 +90,6 @@ class EmergencyConfig(BaseModel):
     # the liquidation point. See memory/aave_findings.md §9.
     ltv_margin_pump: _Ratio
     ltv_margin_cushion: _Ratio
-    ltv_margin_deleverage: _Ratio
 
     @model_validator(mode="after")
     def _check_monotonicity(self) -> EmergencyConfig:
@@ -102,14 +101,14 @@ class EmergencyConfig(BaseModel):
             )
         # Down flank: a wider margin means the priority fires earlier, so the
         # pump must sit furthest from the liquidation threshold.
-        margins = (self.ltv_margin_pump, self.ltv_margin_cushion, self.ltv_margin_deleverage)
-        if not (margins[0] > margins[1] > margins[2]):
+        # P3 and P4 share the cushion threshold (README §7, F9): there is no
+        # deleverage margin of its own any more.
+        if not self.ltv_margin_pump > self.ltv_margin_cushion:
             raise ValueError(
-                "LTV margins must satisfy "
-                "ltv_margin_pump > ltv_margin_cushion > ltv_margin_deleverage "
+                "LTV margins must satisfy ltv_margin_pump > ltv_margin_cushion "
                 "(a wider margin fires earlier)."
             )
-        if margins[2] < MIN_LTV_MARGIN_TO_LT:
+        if self.ltv_margin_cushion < MIN_LTV_MARGIN_TO_LT:
             raise ValueError(
                 f"the tightest LTV margin must leave at least {MIN_LTV_MARGIN_TO_LT} "
                 "to the liquidation threshold; below that the priority cannot act "

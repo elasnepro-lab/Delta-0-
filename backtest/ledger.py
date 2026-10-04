@@ -443,8 +443,8 @@ def _deleverage(book: Book, action: Action, world: World) -> Applied:
     """
     oracle = oracle_price(world.eth, world.minute.ratio)
     target_ltv = float(action.params["target_ltv_after"])
-    collateral = book.wsteth * oracle + book.cushion_usd
-    excess = book.debt_usd - target_ltv * collateral
+    # LTV spot, comme le solveur et `decision` : le coussin n'entre pas (F7).
+    excess = book.debt_usd - target_ltv * book.wsteth * oracle
     if excess <= 0.0 or book.wsteth <= 0.0:
         return Applied(kind="STEPWISE_DELEVERAGE", charge=Charge(), note="rien à vendre")
 

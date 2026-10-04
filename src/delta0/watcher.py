@@ -120,10 +120,17 @@ class LiveWatcher:
             self.watchdog.mark_ws_tick(now=now_mono)
             mark_price = meta.mark_price
 
-        # Short size in ETH: for HL, a short position has a negative szi;
-        # we normalize to a positive magnitude — the sign is implicit in the
-        # "short" role. If the position is missing, size is 0 (never built yet).
-        short_size = abs(position.size_signed) if position is not None else 0.0
+        # Positive for a short, negative if the position is long: the sign is
+        # what lets the delta see a long instead of reading it as a short.
+        # If the position is missing, size is 0 (never built yet).
+        short_size = position.short_size_eth if position is not None else 0.0
+        if short_size < 0.0:
+            log.error(
+                "hl_position_long",
+                message="position HL LONGUE — le hedge est du mauvais côté",
+                coin=self.coin,
+                size_eth=-short_size,
+            )
         margin = position.isolated_margin_usd if position is not None else 0.0
 
         return Snapshot(

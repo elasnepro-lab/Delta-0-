@@ -74,7 +74,7 @@ class Snapshot:
 
     # Hyperliquid leg.
     mark_price: float
-    short_size_eth: float  # positive number, this is a short position
+    short_size_eth: float  # positive for a short; negative means the HL position is LONG
     isolated_margin_usd: float
     hl_free_usdc: float  # on the account, not committed as margin
     hl_maintenance_margin: float  # observed, compared to config
@@ -114,8 +114,24 @@ class Snapshot:
         return self.debt_usd / self.collateral_usd
 
     @property
+    def ltv_spot(self) -> float:
+        """Debt over the spot alone, the cushion left out — the base of `target_ltv`.
+
+        The solver sizes the debt on the spot (README §3), so every amount that
+        steers the book back to `target_ltv` — P4, P6, I2 in cruise — must read
+        the same base. Measured on Aave's LTV instead, which counts the cushion
+        as collateral, P6 stopped ~685 USD short on 20 k and left 2.4 points of
+        band unrecovered. Revue finance 2026-10-02, F7.
+        """
+        if self.spot_usd == 0.0:
+            return 0.0
+        return self.debt_usd / self.spot_usd
+
+    @property
     def notional_usd(self) -> float:
-        return self.short_size_eth * self.mark_price
+        # A magnitude, whichever side the position is on: margin over a negative
+        # notional would read as a margin ratio under every trigger.
+        return abs(self.short_size_eth) * self.mark_price
 
     @property
     def margin_ratio(self) -> float:

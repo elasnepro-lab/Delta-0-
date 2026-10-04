@@ -180,6 +180,25 @@ def test_p6_fires_at_ltv_pump(
     assert action.kind == "PUMP_DOWN"
 
 
+def test_p6_repays_down_to_the_target_on_the_spot_alone(
+    stable_snapshot: Snapshot,
+    config: Config,
+    nominal_ctx: OperationalContext,
+) -> None:
+    """Revue finance 2026-10-02, F7: the cushion carries no debt of its own.
+
+    Aiming at Aave's LTV, cushion included, stopped the repayment ~685 USD
+    short on 20 k and left the book more indebted than the solver's.
+    """
+    snap = _snap_with_ltv(stable_snapshot, 0.755)
+    action = decide(snap, config, nominal_ctx)
+    repaid = float(action.params["repay_amount_usdc"])
+    after = snap.debt_usd - repaid
+    assert after / snap.spot_usd == pytest.approx(config.target_ltv + 0.01)
+    # Aave's view of the same book ends lower still: the cushion is collateral.
+    assert after / snap.collateral_usd < config.target_ltv + 0.01
+
+
 def test_p3_takes_priority_over_p6(
     stable_snapshot: Snapshot,
     config: Config,
@@ -268,6 +287,24 @@ def test_p8_fires_when_the_hedged_quantity_drifts(
     assert action.params["target_short_size_eth"] == pytest.approx(20.64)
 
 
+def test_p8_sees_a_long_instead_of_a_flat_delta(
+    stable_snapshot: Snapshot,
+    config: Config,
+    nominal_ctx: OperationalContext,
+) -> None:
+    """A long of 20 ETH against 20 ETH of spot is 40 ETH of exposure, not zero.
+
+    Revue finance 2026-10-02, F3: the size used to go through `abs()`, so this
+    book read as perfectly hedged and nothing fired.
+    """
+    snap = replace(stable_snapshot, short_size_eth=-20.0)
+    assert snap.delta_eth == pytest.approx(40.0)
+    assert snap.margin_ratio == pytest.approx(stable_snapshot.margin_ratio)
+    action = decide(snap, config, nominal_ctx)
+    assert action.priority is Priority.P8_DELTA_RETRUE
+    assert action.params["target_short_size_eth"] == pytest.approx(20.0)
+
+
 def test_p8_ignores_a_pure_price_move(
     stable_snapshot: Snapshot,
     config: Config,
@@ -341,6 +378,61 @@ def test_p10_fires_when_desired_differs(
     assert action.kind == "REGIME_STEP"
     # 25 % step: 2.5 -> 2.5 + 0.25 * (1.5 - 2.5) = 2.25
     assert action.params["step_target_exposure_mult"] == pytest.approx(2.25)
+
+
+def test_p10_reaches_the_target_in_four_tranches_not_forty_eight(
+    stable_snapshot: Snapshot,
+    config: Config,
+    nominal_ctx: OperationalContext,
+) -> None:
+    """Revue finance 2026-10-02, F10: tranches are 25 % of the INITIAL gap.
+
+    At 25 % of the remaining gap, four tranches covered 68.4 % of the way and
+    convergence took 48 of them.
+    """
+    held, steps = 2.5, 0
+    while steps < 10:
+        ctx = replace(
+            nominal_ctx,
+            current_exposure_mult=held,
+            desired_exposure_mult=1.5,
+            regime_origin_exposure_mult=2.5,
+        )
+        action = decide(stable_snapshot, config, ctx)
+        if action.kind != "REGIME_STEP":
+            break
+        held = float(action.params["step_target_exposure_mult"])
+        steps += 1
+    assert steps == 4
+    assert held == pytest.approx(1.5)
+
+
+def test_p10_takes_one_tranche_per_hour_at_most(
+    stable_snapshot: Snapshot,
+    config: Config,
+    nominal_ctx: OperationalContext,
+) -> None:
+    """README §8.9, written down and implemented in the backtest loop only."""
+    base = replace(nominal_ctx, current_exposure_mult=2.25, desired_exposure_mult=1.5)
+    recent = replace(base, last_regime_step_at=base.now_utc - timedelta(minutes=59))
+    held = decide(stable_snapshot, config, recent)
+    assert held.kind == "NOOP"
+    assert held.params["regime_held"] == "rate_limited"
+
+    due = replace(base, last_regime_step_at=base.now_utc - timedelta(hours=1))
+    assert decide(stable_snapshot, config, due).kind == "REGIME_STEP"
+
+
+def test_p10_does_not_trade_a_drift_worth_less_than_an_operation(
+    stable_snapshot: Snapshot,
+    config: Config,
+    nominal_ctx: OperationalContext,
+) -> None:
+    """The dead zone: every rebalance leaves a ~1e-3 drift, which cost 20 k in fees."""
+    ctx = replace(nominal_ctx, current_exposure_mult=2.3518, desired_exposure_mult=2.3529)
+    action = decide(stable_snapshot, config, ctx)
+    assert action.kind == "NOOP"
+    assert action.params["regime_held"] == "dead_zone"
 
 
 def test_p10_no_op_when_already_at_target(

@@ -19,6 +19,7 @@ from delta0.decision import (
     Bands,
     OperationalContext,
     bands_incoherence,
+    cushion_tranche_size,
     decide,
     derive_bands,
 )
@@ -34,34 +35,33 @@ def test_bands_derive_from_the_on_chain_threshold(config: Config) -> None:
     bands = derive_bands(LT_ARBITRUM, config)
     assert bands.ltv_pump == pytest.approx(0.750)
     assert bands.ltv_cushion == pytest.approx(0.765)
-    assert bands.ltv_deleverage == pytest.approx(0.775)
 
 
 def test_bands_follow_a_governance_cut(config: Config) -> None:
     """A lowered threshold must move the bands, not silently invalidate them."""
     before = derive_bands(LT_ARBITRUM, config)
     after = derive_bands(0.75, config)  # governance cuts the threshold
-    assert after.ltv_deleverage < before.ltv_deleverage
+    assert after.ltv_cushion < before.ltv_cushion
     # The distance to liquidation is what the config declares, so it is preserved.
-    assert after.lt - after.ltv_deleverage == pytest.approx(before.lt - before.ltv_deleverage)
+    assert after.lt - after.ltv_cushion == pytest.approx(before.lt - before.ltv_cushion)
 
 
 @pytest.mark.parametrize("lt", [0.75, 0.79, 0.81, 0.83, 0.93])
 def test_every_band_leaves_room_before_liquidation(config: Config, lt: float) -> None:
     """Whatever the threshold, each priority triggers while the position lives."""
     bands = derive_bands(lt, config)
-    for threshold in (bands.ltv_pump, bands.ltv_cushion, bands.ltv_deleverage):
+    for threshold in (bands.ltv_pump, bands.ltv_cushion):
         assert threshold < lt
     # Stated as health factors: every trigger sits strictly above liquidation.
-    for hf_threshold in (bands.hf_pump, bands.hf_cushion, bands.hf_deleverage):
+    for hf_threshold in (bands.hf_pump, bands.hf_cushion):
         assert hf_threshold > 1.0
 
 
 def test_priorities_keep_their_order(config: Config) -> None:
-    """Pump fires first, deleverage last — the slow path starts earliest."""
+    """Pump fires first, the cushion after — the slow path starts earliest."""
     bands = derive_bands(LT_ARBITRUM, config)
-    assert bands.ltv_pump < bands.ltv_cushion < bands.ltv_deleverage
-    assert bands.hf_pump > bands.hf_cushion > bands.hf_deleverage
+    assert bands.ltv_pump < bands.ltv_cushion
+    assert bands.hf_pump > bands.hf_cushion
 
 
 def test_the_shipped_thresholds_were_past_liquidation() -> None:
@@ -87,6 +87,32 @@ def test_boot_refuses_when_the_pump_would_fire_at_rest(config: Config) -> None:
     assert problem is not None
     assert "pump threshold" in problem
     assert bands_incoherence(LT_ARBITRUM, config) is None
+
+
+def test_the_pump_must_sit_above_what_p6_repays_down_to(config: Config) -> None:
+    """Revue finance 2026-10-02, F8: pump above the target was not enough.
+
+    Between the target and the target plus one point, P6 repays down to a
+    level that is already past its own trigger, and fires again on landing.
+    """
+    restore = config.target_ltv + 0.01
+    lt = restore + config.emergency.ltv_margin_pump - 0.001  # pump just under it
+    assert derive_bands(lt, config).ltv_pump > config.target_ltv
+    assert bands_incoherence(lt, config) is not None
+
+
+def test_p6_does_not_pump_nothing(
+    stable_snapshot: Snapshot,
+    config: Config,
+    nominal_ctx: OperationalContext,
+) -> None:
+    """Under a LT cut, HF can sit under the pump with nothing left to repay.
+
+    A PUMP_DOWN of 0 USD on every cycle starved P7 to P10 for good (F8).
+    """
+    cut = replace(stable_snapshot, aave_lt_wsteth=0.70, hf=0.70 * 51_000 / 33_750)
+    action = decide(cut, config, nominal_ctx)
+    assert action.kind != "PUMP_DOWN"
 
 
 def test_boot_refuses_an_unreadable_threshold(config: Config) -> None:
@@ -152,13 +178,35 @@ def test_deleverage_fires_before_liquidation_when_the_cushion_is_gone(
 ) -> None:
     depleted = replace(stable_snapshot, usdc_atoken_balance=0.0)
     bands = derive_bands(depleted.aave_lt_wsteth, config)
-    snap = _at_ltv(depleted, bands.ltv_deleverage + 0.002)
+    snap = _at_ltv(depleted, bands.ltv_cushion + 0.002)
     assert snap.hf > 1.0  # still alive when the defence triggers
     action = decide(snap, config, nominal_ctx)
     assert action.priority is Priority.P4_DELEVERAGE
 
 
+@pytest.mark.parametrize("cushion_left", [0.0, 0.5])
+def test_under_the_cushion_threshold_a_local_defence_always_fires(
+    stable_snapshot: Snapshot,
+    config: Config,
+    nominal_ctx: OperationalContext,
+    cushion_left: float,
+) -> None:
+    """Revue finance 2026-10-02, F9: P3 or P4, never the bridge alone.
+
+    P4 used to wait for a deeper threshold of its own. With the cushion short
+    of a tranche and the HF between the two, only P6 answered — through the
+    bridge, slower than I2's grace — and I2 then deflated the whole book.
+    """
+    short_cushion = cushion_left * cushion_tranche_size(config)
+    weak = replace(stable_snapshot, usdc_atoken_balance=short_cushion)
+    bands = derive_bands(weak.aave_lt_wsteth, config)
+    snap = _at_ltv(weak, bands.ltv_cushion + 0.001)
+    assert snap.hf <= bands.hf_cushion
+    action = decide(snap, config, nominal_ctx)
+    assert action.priority is Priority.P4_DELEVERAGE
+
+
 def test_bands_is_frozen() -> None:
-    bands = Bands(lt=0.79, ltv_pump=0.75, ltv_cushion=0.765, ltv_deleverage=0.775)
+    bands = Bands(lt=0.79, ltv_pump=0.75, ltv_cushion=0.765)
     with pytest.raises(AttributeError):
         bands.lt = 0.80  # type: ignore[misc]

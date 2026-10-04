@@ -290,7 +290,6 @@ def show_verdict(lt: float, cfg: dict[str, Any]) -> None:
     thresholds = [
         ("ltv_pump", lt - emergency["ltv_margin_pump"]),
         ("ltv_cushion", lt - emergency["ltv_margin_cushion"]),
-        ("ltv_deleverage", lt - emergency["ltv_margin_deleverage"]),
     ]
 
     print("\n=== verdict sur les seuils configures ===")

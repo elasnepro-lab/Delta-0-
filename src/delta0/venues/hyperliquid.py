@@ -38,6 +38,12 @@ _SHAPE_ERRORS = (KeyError, TypeError, ValueError, IndexError, AttributeError)
 # stuck here is a loop that no longer reads the KILL file.
 _CALL_DEADLINE_S = 8.0
 
+# Rows per `fundingHistory` answer: the API never returns more, measured in
+# backtest/hl_funding.py. A full page means there may be more to read.
+_FUNDING_PAGE_LIMIT = 500
+_HOUR_MS = 3600 * 1000
+_WINDOW_30D_MS = 30 * 24 * _HOUR_MS
+
 
 @dataclass(frozen=True, slots=True)
 class HLPosition:
@@ -46,6 +52,18 @@ class HLPosition:
     entry_price: float
     isolated_margin_usd: float
     leverage: int
+
+    @property
+    def short_size_eth(self) -> float:
+        """Size of the short, keeping the sign: negative means the position is LONG.
+
+        An `abs()` here read a long — a wrong fill, a manual trade — as a
+        short of the same size: the delta looked flat while the real exposure
+        was the spot PLUS the long, and neither P8 nor I1 said a word. Kept
+        signed, the delta is right by construction and P8 re-trues it. Revue
+        finance 2026-10-02, F3.
+        """
+        return -self.size_signed
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +74,10 @@ class HLMarketMeta:
 
 
 class HyperliquidReader:
+    # (hour index, annualized mean): funding settles hourly, so the 30-day
+    # mean cannot move inside an hour and paging 720 rows every 5 s cycle
+    # would only spend the API's rate limit.
+    _funding_30d_cache: tuple[int, float] | None = None
     """Read-only Hyperliquid client. Bound to one user address."""
 
     def __init__(self, api_url: str, user_address: str) -> None:
@@ -122,24 +144,44 @@ class HyperliquidReader:
         return None
 
     async def read_funding_avg_30d(self, coin: str) -> float:
-        """Annualized 30-day average hourly funding for `coin`.
+        """Annualized mean of the hourly funding over the last 30 days.
 
-        Hyperliquid's `funding_history` returns hourly rates; we take the mean
-        over the last 720 samples and annualize.
+        Paged. One `fundingHistory` call returns at most 500 rows counted from
+        `startTime`, so a single call over 30 days read the 20.8 OLDEST days
+        and missed the most recent 9 — the regime gate would have seen the
+        funding with ~16 days of lag once its hysteresis was added. The
+        backtest paged already: the two did not measure the same thing.
+        Revue finance 2026-10-02, F2.
         """
-        # 30 days back in ms.
-        start_time_ms = self._now_ms() - 30 * 24 * 3600 * 1000
-        history = await self._run(
-            "historique de funding", self._info.funding_history, coin, start_time_ms
-        )
-        try:
-            if not history:
-                return 0.0
-            rates: list[float] = [float(h["fundingRate"]) for h in history]
-        except _SHAPE_ERRORS as e:
-            raise HLReadError(f"historique de funding illisible pour {coin!r}") from e
-        mean_hourly = sum(rates) / len(rates)
-        return mean_hourly * _HOURS_PER_YEAR
+        now_ms = self._now_ms()
+        hour = now_ms // _HOUR_MS
+        cached = self._funding_30d_cache
+        if cached is not None and cached[0] == hour:
+            return cached[1]
+
+        rates: list[float] = []
+        cursor = now_ms - _WINDOW_30D_MS
+        while cursor < now_ms:
+            page = await self._run(
+                "historique de funding", self._info.funding_history, coin, cursor, now_ms
+            )
+            if not page:
+                break
+            try:
+                rates.extend(float(h["fundingRate"]) for h in page)
+                last = int(page[-1]["time"])
+            except _SHAPE_ERRORS as e:
+                raise HLReadError(f"historique de funding illisible pour {coin!r}") from e
+            if last < cursor:  # the API never goes back; trusting it would loop forever
+                raise HLReadError(f"pagination du funding en arrière : {last} < {cursor}")
+            cursor = last + 1
+            if len(page) < _FUNDING_PAGE_LIMIT:
+                break
+        if not rates:
+            return 0.0
+        mean = sum(rates) / len(rates) * _HOURS_PER_YEAR
+        self._funding_30d_cache = (hour, mean)
+        return mean
 
     async def read_last_hour_funding(self, coin: str) -> float:
         start_time_ms = self._now_ms() - 2 * 3600 * 1000
@@ -172,6 +214,14 @@ class HyperliquidReader:
         would conclude there is nothing to draw on. Measured 2026-09-09, see
         memory/hl_findings.md §14 and §16.
 
+        `total` is not that figure: on a unified account it INCLUDES the
+        isolated margin already committed, which shows up as `hold`. Reading
+        `total` alone counted the margin twice in the equity, sized the spot
+        ~22 % too big, and let P2 believe it had 5 429 USD to add when 1 253
+        were really there. Measured on our own account on 2026-09-09: opening
+        a position with 1.24 of margin left `total` at 29.79 for 29.80 before
+        (hl_findings §16). Revue finance 2026-10-02, F1.
+
         This is what the fast up-flank defence spends: adding isolated margin
         from here is one local request, no bridge.
         """
@@ -184,7 +234,9 @@ class HyperliquidReader:
         for entry in balances:
             if isinstance(entry, dict) and entry.get("coin") == "USDC":
                 try:
-                    return float(entry.get("total", "0"))
+                    total = float(entry.get("total", "0"))
+                    hold = float(entry.get("hold", "0"))
                 except (TypeError, ValueError):
                     return 0.0
+                return max(0.0, total - hold)
         return 0.0

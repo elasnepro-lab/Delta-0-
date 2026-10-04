@@ -1,4 +1,4 @@
-"""Invariants I1-I8, checked on every snapshot — README section 11.
+"""Invariants I1-I9, checked on every snapshot — README section 11.
 
 The decision table is the first line of defence; the invariants are the second,
 the one that catches what the first let through. The incident of 2026-09-08 is
@@ -21,6 +21,8 @@ Escalation (README §11):
   CRITICAL and deflate, since nothing else is left to wait for.
 - I7, or a transfer in transit for over an hour (§9.3): CRITICAL, and
   non-critical operations frozen.
+- I9, thresholds a venue's governance has made unusable: CRITICAL, and
+  non-critical operations frozen. A maintenance margin that moved: WARN.
 - I5: WARN, and non-critical operations frozen.
 """
 
@@ -32,7 +34,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 
-from delta0.decision import derive_bands
+from delta0.decision import bands_incoherence, derive_bands, hl_margin_incoherence
 
 if TYPE_CHECKING:
     from delta0.config import Config
@@ -148,9 +150,13 @@ def _i1_delta(snapshot: Snapshot, config: Config, ctx: InvariantContext) -> Iter
 
 def _i2_ltv(snapshot: Snapshot, config: Config, ctx: InvariantContext) -> Iterator[Violation]:
     ceiling = config.target_ltv + config.invariants.cruise_ltv_headroom
-    if ctx.cruising and snapshot.debt_usd > 0.0 and snapshot.ltv > ceiling:
+    # LTV spot, the base of target_ltv: Aave's own LTV counts the cushion and
+    # sat ~2 points lower, so the warning came late (F7, m4).
+    if ctx.cruising and snapshot.debt_usd > 0.0 and snapshot.ltv_spot > ceiling:
         yield Violation(
-            "I2", Severity.WARN, f"LTV {snapshot.ltv:.4f} au-dessus de {ceiling:.4f} en croisière"
+            "I2",
+            Severity.WARN,
+            f"LTV spot {snapshot.ltv_spot:.4f} au-dessus de {ceiling:.4f} en croisière",
         )
     grace = timedelta(seconds=config.invariants.p3_grace_s)
     since = ctx.cushion_breach_since
@@ -249,7 +255,7 @@ def _i8_recompose(snapshot: Snapshot, config: Config, ctx: InvariantContext) -> 
     # cushion counting as collateral.
     if not ctx.just_recomposed or snapshot.spot_usd <= 0.0 or snapshot.notional_usd <= 0.0:
         return
-    debt_ratio = snapshot.debt_usd / snapshot.spot_usd
+    debt_ratio = snapshot.ltv_spot
     tolerance = config.invariants.recompose_tolerance
     ltv_off = abs(debt_ratio - config.target_ltv) > tolerance
     margin_off = abs(snapshot.margin_ratio - config.target_margin_ratio) > tolerance
@@ -262,6 +268,37 @@ def _i8_recompose(snapshot: Snapshot, config: Config, ctx: InvariantContext) -> 
         )
 
 
+def _i9_governance(
+    snapshot: Snapshot, config: Config, ctx: InvariantContext
+) -> Iterator[Violation]:
+    """The venues' risk parameters, re-read every cycle, against our thresholds.
+
+    The boot checked them once; governance does not wait for a restart. A LT
+    cut mid-run used to leave P6 pumping nothing forever, a LT read as 0 made
+    every down-flank defence silent, and a lower `maxLeverage` on Hyperliquid
+    could put P2 past the liquidation without a word. Revue finance
+    2026-10-02, F5 and F8.
+    """
+    _ = ctx
+    for problem in (
+        bands_incoherence(snapshot.aave_lt_wsteth, config),
+        hl_margin_incoherence(snapshot.hl_maintenance_margin, config),
+    ):
+        if problem is not None:
+            yield Violation("I9", Severity.CRITICAL, problem)
+    observed = snapshot.hl_maintenance_margin
+    if observed > 0.0 and abs(observed - config.maintenance_margin) > _MM_TOLERANCE:
+        yield Violation(
+            "I9",
+            Severity.WARN,
+            f"maintenance margin HL {observed:.4f} au lieu de {config.maintenance_margin:.4f} "
+            "en config — maxLeverage changé par la place ?",
+        )
+
+
+# The MM is 1 / (2 x maxLeverage): any real change moves it by far more.
+_MM_TOLERANCE = 1e-6
+
 _CHECKS = (
     _i1_delta,
     _i2_ltv,
@@ -271,11 +308,12 @@ _CHECKS = (
     _i6_transfers,
     _i7_one_execution,
     _i8_recompose,
+    _i9_governance,
 )
 
 
 def check_invariants(snapshot: Snapshot, config: Config, ctx: InvariantContext) -> list[Violation]:
-    """Every violated invariant, in I1-I8 order. Pure."""
+    """Every violated invariant, in I1-I9 order. Pure."""
     return [violation for check in _CHECKS for violation in check(snapshot, config, ctx)]
 
 

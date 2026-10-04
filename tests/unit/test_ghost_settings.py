@@ -31,7 +31,6 @@ SRC = Path(__file__).resolve().parents[2] / "src" / "delta0"
 
 # Declared and validated, deliberately not consumed yet.
 AWAITING_READER: dict[str, str] = {
-    "maintenance_margin": "8.4 — comparaison au démarrage avec la maintenance lue via l'API",
     "skim_policy": "8.5 — écrémage-recomposition",
     "slippage_max_bps": "8.1 — agrégateur de swap",
     "order_style": "8.3 — ordres maker puis traversée du spread",

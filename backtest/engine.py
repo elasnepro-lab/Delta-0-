@@ -216,6 +216,7 @@ class Engine:
     _regime: Regime | None = None
     _regime_day: int | None = None
     _regime_step_ms: int | None = None
+    _regime_origin: float | None = None
 
     def run(self, timeline: Timeline, book: Book, start: Month, end: Month) -> Journal:
         for minute in timeline.walk(start, end):
@@ -256,8 +257,7 @@ class Engine:
                 continue
             action = decide(observed, self.config, self._context(minute, observed))
             if action.kind == "NOOP":
-                continue
-            if action.kind == "REGIME_STEP" and not self._worth_stepping(action, observed, minute):
+                self._count_held(action)
                 continue
             if self.preempt and self._pending:
                 in_flight = min(pending.priority for _, pending in self._pending)
@@ -267,6 +267,8 @@ class Engine:
                 self._pending.clear()
                 self.journal.preempted += 1
             self._pending.append((minute.ts_ms + self._delay_ms(action), action))
+            if action.kind == "REGIME_STEP":
+                self._regime_step_ms = minute.ts_ms
             decided = True
 
     def _settle(self, minute: Minute, book: Book) -> None:
@@ -337,6 +339,12 @@ class Engine:
             # sont égales, donc P10 se tait — c'est le côté « OFF » de l'A/B.
             current_exposure_mult=self._held(observed),
             desired_exposure_mult=self._wanted(observed),
+            last_regime_step_at=(
+                None
+                if self._regime_step_ms is None
+                else datetime.fromtimestamp(self._regime_step_ms / 1000, UTC)
+            ),
+            regime_origin_exposure_mult=self._regime_origin,
         )
 
     def _held(self, observed: Snapshot) -> float:
@@ -380,40 +388,25 @@ class Engine:
         self._regime = regime_step(self._regime, spread, self.config)
         if self._regime.target != before:
             self.journal.regime_changes.append((minute.ts_ms, self._regime.target))
+            # The tranches of this transition are 25 % of the gap from here.
+            self._regime_origin = before
 
-    def _worth_stepping(self, action: Action, observed: Snapshot, minute: Minute) -> bool:
-        """Les deux garde-fous que le README §8.9 demande et que le moteur du bot n'a pas.
+    def _count_held(self, action: Action) -> None:
+        """Compter ce que les garde-fous de P10 ont retenu.
 
-        **Une tranche par heure au maximum**, écrit noir sur blanc au §8.9, et
-        implémenté nulle part : `decide` est pur et n'a pas d'horloge pour ça.
-        C'est la boucle qui la tient.
-
-        **Une zone morte.** `_EXPOSURE_EPS` vaut 1e-6 dans `delta0/decision.py`,
-        soit deux centimes de spot sur 20 000 $. Or un re-centrage ne pose jamais
-        l'exposition au millionième : les coûts sont estimés en deux passes et le
-        gaz sort d'une flotte hors bilan, ce qui laisse un résidu de l'ordre de
-        1e-3. Mesuré : la porte a tiré 19 913 fois en quatre mois sur un écart de
-        0,001 entre tenue (2,3518x) et voulue (2,3529x), et brûlé 20 384 $ de
-        frais sur 20 000 $ de capital. Le seuil retenu ici est celui que le projet
-        a déjà tranché pour « trop petit pour valoir une opération » :
-        `skim_min_usd`, en dollars de spot déplacés.
-
-        Les deux refus sont COMPTÉS. Un garde-fou qui travaille en silence est un
-        garde-fou dont personne ne saura qu'il a tenu la campagne debout.
+        La zone morte et la cadence d'une tranche par heure (README §8.9) vivent
+        désormais dans `decide`, pour que la production les ait aussi (revue
+        finance 2026-10-02, F10). Ils rendent un NOOP qui dit pourquoi ; le
+        compter ici garde ce que le journal savait déjà : un garde-fou qui
+        travaille en silence est un garde-fou dont personne ne saura qu'il a
+        tenu la campagne debout. Mesuré avant eux : 19 913 pas en quatre mois,
+        20 384 $ de frais sur 20 000 $.
         """
-        step = float(action.params["step_target_exposure_mult"])
-        held = self._held(observed)
-        moved = abs(step - held) * max(0.0, observed.equity - observed.cushion_usd)
-        if moved < self.config.skim_min_usd:
-            # La zone morte passe AVANT la cadence : un pas qui ne vaut rien n'a
-            # pas à consommer le créneau horaire d'un pas qui vaudrait quelque chose.
+        held = action.params.get("regime_held")
+        if held == "dead_zone":
             self.journal.regime_suppressed += 1
-            return False
-        if self._regime_step_ms is not None and minute.ts_ms - self._regime_step_ms < HOUR_MS:
+        elif held == "rate_limited":
             self.journal.regime_rate_limited += 1
-            return False
-        self._regime_step_ms = minute.ts_ms
-        return True
 
     def _dead(self, observed: Snapshot, minute: Minute) -> bool:
         """Les deux façons de mourir, guettées à chaque point de la minute."""

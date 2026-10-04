@@ -240,22 +240,78 @@ def test_i7_two_executions_at_once_is_critical_without_deflating(
     assert not verdict.deflate
 
 
+# --- I9 -------------------------------------------------------------------------
+
+
+def test_i9_a_lower_max_leverage_on_hyperliquid_warns(
+    stable_snapshot: Snapshot, config: Config, now: datetime
+) -> None:
+    """Revue finance 2026-10-02, F5: the MM was computed and never compared.
+
+    20x instead of 25x moves the MM from 2 % to 2.5 %: P2 at 3.5 % still fires
+    first, but the gap to the liquidation has shrunk, and the operator must
+    know the place changed a parameter the config was calibrated on.
+    """
+    snap = replace(stable_snapshot, hl_maintenance_margin=1 / (2 * 20))
+    violations = check_invariants(snap, config, _at_rest(now))
+    assert _codes(violations) == [("I9", Severity.WARN)]
+    assert "maxLeverage" in violations[0].message
+
+
+def test_i9_p2_past_the_hyperliquid_liquidation_is_critical(
+    stable_snapshot: Snapshot, config: Config, now: datetime
+) -> None:
+    """At 14x the MM (3.57 %) passes P2's 3.5 %: P2 would fire after the liquidation."""
+    snap = replace(stable_snapshot, hl_maintenance_margin=1 / (2 * 14))
+    violations = check_invariants(snap, config, _at_rest(now))
+    assert ("I9", Severity.CRITICAL) in _codes(violations)
+    verdict = assess(violations)
+    assert verdict.freeze_non_critical
+    assert not verdict.deflate
+
+
+@pytest.mark.parametrize("lt", [0.0, 0.70])
+def test_i9_an_aave_governance_cut_mid_run_is_critical(
+    stable_snapshot: Snapshot, config: Config, now: datetime, lt: float
+) -> None:
+    """Revue finance 2026-10-02, F8: the bands were checked at boot only.
+
+    A LT read as 0 silenced every down-flank defence; a LT cut to 0.70 put the
+    pump (0.66) under the level P6 repays down to (0.685).
+    """
+    snap = replace(stable_snapshot, aave_lt_wsteth=lt)
+    violations = [v for v in check_invariants(snap, config, _at_rest(now)) if v.code == "I9"]
+    assert [v.severity for v in violations] == [Severity.CRITICAL]
+
+
 # --- I8 -------------------------------------------------------------------------
 
 
 def test_i8_checks_the_targets_after_a_recompose(
     stable_snapshot: Snapshot, config: Config, now: datetime
 ) -> None:
-    # The reference world carries debt/spot 0.70 against a 0.675 target.
-    off_target = _at_rest(now, just_recomposed=True)
-    assert _codes(check_invariants(stable_snapshot, config, off_target)) == [("I8", Severity.WARN)]
+    # Debt/spot 0.685 against a 0.675 target: past I8's tolerance, under I2's.
+    off = replace(stable_snapshot, usdc_variable_debt_balance=0.685 * stable_snapshot.spot_usd)
+    recomposed = _at_rest(now, just_recomposed=True)
+    assert _codes(check_invariants(off, config, recomposed)) == [("I8", Severity.WARN)]
 
-    on_target = replace(
-        stable_snapshot, usdc_variable_debt_balance=config.target_ltv * stable_snapshot.spot_usd
-    )
-    assert check_invariants(on_target, config, off_target) == []
+    # The reference world sits on target.
+    assert check_invariants(stable_snapshot, config, recomposed) == []
     # Without a recompose, the same gap is none of I8's business.
-    assert check_invariants(stable_snapshot, config, _at_rest(now)) == []
+    assert check_invariants(off, config, _at_rest(now)) == []
+
+
+def test_i2_in_cruise_reads_the_spot_ltv_not_aave_s(
+    stable_snapshot: Snapshot, config: Config, now: datetime
+) -> None:
+    """Revue finance 2026-10-02, m4: Aave's LTV counts the cushion and reads low.
+
+    Debt/spot 0.70 is past the 0.695 ceiling, while Aave's view of the same book
+    (0.686, cushion included) sits under it and used to keep I2 quiet.
+    """
+    high = replace(stable_snapshot, usdc_variable_debt_balance=35_000.0)
+    assert high.ltv < config.target_ltv + config.invariants.cruise_ltv_headroom
+    assert _codes(check_invariants(high, config, _at_rest(now))) == [("I2", Severity.WARN)]
 
 
 # --- Bookkeeping, alerts, config --------------------------------------------------

@@ -10,7 +10,7 @@ target_ltv: 0.675          # revisable : voir scripts/classeur.py --compare
 target_margin_ratio: 0.10
 exposure_mult: 2.3529411765  # = 1 / (1 - target_ltv + 1 / short_leverage), verifie au boot
 exposure_mult_half: 1.5      # lu par aucun code avant le chantier 8.6 (porte de régime)
-maintenance_margin: 0.02     # lu par aucun code avant 8.4 : la comparaison à l'API n'existe pas encore
+maintenance_margin: 0.02     # attendue de la place ; I9 alerte si la valeur lue (1 / (2 x maxLeverage)) en diffère
 cushion_pct: 0.05            # 5% of capital held as USDC supply on Aave = 1000$
 cushion_floor_pct: 0.025     # invariant I4 (évalué dès la phase 3) ; reconstitution à l'écrémage en 8.5
 recenter_up: 0.045           # flanc haut étroit (levier du short) : re-centrer tôt
@@ -40,11 +40,11 @@ emergency:
   # Les seuils absolus ont ete retires : ils dependaient d'un LT de 0,81
   # (Ethereum) alors qu'Arbitrum applique 0,79, ce qui placait le coussin
   # pile sur la liquidation et le desendettement deux points au-dela.
-  # Avec LT = 0,79 ces marges donnent 0,75 / 0,765 / 0,775 ; les mouvements de
+  # P3 et P4 partagent le seuil coussin (README §7).
+  # Avec LT = 0,79 ces marges donnent 0,75 / 0,765 ; les mouvements de
   # prix correspondants depuis la cible, coussin plein et vide : scripts/classeur.py.
   ltv_margin_pump: 0.040       # pompe descendante, la plus precoce
-  ltv_margin_cushion: 0.025    # remboursement depuis le coussin
-  ltv_margin_deleverage: 0.015 # desendettement par etapes, dernier recours
+  ltv_margin_cushion: 0.025    # coussin (P3), puis desendettement (P4) une fois le coussin vide
 
 watchdog:
   ws_stale_s: 10

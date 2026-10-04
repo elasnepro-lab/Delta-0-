@@ -4,7 +4,10 @@
 each, so 20 ETH of equivalent against a 20 ETH short: delta zero. Arbitrum's
 real wstETH parameters, read on-chain (memory/aave_findings.md §9): liquidation
 threshold 0.79 and maximum LTV 0.75, with the health factor they give on
-51 000 $ of collateral and 35 000 $ of debt.
+51 000 $ of collateral and 33 750 $ of debt — `target_ltv` 0.675 on the spot
+alone, the solver's base. The debt was 35 000 (0.70 on the spot) until the
+2026-10-02 finance review: the world sat off target, and only I2 reading
+Aave's LTV, cushion included, let it pass for a position at rest (F7, m4).
 
 Four test modules used to copy this sheet by hand with LT 0.83 and HF 1.5 — the
 world phase 1 corrected, still alive in the tracer tests — and every copy
@@ -34,9 +37,9 @@ _REFERENCE = Snapshot(
     wsteth_price_usd=3_125.0,
     wsteth_eth_ratio=1.25,
     usdc_atoken_balance=1_000.0,
-    usdc_variable_debt_balance=35_000.0,
+    usdc_variable_debt_balance=33_750.0,
     usdc_wallet_balance=0.0,
-    hf=1.1511,  # 0.79 x 51 000 / 35 000
+    hf=1.1938,  # 0.79 x 51 000 / 33 750
     aave_lt_wsteth=LT_ARBITRUM,
     aave_ltv_max_wsteth=LTV_MAX_ARBITRUM,
     aave_emode=0,
