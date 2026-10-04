@@ -380,6 +380,61 @@ def test_p10_fires_when_desired_differs(
     assert action.params["step_target_exposure_mult"] == pytest.approx(2.25)
 
 
+def test_p10_reaches_the_target_in_four_tranches_not_forty_eight(
+    stable_snapshot: Snapshot,
+    config: Config,
+    nominal_ctx: OperationalContext,
+) -> None:
+    """Revue finance 2026-10-02, F10: tranches are 25 % of the INITIAL gap.
+
+    At 25 % of the remaining gap, four tranches covered 68.4 % of the way and
+    convergence took 48 of them.
+    """
+    held, steps = 2.5, 0
+    while steps < 10:
+        ctx = replace(
+            nominal_ctx,
+            current_exposure_mult=held,
+            desired_exposure_mult=1.5,
+            regime_origin_exposure_mult=2.5,
+        )
+        action = decide(stable_snapshot, config, ctx)
+        if action.kind != "REGIME_STEP":
+            break
+        held = float(action.params["step_target_exposure_mult"])
+        steps += 1
+    assert steps == 4
+    assert held == pytest.approx(1.5)
+
+
+def test_p10_takes_one_tranche_per_hour_at_most(
+    stable_snapshot: Snapshot,
+    config: Config,
+    nominal_ctx: OperationalContext,
+) -> None:
+    """README §8.9, written down and implemented in the backtest loop only."""
+    base = replace(nominal_ctx, current_exposure_mult=2.25, desired_exposure_mult=1.5)
+    recent = replace(base, last_regime_step_at=base.now_utc - timedelta(minutes=59))
+    held = decide(stable_snapshot, config, recent)
+    assert held.kind == "NOOP"
+    assert held.params["regime_held"] == "rate_limited"
+
+    due = replace(base, last_regime_step_at=base.now_utc - timedelta(hours=1))
+    assert decide(stable_snapshot, config, due).kind == "REGIME_STEP"
+
+
+def test_p10_does_not_trade_a_drift_worth_less_than_an_operation(
+    stable_snapshot: Snapshot,
+    config: Config,
+    nominal_ctx: OperationalContext,
+) -> None:
+    """The dead zone: every rebalance leaves a ~1e-3 drift, which cost 20 k in fees."""
+    ctx = replace(nominal_ctx, current_exposure_mult=2.3518, desired_exposure_mult=2.3529)
+    action = decide(stable_snapshot, config, ctx)
+    assert action.kind == "NOOP"
+    assert action.params["regime_held"] == "dead_zone"
+
+
 def test_p10_no_op_when_already_at_target(
     stable_snapshot: Snapshot,
     config: Config,

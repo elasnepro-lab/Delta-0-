@@ -22,6 +22,10 @@ from delta0.types import NOOP, Action, Priority, Snapshot, TargetState
 # Tolerance for float equality on desired-vs-current exposure comparison.
 _EXPOSURE_EPS = 1e-6
 
+# README §8.9: tranches of 25 % of the gap, one per hour at most.
+_REGIME_TRANCHE = 0.25
+_REGIME_STEP_INTERVAL = timedelta(hours=1)
+
 
 class BlindState(StrEnum):
     """Watchdog verdict on venue reachability (README section 11)."""
@@ -46,6 +50,11 @@ class OperationalContext:
     - `blind_state`: watchdog verdict.
     - `liquidation_event`: True if the watcher observed a LiquidationCall
       (Aave) or a liquidation user event (HL) for our address.
+    - `last_regime_step_at`: when the last P10 tranche was emitted (None if
+      never), for the one-tranche-per-hour cap of README §8.9.
+    - `regime_origin_exposure_mult`: the exposition held when the current
+      regime transition began; tranches are 25 % of THAT gap. None falls back
+      to the current exposition, which is right on the transition's first step.
     """
 
     now_utc: datetime
@@ -55,6 +64,8 @@ class OperationalContext:
     last_skim_at: datetime | None = None
     desired_exposure_mult: float | None = None
     current_exposure_mult: float | None = None
+    last_regime_step_at: datetime | None = None
+    regime_origin_exposure_mult: float | None = None
 
 
 # --- Target-state solver ------------------------------------------------------
@@ -574,15 +585,52 @@ def _p9_skim(snapshot: Snapshot, config: Config, ctx: OperationalContext) -> Act
     return None
 
 
-def _p10_regime_step(ctx: OperationalContext) -> Action | None:
+def _p10_regime_step(snapshot: Snapshot, config: Config, ctx: OperationalContext) -> Action | None:
+    """One tranche toward the regime's exposition, with the two guards of README §8.9.
+
+    Revue finance 2026-10-02, F10. The step used to be 25 % of the REMAINING
+    gap, re-emitted on every cycle: four tranches covered 68.4 % of the way,
+    convergence took 48, and nothing capped the cadence. With no dead zone
+    either, the backtest fired 19 913 times in four months on a 0.001 drift
+    left by every rebalance, and burnt 20 384 USD of fees on 20 000. Both
+    guards lived in the backtest loop only; production had neither.
+
+    A held tranche is not silent: it comes back as a NOOP carrying why, so a
+    loop can count what the guards held back.
+    """
     if ctx.desired_exposure_mult is None or ctx.current_exposure_mult is None:
         return None
-    # Change exposure by 25 % of the gap per tick, per README section 8.9.
-    delta = ctx.desired_exposure_mult - ctx.current_exposure_mult
+    current = ctx.current_exposure_mult
+    delta = ctx.desired_exposure_mult - current
     if abs(delta) < _EXPOSURE_EPS:
         return None
-    step_fraction = 0.25
-    step_target = ctx.current_exposure_mult + step_fraction * delta
+    origin = ctx.regime_origin_exposure_mult
+    full_gap = abs(ctx.desired_exposure_mult - (current if origin is None else origin))
+    tranche = min(abs(delta), _REGIME_TRANCHE * max(full_gap, abs(delta)))
+    step_target = current + (tranche if delta > 0 else -tranche)
+
+    # Dead zone first: a step worth nothing must not use up the hourly slot of
+    # one that would. The threshold is the one the project already uses for
+    # "too small to be worth an operation": skim_min_usd of spot moved.
+    moved_usd = tranche * max(0.0, snapshot.equity - snapshot.cushion_usd)
+    if moved_usd < config.skim_min_usd:
+        return Action(
+            kind="NOOP",
+            priority=Priority.P10_REGIME,
+            reason=(
+                f"porte de régime : écart {delta:+.4f}x, {moved_usd:.0f} $ à déplacer "
+                f"< {config.skim_min_usd:.0f} $ — tranche retenue (zone morte)"
+            ),
+            params={"regime_held": "dead_zone"},
+        )
+    last = ctx.last_regime_step_at
+    if last is not None and ctx.now_utc - last < _REGIME_STEP_INTERVAL:
+        return Action(
+            kind="NOOP",
+            priority=Priority.P10_REGIME,
+            reason="porte de régime : une tranche par heure au plus — tranche retenue",
+            params={"regime_held": "rate_limited"},
+        )
     return Action(
         kind="REGIME_STEP",
         priority=Priority.P10_REGIME,
@@ -676,7 +724,7 @@ def decide(snapshot: Snapshot, config: Config, ctx: OperationalContext) -> Actio
         _p7_recenter(snapshot, config, ctx),
         _p8_delta_retrue(snapshot, config),
         _p9_skim(snapshot, config, ctx),
-        _p10_regime_step(ctx),
+        _p10_regime_step(snapshot, config, ctx),
     )
     for candidate in candidates:
         if candidate is not None:

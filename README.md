@@ -281,7 +281,7 @@ Les trois termes sont des moyennes sur la MÊME fenêtre de 30 jours : `borrow_3
 
 `regime.safety_margin_bps` est le conservatisme de la porte, assumé et réglable : ce qu'on exige au-delà du seuil de rentabilité avant d'accepter le risque du montage. Il remplace le zéro implicite de l'ancienne règle, qui comparait le funding au taux d'emprunt plein et rangeait en PARKED des régimes encore rentables sans que ce choix soit écrit nulle part.
 
-Tout changement d'exposition se fait par tranches de 25 % de l'écart, une tranche par heure maximum, via les procédures 8.1/8.2 partielles. Jamais de changement d'exposition en urgence.
+Tout changement d'exposition se fait par tranches de 25 % de l'écart mesuré au début de la transition (quatre tranches la terminent ; 25 % de l'écart restant ne converge jamais), une tranche par heure maximum, via les procédures 8.1/8.2 partielles. Une tranche qui déplacerait moins de `skim_min_usd` de spot n'est pas posée : chaque re-dimensionnement laisse une dérive résiduelle, et la poursuivre coûte des frais sans rien changer au régime. Jamais de changement d'exposition en urgence.
 
 ---
 
