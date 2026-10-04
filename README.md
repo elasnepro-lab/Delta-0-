@@ -33,7 +33,8 @@ La performance vient de l'exécution, pas de l'idée : le rendement est un fait 
 |---|---|
 | Notionnel | Taille du short × prix mark, en USD. Base de calcul du funding. |
 | Delta | Valeur spot (wstETH en USD) moins notionnel du short. Cible : 0. |
-| LTV | Dette totale USD / collatéral total USD sur Aave. Cible : `target_ltv` (décision n° 3, §17). |
+| LTV Aave | Dette totale USD / collatéral total USD sur Aave, coussin compris. C'est la LTV qu'Aave affiche et qui fait le HF : lecture, rapports, contrôles de cohérence. Elle n'a pas de cible. |
+| LTV spot | Dette totale USD / valeur du spot (wstETH seul, sans le coussin). C'est la base de `target_ltv` (décision n° 3, §17), du solveur (§3), des montants remboursés par P4 et P6, et de I2 et I8 en croisière. |
 | HF (health factor) | (Collatéral × seuil de liquidation) / dette, lu on-chain via Aave. Liquidation si HF < 1. |
 | Margin ratio | Marge isolée / notionnel du short sur Hyperliquid. Cible : 10 % (levier 10x). |
 | Anchor | Prix ETH du dernier re-centrage. Référence des seuils de re-centrage. |
@@ -108,7 +109,7 @@ Groupes : capital et levier (`capital_usd`, `short_leverage`, `target_ltv`, `tar
 
 Règles de dérivation :
 - `target_margin_ratio = 1 / short_leverage` et `exposure_mult = 1 / (1 − target_ltv + 1 / short_leverage)`.
-- **Flanc bas : pas de LTV absolue.** Les seuils sont des marges sous le LT lu on-chain (`emergency.ltv_margin_pump > ltv_margin_cushion > ltv_margin_deleverage`). Seuil en LTV = LT − marge, comparé en HF : HF_seuil = LT / (LT − marge). Un seuil absolu écrit dans un fichier devient faux dès que la gouvernance Aave déplace le LT, ou quand on change de chaîne. Le démarrage est refusé si le seuil de pompe tombe au niveau de `target_ltv` ou dessous.
+- **Flanc bas : pas de LTV absolue.** Les seuils sont des marges sous le LT lu on-chain (`emergency.ltv_margin_pump > ltv_margin_cushion` ; P3 et P4 partagent le seuil coussin, §7, et `ltv_margin_deleverage` n'a plus de rôle). Seuil en LTV = LT − marge, comparé en HF : HF_seuil = LT / (LT − marge). Un seuil absolu écrit dans un fichier devient faux dès que la gouvernance Aave déplace le LT, ou quand on change de chaîne. Le démarrage est refusé si le seuil de pompe tombe au niveau de `target_ltv` ou dessous.
 - **Flanc haut : seuils en margin ratio**, `margin_ratio_pump > margin_ratio_reduce`, tous deux au-dessus de la maintenance lue via l'API (cette dernière comparaison n'est pas encore écrite).
 - **Capital immobilisé** : le coussin (`cushion_pct` du capital) et la réserve HL (`emergency.hl_reserve_pct` du notionnel) sortent de l'équité déployable (solveur, §3). `exposure_mult` n'est donc plus l'exposition construite mais le coefficient brut du solveur : l'exposition réelle, spot / équité, est plus basse. Toute comparaison à une exposition observée (porte de régime, §8.9) doit le prendre en compte.
 
@@ -144,16 +145,17 @@ spot_eth        = wsteth_atoken_balance * wsteth_eth_ratio        # ce que le sh
 cushion_usd     = usdc_atoken_balance
 collateral_usd  = spot_usd + cushion_usd
 debt_usd        = usdc_variable_debt_balance
-ltv             = debt_usd / collateral_usd                        # lecture et rapports
+ltv             = debt_usd / collateral_usd                        # LTV Aave : lecture et rapports
+ltv_spot        = debt_usd / spot_usd                              # base de target_ltv, P4, P6, I2, I8
 hf              = lu directement via Pool.getUserAccountData       # décisions P3, P4, P6 ; ne pas recalculer
-notional_usd    = short_size_eth * mark_price
+notional_usd    = abs(short_size_eth) * mark_price                # short_size_eth < 0 : position HL longue
 margin_ratio    = isolated_margin_usd / notional_usd
 delta_eth       = spot_eth - short_size_eth
 delta_pct       = delta_eth / spot_eth                             # en ETH : pas de mélange de deux prix
 price_move      = (mark_price - anchor_price) / anchor_price
 funding_30d     = moyenne(funding horaire sur 720 h) * 8760      # annualisé
 borrow_apr      = taux variable USDC lu on-chain (ray -> apr)
-carry_spread    = funding_30d - borrow_apr
+carry_spread    = funding_30d - borrow_apr                        # rapports ; la porte lit regime_spread (§8.9)
 equity          = collateral_usd + isolated_margin_usd + usdc_wallet + hl_free_usdc - debt_usd
                                                                    # les soldes libres sont des dollars possédés
 exposure_mult   = 1 / (1 - target_ltv + 1/short_leverage)        # vérifié contre config au boot
@@ -191,9 +193,9 @@ Le moteur évalue de haut en bas et retourne la première action déclenchée. L
 | 1 | Événement de liquidation détecté (Aave ou HL) | Couper le short pour égaler le spot restant, puis REPAIRING | local HL | 2 s |
 | 2 | margin_ratio <= margin_ratio_reduce | Marge d'urgence : verser la réserve HL dans la marge isolée ; si elle ne suffit pas à repasser le seuil, repli sur la réduction (procédure 8.6) | local HL | 2 s |
 | 3 | HF <= LT / (LT − ltv_margin_cushion) et coussin >= tranche | Rembourser une tranche depuis le coussin | local Aave | 10 s |
-| 4 | HF <= LT / (LT − ltv_margin_deleverage) et coussin < tranche | Désendettement par étapes : repay coussin restant -> withdraw wstETH -> swap -> repay, en boucle | local Aave | 60 s |
+| 4 | HF <= LT / (LT − ltv_margin_cushion) et coussin < tranche | Désendettement par étapes : repay coussin restant -> withdraw wstETH -> swap -> repay, en boucle (procédure 8.7) | local Aave | 60 s |
 | 5 | margin_ratio <= margin_ratio_pump | Pompe montante : borrow -> bridge -> add margin | pont | 3 min |
-| 6 | HF <= LT / (LT − ltv_margin_pump) | Pompe descendante : withdraw HL -> bridge -> repay | pont | 8 min |
+| 6 | HF <= LT / (LT − ltv_margin_pump) | Pompe descendante : withdraw HL -> bridge -> repay, jusqu'à ltv_spot <= target_ltv + 0,01 | pont | 8 min |
 | 7 | price_move >= recenter_up ou <= −recenter_down | Re-centrage complet (procédure 8.3 ou 8.4) | pont | 15 min |
 | 8 | abs(delta_pct) > delta_tolerance | Re-truage du short vers spot_eth | local HL | 60 s |
 | 9 | Cron écrémage atteint et excédent > skim_min_usd | Écrémage-recomposition (procédure 8.5) | pont | sans enjeu |
@@ -201,12 +203,14 @@ Le moteur évalue de haut en bas et retourne la première action déclenchée. L
 
 Les priorités 1 à 4 sont les seules autorisées en état BLIND partiel (selon la venue joignable).
 
+P3 et P4 partagent le même seuil et se partagent le cas selon le coussin : sous le seuil coussin, l'une des deux tire toujours. Un seuil de désendettement plus bas que celui du coussin laissait une plage où le coussin était vide et où ni P3 ni P4 ne tiraient : seule la pompe P6 répondait, par le pont, plus lentement que la grâce de I2. La plage est fermée par une action locale plutôt qu'en comptant le pont comme une défense.
+
 ---
 
 ## 8. Procédures détaillées
 
 ### 8.1 BUILD (construction)
-Précondition : porte de régime OUVERTE (carry_spread >= spread_full_bps confirmé 7 jours), mode != DRY_RUN.
+Précondition : porte de régime OUVERTE (regime_spread >= spread_full_bps confirmé hysteresis_days jours, §8.9), mode != DRY_RUN.
 1. Vérifier : e-mode Aave désactivé (`setUserEMode(0)`), approvals en place, gas >= gas_min_eth, USDC natif.
 2. Déposer le coussin : supply USDC (cushion_pct × capital).
 3. Construire en 3 tranches de taille égale. Pour chaque tranche :
@@ -248,7 +252,11 @@ Fermer une partie d'une position en marge isolée ne déplace pas son prix de li
 3. REPAIRING (une fois margin_ratio >= 0.07 et volatilité 5 min < 2 %) : après un repli, vendre la tranche de wstETH excédentaire (withdraw -> swap), repay dette, re-truer le delta, re-poser l'anchor. La réserve se reconstitue au true-up de l'écrémage suivant (8.5).
 
 ### 8.7 EMERGENCY_REPAY et désendettement (P3, P4)
-Tranche standard : 25 % du coussin initial. P3 : withdraw coussin -> repay. P4 : si coussin insuffisant, boucle locale : repay ce qui reste -> withdraw wstETH rendu disponible -> swap -> repay, jusqu'à ltv <= target_ltv + 0,01. Puis re-truage du short (le spot a diminué).
+Tranche standard : 25 % du coussin initial. P3 : withdraw coussin -> repay. P4 : dès que le coussin ne couvre plus une tranche, boucle locale : repay ce qui reste -> withdraw wstETH rendu disponible -> swap -> repay, jusqu'à ltv_spot <= target_ltv + 0,01. Puis re-truage du short (le spot a diminué).
+
+La cible de P4 et de P6 est sur le spot seul, comme celle du solveur (§3) : viser la LTV Aave, coussin compris, ferait converger le bot vers un bilan plus endetté que celui sur lequel ses bandes sont calibrées.
+
+Réserve : le budget de 60 s de P4 sans flashloan n'est pas mesuré. Si la mesure l'infirme, c'est la décision figée n° 2 (§17) qui se rouvre, pas le recours au pont.
 
 ### 8.8 LIQUIDATION DÉTECTÉE (P1)
 Détection : événement `LiquidationCall` Aave (filtre sur l'adresse du bot) ou événement de liquidation HL sur le user feed.
@@ -257,10 +265,22 @@ Détection : événement `LiquidationCall` Aave (filtre sur l'adresse du bot) ou
 3. REPAIRING manuel uniquement : le bot attend une commande opérateur (post-mortem obligatoire).
 
 ### 8.9 Porte de régime (P10)
-Évaluée une fois par jour à 00:00 UTC sur funding_30d et borrow_apr :
-- carry_spread >= spread_full_bps pendant hysteresis_days -> cible exposure_mult.
-- 0 <= carry_spread < spread_full_bps pendant hysteresis_days -> cible exposure_mult_half.
-- carry_spread < 0 pendant hysteresis_days -> cible 0 (DEFLATING vers PARKED).
+La porte compare le funding à son seuil de rentabilité, pas au taux d'emprunt seul. Par dollar de spot, le montage reçoit le funding sur le short et le rendement de staking du wstETH, et paie l'emprunt sur `target_ltv` dollars de dette. Le funding de rentabilité est donc :
+
+```
+f_star        = target_ltv * borrow_30d - staking_30d
+regime_spread = funding_30d - f_star
+```
+
+Les trois termes sont des moyennes sur la MÊME fenêtre de 30 jours : `borrow_30d` est la moyenne du taux variable USDC, `staking_30d` la dérive annualisée de `wsteth_eth_ratio` sur la fenêtre. Comparer une moyenne de 30 jours à un taux instantané mesure deux époques différentes.
+
+Évaluée une fois par jour à 00:00 UTC :
+- regime_spread >= spread_full_bps pendant hysteresis_days -> cible exposure_mult.
+- regime.safety_margin_bps <= regime_spread < spread_full_bps pendant hysteresis_days -> cible exposure_mult_half.
+- regime_spread < regime.safety_margin_bps pendant hysteresis_days -> cible 0 (DEFLATING vers PARKED).
+
+`regime.safety_margin_bps` est le conservatisme de la porte, assumé et réglable : ce qu'on exige au-delà du seuil de rentabilité avant d'accepter le risque du montage. Il remplace le zéro implicite de l'ancienne règle, qui comparait le funding au taux d'emprunt plein et rangeait en PARKED des régimes encore rentables sans que ce choix soit écrit nulle part.
+
 Tout changement d'exposition se fait par tranches de 25 % de l'écart, une tranche par heure maximum, via les procédures 8.1/8.2 partielles. Jamais de changement d'exposition en urgence.
 
 ---
@@ -316,7 +336,7 @@ Tout changement d'exposition se fait par tranches de 25 % de l'écart, une tranc
 ### Invariants (vérifiés à chaque snapshot, violation = alerte + action de la table)
 ```
 I1  abs(delta_pct) <= delta_tolerance en croisière
-I2  ltv <= target_ltv + 0.02 en croisière ; jamais HF <= seuil coussin plus de 5 min sans défense P3 ou P4 dans ces 5 min
+I2  ltv_spot <= target_ltv + 0.02 en croisière ; jamais HF <= seuil coussin plus de 5 min sans défense P3 ou P4 dans ces 5 min
 I3  margin_ratio >= 0.07 en croisière ; jamais <= margin_ratio_reduce plus de 10 s sans défense P2 ou P1 dans ces 10 s
 I4  cushion_usd >= cushion_floor_pct * capital courant (sinon reconstitution prioritaire au prochain écrémage)
 I5  gas_eth >= gas_min_eth (sinon blocage des opérations non critiques + alerte)
@@ -325,7 +345,7 @@ I7  une seule opération d'exécution en cours à tout instant
 I8  après chaque écrémage-recomposition : dette/spot et margin_ratio de retour aux cibles à ±0,5 pt
 ```
 
-Les chiffres ci-dessus sont les valeurs par défaut de `invariants.*`. La croisière est l'état RUNNING sans opération ni urgence en cours. La LTV de I8 est celle du solveur, dette / spot : celle qu'Aave affiche est plus basse, le coussin comptant comme collatéral.
+Les chiffres ci-dessus sont les valeurs par défaut de `invariants.*`. La croisière est l'état RUNNING sans opération ni urgence en cours. La LTV de I2 et de I8 est la LTV spot, celle du solveur : celle qu'Aave affiche est plus basse, le coussin comptant comme collatéral.
 
 Escalade :
 - I1, la partie « en croisière » de I2 et I3, I4, I6 sous une heure, I8 : WARN.
