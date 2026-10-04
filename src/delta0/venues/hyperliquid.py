@@ -47,6 +47,18 @@ class HLPosition:
     isolated_margin_usd: float
     leverage: int
 
+    @property
+    def short_size_eth(self) -> float:
+        """Size of the short, keeping the sign: negative means the position is LONG.
+
+        An `abs()` here read a long — a wrong fill, a manual trade — as a
+        short of the same size: the delta looked flat while the real exposure
+        was the spot PLUS the long, and neither P8 nor I1 said a word. Kept
+        signed, the delta is right by construction and P8 re-trues it. Revue
+        finance 2026-10-02, F3.
+        """
+        return -self.size_signed
+
 
 @dataclass(frozen=True, slots=True)
 class HLMarketMeta:
@@ -172,6 +184,14 @@ class HyperliquidReader:
         would conclude there is nothing to draw on. Measured 2026-09-09, see
         memory/hl_findings.md §14 and §16.
 
+        `total` is not that figure: on a unified account it INCLUDES the
+        isolated margin already committed, which shows up as `hold`. Reading
+        `total` alone counted the margin twice in the equity, sized the spot
+        ~22 % too big, and let P2 believe it had 5 429 USD to add when 1 253
+        were really there. Measured on our own account on 2026-09-09: opening
+        a position with 1.24 of margin left `total` at 29.79 for 29.80 before
+        (hl_findings §16). Revue finance 2026-10-02, F1.
+
         This is what the fast up-flank defence spends: adding isolated margin
         from here is one local request, no bridge.
         """
@@ -184,7 +204,9 @@ class HyperliquidReader:
         for entry in balances:
             if isinstance(entry, dict) and entry.get("coin") == "USDC":
                 try:
-                    return float(entry.get("total", "0"))
+                    total = float(entry.get("total", "0"))
+                    hold = float(entry.get("hold", "0"))
                 except (TypeError, ValueError):
                     return 0.0
+                return max(0.0, total - hold)
         return 0.0

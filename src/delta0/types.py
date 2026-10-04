@@ -74,7 +74,7 @@ class Snapshot:
 
     # Hyperliquid leg.
     mark_price: float
-    short_size_eth: float  # positive number, this is a short position
+    short_size_eth: float  # positive for a short; negative means the HL position is LONG
     isolated_margin_usd: float
     hl_free_usdc: float  # on the account, not committed as margin
     hl_maintenance_margin: float  # observed, compared to config
@@ -115,7 +115,9 @@ class Snapshot:
 
     @property
     def notional_usd(self) -> float:
-        return self.short_size_eth * self.mark_price
+        # A magnitude, whichever side the position is on: margin over a negative
+        # notional would read as a margin ratio under every trigger.
+        return abs(self.short_size_eth) * self.mark_price
 
     @property
     def margin_ratio(self) -> float:

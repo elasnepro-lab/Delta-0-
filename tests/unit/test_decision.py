@@ -268,6 +268,24 @@ def test_p8_fires_when_the_hedged_quantity_drifts(
     assert action.params["target_short_size_eth"] == pytest.approx(20.64)
 
 
+def test_p8_sees_a_long_instead_of_a_flat_delta(
+    stable_snapshot: Snapshot,
+    config: Config,
+    nominal_ctx: OperationalContext,
+) -> None:
+    """A long of 20 ETH against 20 ETH of spot is 40 ETH of exposure, not zero.
+
+    Revue finance 2026-10-02, F3: the size used to go through `abs()`, so this
+    book read as perfectly hedged and nothing fired.
+    """
+    snap = replace(stable_snapshot, short_size_eth=-20.0)
+    assert snap.delta_eth == pytest.approx(40.0)
+    assert snap.margin_ratio == pytest.approx(stable_snapshot.margin_ratio)
+    action = decide(snap, config, nominal_ctx)
+    assert action.priority is Priority.P8_DELTA_RETRUE
+    assert action.params["target_short_size_eth"] == pytest.approx(20.0)
+
+
 def test_p8_ignores_a_pure_price_move(
     stable_snapshot: Snapshot,
     config: Config,
