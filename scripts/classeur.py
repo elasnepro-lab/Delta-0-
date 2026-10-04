@@ -147,8 +147,7 @@ def print_sheet(chassis: Chassis, config: Config) -> None:
     print(f"  {'':<28}{'coussin plein':>16}{'coussin vide':>16}")
     for name, threshold in (
         ("P6 pompe", bands.ltv_pump),
-        ("P3 coussin", bands.ltv_cushion),
-        ("P4 désendettement", bands.ltv_deleverage),
+        ("P3 / P4 coussin", bands.ltv_cushion),
         ("LIQUIDATION", chassis.lt),
     ):
         full = 1 - (chassis.debt / threshold - chassis.cushion) / chassis.spot

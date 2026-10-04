@@ -69,10 +69,8 @@ async def reconcile_at_boot(
         message=(
             f"bandes dérivées du LT {bands.lt:.4f} : pompe {bands.ltv_pump:.4f} "
             f"(-{100 * bands.price_drop_to(bands.ltv_pump, config.target_ltv):.2f} %), "
-            f"coussin {bands.ltv_cushion:.4f} "
-            f"(-{100 * bands.price_drop_to(bands.ltv_cushion, config.target_ltv):.2f} %), "
-            f"désendettement {bands.ltv_deleverage:.4f} "
-            f"(-{100 * bands.price_drop_to(bands.ltv_deleverage, config.target_ltv):.2f} %)"
+            f"coussin puis désendettement {bands.ltv_cushion:.4f} "
+            f"(-{100 * bands.price_drop_to(bands.ltv_cushion, config.target_ltv):.2f} %)"
         ),
         lt=bands.lt,
     )

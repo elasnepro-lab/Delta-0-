@@ -246,16 +246,28 @@ def test_i7_two_executions_at_once_is_critical_without_deflating(
 def test_i8_checks_the_targets_after_a_recompose(
     stable_snapshot: Snapshot, config: Config, now: datetime
 ) -> None:
-    # The reference world carries debt/spot 0.70 against a 0.675 target.
-    off_target = _at_rest(now, just_recomposed=True)
-    assert _codes(check_invariants(stable_snapshot, config, off_target)) == [("I8", Severity.WARN)]
+    # Debt/spot 0.685 against a 0.675 target: past I8's tolerance, under I2's.
+    off = replace(stable_snapshot, usdc_variable_debt_balance=0.685 * stable_snapshot.spot_usd)
+    recomposed = _at_rest(now, just_recomposed=True)
+    assert _codes(check_invariants(off, config, recomposed)) == [("I8", Severity.WARN)]
 
-    on_target = replace(
-        stable_snapshot, usdc_variable_debt_balance=config.target_ltv * stable_snapshot.spot_usd
-    )
-    assert check_invariants(on_target, config, off_target) == []
+    # The reference world sits on target.
+    assert check_invariants(stable_snapshot, config, recomposed) == []
     # Without a recompose, the same gap is none of I8's business.
-    assert check_invariants(stable_snapshot, config, _at_rest(now)) == []
+    assert check_invariants(off, config, _at_rest(now)) == []
+
+
+def test_i2_in_cruise_reads_the_spot_ltv_not_aave_s(
+    stable_snapshot: Snapshot, config: Config, now: datetime
+) -> None:
+    """Revue finance 2026-10-02, m4: Aave's LTV counts the cushion and reads low.
+
+    Debt/spot 0.70 is past the 0.695 ceiling, while Aave's view of the same book
+    (0.686, cushion included) sits under it and used to keep I2 quiet.
+    """
+    high = replace(stable_snapshot, usdc_variable_debt_balance=35_000.0)
+    assert high.ltv < config.target_ltv + config.invariants.cruise_ltv_headroom
+    assert _codes(check_invariants(high, config, _at_rest(now))) == [("I2", Severity.WARN)]
 
 
 # --- Bookkeeping, alerts, config --------------------------------------------------

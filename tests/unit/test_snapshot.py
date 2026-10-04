@@ -23,9 +23,10 @@ def test_spot_notional_delta_zero_at_target() -> None:
 
 def test_ltv_matches_target() -> None:
     s = _make_snapshot()
-    # collateral = 50 000 spot + 1 000 cushion = 51 000
-    # ltv = 35 000 / 51 000 = 0.6862 (cushion softens LTV — this is intentional)
-    assert s.ltv == pytest.approx(35_000.0 / 51_000.0, rel=1e-6)
+    # The target is on the spot alone: 33 750 / 50 000 = 0.675.
+    assert s.ltv_spot == pytest.approx(0.675)
+    # Aave's LTV counts the 1 000 cushion as collateral and reads lower.
+    assert s.ltv == pytest.approx(33_750.0 / 51_000.0, rel=1e-6)
 
 
 def test_margin_ratio() -> None:
@@ -81,8 +82,8 @@ def test_delta_pct_zero_when_no_spot() -> None:
 
 def test_equity_reconstruction() -> None:
     s = _make_snapshot()
-    # collateral 51 000 + margin 5 000 + wallet 0 + HL free 1 000 - debt 35 000
-    assert s.equity == pytest.approx(22_000.0)
+    # collateral 51 000 + margin 5 000 + wallet 0 + HL free 1 000 - debt 33 750
+    assert s.equity == pytest.approx(23_250.0)
 
 
 def test_free_balances_count_in_equity() -> None:

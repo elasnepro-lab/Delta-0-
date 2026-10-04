@@ -148,9 +148,13 @@ def _i1_delta(snapshot: Snapshot, config: Config, ctx: InvariantContext) -> Iter
 
 def _i2_ltv(snapshot: Snapshot, config: Config, ctx: InvariantContext) -> Iterator[Violation]:
     ceiling = config.target_ltv + config.invariants.cruise_ltv_headroom
-    if ctx.cruising and snapshot.debt_usd > 0.0 and snapshot.ltv > ceiling:
+    # LTV spot, the base of target_ltv: Aave's own LTV counts the cushion and
+    # sat ~2 points lower, so the warning came late (F7, m4).
+    if ctx.cruising and snapshot.debt_usd > 0.0 and snapshot.ltv_spot > ceiling:
         yield Violation(
-            "I2", Severity.WARN, f"LTV {snapshot.ltv:.4f} au-dessus de {ceiling:.4f} en croisière"
+            "I2",
+            Severity.WARN,
+            f"LTV spot {snapshot.ltv_spot:.4f} au-dessus de {ceiling:.4f} en croisière",
         )
     grace = timedelta(seconds=config.invariants.p3_grace_s)
     since = ctx.cushion_breach_since
@@ -249,7 +253,7 @@ def _i8_recompose(snapshot: Snapshot, config: Config, ctx: InvariantContext) -> 
     # cushion counting as collateral.
     if not ctx.just_recomposed or snapshot.spot_usd <= 0.0 or snapshot.notional_usd <= 0.0:
         return
-    debt_ratio = snapshot.debt_usd / snapshot.spot_usd
+    debt_ratio = snapshot.ltv_spot
     tolerance = config.invariants.recompose_tolerance
     ltv_off = abs(debt_ratio - config.target_ltv) > tolerance
     margin_off = abs(snapshot.margin_ratio - config.target_margin_ratio) > tolerance

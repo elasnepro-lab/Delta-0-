@@ -180,6 +180,25 @@ def test_p6_fires_at_ltv_pump(
     assert action.kind == "PUMP_DOWN"
 
 
+def test_p6_repays_down_to_the_target_on_the_spot_alone(
+    stable_snapshot: Snapshot,
+    config: Config,
+    nominal_ctx: OperationalContext,
+) -> None:
+    """Revue finance 2026-10-02, F7: the cushion carries no debt of its own.
+
+    Aiming at Aave's LTV, cushion included, stopped the repayment ~685 USD
+    short on 20 k and left the book more indebted than the solver's.
+    """
+    snap = _snap_with_ltv(stable_snapshot, 0.755)
+    action = decide(snap, config, nominal_ctx)
+    repaid = float(action.params["repay_amount_usdc"])
+    after = snap.debt_usd - repaid
+    assert after / snap.spot_usd == pytest.approx(config.target_ltv + 0.01)
+    # Aave's view of the same book ends lower still: the cushion is collateral.
+    assert after / snap.collateral_usd < config.target_ltv + 0.01
+
+
 def test_p3_takes_priority_over_p6(
     stable_snapshot: Snapshot,
     config: Config,

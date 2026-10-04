@@ -114,6 +114,20 @@ class Snapshot:
         return self.debt_usd / self.collateral_usd
 
     @property
+    def ltv_spot(self) -> float:
+        """Debt over the spot alone, the cushion left out — the base of `target_ltv`.
+
+        The solver sizes the debt on the spot (README §3), so every amount that
+        steers the book back to `target_ltv` — P4, P6, I2 in cruise — must read
+        the same base. Measured on Aave's LTV instead, which counts the cushion
+        as collateral, P6 stopped ~685 USD short on 20 k and left 2.4 points of
+        band unrecovered. Revue finance 2026-10-02, F7.
+        """
+        if self.spot_usd == 0.0:
+            return 0.0
+        return self.debt_usd / self.spot_usd
+
+    @property
     def notional_usd(self) -> float:
         # A magnitude, whichever side the position is on: margin over a negative
         # notional would read as a margin ratio under every trigger.

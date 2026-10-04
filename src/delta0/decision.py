@@ -221,7 +221,6 @@ class Bands:
     lt: float
     ltv_pump: float
     ltv_cushion: float
-    ltv_deleverage: float
 
     @property
     def hf_pump(self) -> float:
@@ -230,10 +229,6 @@ class Bands:
     @property
     def hf_cushion(self) -> float:
         return self.lt / self.ltv_cushion
-
-    @property
-    def hf_deleverage(self) -> float:
-        return self.lt / self.ltv_deleverage
 
     def price_drop_to(self, ltv_threshold: float, target_ltv: float) -> float:
         """Fraction the collateral price must fall for `ltv_threshold` to be hit."""
@@ -253,7 +248,6 @@ def derive_bands(lt: float, config: Config) -> Bands:
         lt=lt,
         ltv_pump=lt - margins.ltv_margin_pump,
         ltv_cushion=lt - margins.ltv_margin_cushion,
-        ltv_deleverage=lt - margins.ltv_margin_deleverage,
     )
 
 
@@ -418,18 +412,25 @@ def _p3_repay_from_cushion(snapshot: Snapshot, config: Config) -> Action | None:
 
 
 def _p4_stepwise_deleverage(snapshot: Snapshot, config: Config) -> Action | None:
+    """P3's threshold, taken over the moment the cushion cannot pay a tranche.
+
+    It used to wait for a deeper threshold of its own. Between the two, with
+    the cushion empty, neither P3 nor P4 fired and only the bridge pump P6
+    answered — slower than I2's grace, which then deflated a book the table
+    was handling. Sharing the threshold closes that gap with a local action.
+    README §7, revue finance 2026-10-02, F9.
+    """
     bands = derive_bands(snapshot.aave_lt_wsteth, config)
-    if snapshot.hf > bands.hf_deleverage:
+    if snapshot.hf > bands.hf_cushion:
         return None
     tranche = cushion_tranche_size(config)
     if snapshot.cushion_usd >= tranche:
-        # P3 will handle this; P4 is reserved for cushion-exhausted case.
-        return None
+        return None  # P3's case
     return Action(
         kind="STEPWISE_DELEVERAGE",
         priority=Priority.P4_DELEVERAGE,
         reason=(
-            f"HF {snapshot.hf:.4f} <= seuil désendettement {bands.hf_deleverage:.4f} "
+            f"HF {snapshot.hf:.4f} <= seuil coussin {bands.hf_cushion:.4f} "
             f"(LT {bands.lt:.4f}) et coussin épuisé "
             f"({snapshot.cushion_usd:.0f} < {tranche:.0f}) — boucle repay/withdraw/swap"
         ),
@@ -459,9 +460,9 @@ def _p6_pump_down(snapshot: Snapshot, config: Config) -> Action | None:
     bands = derive_bands(snapshot.aave_lt_wsteth, config)
     if snapshot.hf > bands.hf_pump:
         return None
-    # Repay enough to bring LTV back to target + 1%.
+    # Repay down to target + 1 point on the SPOT, the solver's base (F7).
     target_ltv_after = config.target_ltv + 0.01
-    target_debt = target_ltv_after * snapshot.collateral_usd
+    target_debt = target_ltv_after * snapshot.spot_usd
     repay_amount = max(0.0, snapshot.debt_usd - target_debt)
     return Action(
         kind="PUMP_DOWN",
