@@ -89,6 +89,32 @@ def test_boot_refuses_when_the_pump_would_fire_at_rest(config: Config) -> None:
     assert bands_incoherence(LT_ARBITRUM, config) is None
 
 
+def test_the_pump_must_sit_above_what_p6_repays_down_to(config: Config) -> None:
+    """Revue finance 2026-10-02, F8: pump above the target was not enough.
+
+    Between the target and the target plus one point, P6 repays down to a
+    level that is already past its own trigger, and fires again on landing.
+    """
+    restore = config.target_ltv + 0.01
+    lt = restore + config.emergency.ltv_margin_pump - 0.001  # pump just under it
+    assert derive_bands(lt, config).ltv_pump > config.target_ltv
+    assert bands_incoherence(lt, config) is not None
+
+
+def test_p6_does_not_pump_nothing(
+    stable_snapshot: Snapshot,
+    config: Config,
+    nominal_ctx: OperationalContext,
+) -> None:
+    """Under a LT cut, HF can sit under the pump with nothing left to repay.
+
+    A PUMP_DOWN of 0 USD on every cycle starved P7 to P10 for good (F8).
+    """
+    cut = replace(stable_snapshot, aave_lt_wsteth=0.70, hf=0.70 * 51_000 / 33_750)
+    action = decide(cut, config, nominal_ctx)
+    assert action.kind != "PUMP_DOWN"
+
+
 def test_boot_refuses_an_unreadable_threshold(config: Config) -> None:
     """LT read as zero means the Aave data is missing, not that all is well."""
     assert bands_incoherence(0.0, config) is not None

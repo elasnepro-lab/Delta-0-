@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from delta0.config import Config
+from delta0.errors import BootRefused
 from delta0.reconcile import reconcile_at_boot
 from delta0.state import StateStore
 from delta0.types import Snapshot
@@ -91,6 +92,16 @@ async def test_low_hf_critical(store: StateStore, config: Config) -> None:
     snap = replace(_snap(), hf=1.05)
     report = await reconcile_at_boot(store, snap, config)
     assert any("HF observé" in w for w in report.warnings)
+
+
+@pytest.mark.asyncio
+async def test_boot_refuses_p2_under_the_hyperliquid_maintenance_margin(
+    store: StateStore, config: Config
+) -> None:
+    """Revue finance 2026-10-02, F5: README §4 asked for it, nothing checked it."""
+    snap = _snap(hl_maintenance_margin=1 / (2 * 14))
+    with pytest.raises(BootRefused, match="maintenance margin"):
+        await reconcile_at_boot(store, snap, config)
 
 
 @pytest.mark.asyncio

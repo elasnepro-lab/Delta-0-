@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from delta0.config import Config
-from delta0.decision import bands_incoherence, derive_bands
+from delta0.decision import bands_incoherence, derive_bands, hl_margin_incoherence
 from delta0.errors import BootRefused
 from delta0.logging import get_logger
 from delta0.state import StateStore
@@ -62,6 +62,15 @@ async def reconcile_at_boot(
             lt=snapshot.aave_lt_wsteth,
         )
         raise BootRefused(f"bandes d'urgence inutilisables face au LT on-chain : {problem}")
+
+    problem = hl_margin_incoherence(snapshot.hl_maintenance_margin, config)
+    if problem is not None:
+        log.critical(
+            "reconcile_hl_margin_incoherent",
+            message=f"seuils du flanc haut inutilisables — démarrage refusé : {problem}",
+            maintenance_margin=snapshot.hl_maintenance_margin,
+        )
+        raise BootRefused(f"seuils du flanc haut sous la maintenance margin HL : {problem}")
 
     bands = derive_bands(snapshot.aave_lt_wsteth, config)
     log.info(

@@ -251,21 +251,49 @@ def derive_bands(lt: float, config: Config) -> Bands:
     )
 
 
+# P4 and P6 stop repaying one point above the target, on the spot (README §8.7).
+RESTORE_HEADROOM = 0.01
+
+
 def bands_incoherence(lt: float, config: Config) -> str | None:
     """Return why the bands are unusable against this LT, or None if they hold.
 
-    Called at boot to refuse starting, and worth re-checking when the observed
-    LT moves: a governance cut can push the pump under the target, at which
-    point the bot would try to deleverage a position that is already at rest.
+    Called at boot to refuse starting, and on every snapshot by I9: a
+    governance cut can push the pump under the level P6 repays down to, at
+    which point P6 fires again the moment it lands — or, under the target
+    itself, a pump of nothing on every cycle that starves P7 to P10.
+    Revue finance 2026-10-02, F8.
     """
     if lt <= 0.0:
         return "liquidation threshold read as 0 — Aave data unavailable or asset unlisted"
     bands = derive_bands(lt, config)
-    if bands.ltv_pump <= config.target_ltv:
+    restore = config.target_ltv + RESTORE_HEADROOM
+    if bands.ltv_pump <= restore:
         return (
-            f"pump threshold {bands.ltv_pump:.4f} is at or below target LTV "
-            f"{config.target_ltv:.4f} (LT {lt:.4f}): the bot would pump at rest. "
+            f"pump threshold {bands.ltv_pump:.4f} is at or below the level P6 repays "
+            f"down to, {restore:.4f} (LT {lt:.4f}): the bot would pump in a loop. "
             "Lower target_ltv or narrow emergency.ltv_margin_pump."
+        )
+    return None
+
+
+def hl_margin_incoherence(maintenance_margin: float, config: Config) -> str | None:
+    """Return why the up-flank thresholds cannot hold against Hyperliquid's MM.
+
+    P2 must fire while the position lives, so its trigger has to sit above the
+    maintenance margin the place applies — and the place derives it from
+    `maxLeverage`, which its governance can lower. At 15x the gap between P2
+    and the liquidation fell to 0.17 point without a word; under ~14.3x P2
+    could never fire first. README §4, revue finance 2026-10-02, F5.
+    """
+    if maintenance_margin <= 0.0:
+        return "maintenance margin read as 0 — Hyperliquid market meta unavailable"
+    reduce_at = config.emergency.margin_ratio_reduce
+    if reduce_at <= maintenance_margin:
+        return (
+            f"margin_ratio_reduce {reduce_at:.4f} is at or below the maintenance margin "
+            f"{maintenance_margin:.4f} read from Hyperliquid: P2 would fire after the "
+            "liquidation. Raise the emergency margin ratios or lower short_leverage."
         )
     return None
 
@@ -434,7 +462,7 @@ def _p4_stepwise_deleverage(snapshot: Snapshot, config: Config) -> Action | None
             f"(LT {bands.lt:.4f}) et coussin épuisé "
             f"({snapshot.cushion_usd:.0f} < {tranche:.0f}) — boucle repay/withdraw/swap"
         ),
-        params={"target_ltv_after": config.target_ltv + 0.01},
+        params={"target_ltv_after": config.target_ltv + RESTORE_HEADROOM},
     )
 
 
@@ -461,9 +489,13 @@ def _p6_pump_down(snapshot: Snapshot, config: Config) -> Action | None:
     if snapshot.hf > bands.hf_pump:
         return None
     # Repay down to target + 1 point on the SPOT, the solver's base (F7).
-    target_ltv_after = config.target_ltv + 0.01
+    target_ltv_after = config.target_ltv + RESTORE_HEADROOM
     target_debt = target_ltv_after * snapshot.spot_usd
     repay_amount = max(0.0, snapshot.debt_usd - target_debt)
+    if repay_amount <= 0.0:
+        # A pump of nothing defends nothing, and as the first answer of the
+        # table it would starve P7 to P10 on every cycle (F8). I9 says why.
+        return None
     return Action(
         kind="PUMP_DOWN",
         priority=Priority.P6_PUMP_DOWN,
