@@ -34,7 +34,12 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 
-from delta0.decision import bands_incoherence, derive_bands, hl_margin_incoherence
+from delta0.decision import (
+    bands_incoherence,
+    bands_order_warning,
+    derive_bands,
+    hl_margin_incoherence,
+)
 
 if TYPE_CHECKING:
     from delta0.config import Config
@@ -286,6 +291,9 @@ def _i9_governance(
     ):
         if problem is not None:
             yield Violation("I9", Severity.CRITICAL, problem)
+    order = bands_order_warning(snapshot.aave_lt_wsteth, config)
+    if order is not None:
+        yield Violation("I9", Severity.WARN, f"ordre des défenses inversé : {order}")
     observed = snapshot.hl_maintenance_margin
     if observed > 0.0 and abs(observed - config.maintenance_margin) > _MM_TOLERANCE:
         yield Violation(

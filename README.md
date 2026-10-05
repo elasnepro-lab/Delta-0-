@@ -110,7 +110,7 @@ Groupes : capital et levier (`capital_usd`, `short_leverage`, `target_ltv`, `tar
 Règles de dérivation :
 - `target_margin_ratio = 1 / short_leverage` et `exposure_mult = 1 / (1 − target_ltv + 1 / short_leverage)`.
 - **Flanc bas : pas de LTV absolue.** Les seuils sont des marges sous le LT lu on-chain (`emergency.ltv_margin_pump > ltv_margin_cushion` ; P3 et P4 partagent le seuil coussin, §7, et `ltv_margin_deleverage` n'a plus de rôle). Seuil en LTV = LT − marge, comparé en HF : HF_seuil = LT / (LT − marge). Un seuil absolu écrit dans un fichier devient faux dès que la gouvernance Aave déplace le LT, ou quand on change de chaîne. Le démarrage est refusé si le seuil de pompe tombe au niveau où P6 rembourse (`target_ltv` + 0,01) ou dessous ; I9 refait ce contrôle à chaque snapshot, la gouvernance Aave n'attendant pas un redémarrage.
-- **Flanc haut : seuils en margin ratio**, `margin_ratio_pump > margin_ratio_reduce`, tous deux au-dessus de la maintenance margin lue via l'API (1 / (2 × maxLeverage)). Démarrage refusé si `margin_ratio_reduce` n'est pas au-dessus ; I9 refait le contrôle à chaque snapshot, la place pouvant baisser `maxLeverage`.
+- **Flanc haut : seuils en margin ratio**, `margin_ratio_pump > margin_ratio_reduce`, tous deux au-dessus de la maintenance margin lue via l'API (1 / (2 × maxLeverage)). Démarrage refusé si `margin_ratio_reduce` n'est pas au moins `emergency.margin_ratio_reduce_min_gap` au-dessus : être simplement au-dessus laissait P2 à 0,17 pt de la liquidation à 15x, environ une seconde de squeeze. I9 refait le contrôle à chaque snapshot, la place pouvant baisser `maxLeverage`.
 - **Capital immobilisé** : le coussin (`cushion_pct` du capital) et la réserve HL (`emergency.hl_reserve_pct` du notionnel) sortent de l'équité déployable (solveur, §3). `exposure_mult` n'est donc plus l'exposition construite mais le coefficient brut du solveur : l'exposition réelle, spot / équité, est plus basse. Toute comparaison à une exposition observée (porte de régime, §8.9) doit le prendre en compte.
 
 ### Bilan de référence après BUILD (assertions des tests M3)
@@ -186,7 +186,7 @@ Règles d'état :
 
 ## 7. Table de décision (ordre de priorité strict)
 
-Le moteur évalue de haut en bas et retourne la première action déclenchée. Latence max = budget d'exécution, mesuré par le watchdog. Côté haut l'ordre est re-centrage, pompe, marge d'urgence, liquidation ; côté bas re-centrage, pompe, coussin, désendettement, liquidation. Pour le flanc bas, `scripts/classeur.py` traduit en baisse de prix les seuils de pompe, de coussin, de désendettement et la liquidation, pour la config et le LT en vigueur ; le re-centrage et le flanc haut n'y figurent pas, et rien ne vérifie automatiquement que le re-centrage tire avant les pompes.
+Le moteur évalue de haut en bas et retourne la première action déclenchée. Latence max = budget d'exécution, mesuré par le watchdog. Côté haut l'ordre est re-centrage, pompe, marge d'urgence, liquidation ; côté bas re-centrage, pompe, coussin, désendettement, liquidation. Pour le flanc bas, `scripts/classeur.py` traduit en baisse de prix les seuils de pompe, de coussin, de désendettement et la liquidation, pour la config et le LT en vigueur ; le re-centrage et le flanc haut n'y figurent pas. Si une coupe du LT fait tirer la pompe avant le re-centrage bas, coussin vide, I9 l'alerte (WARN) : l'ordre inversé coûte plus cher sans être dangereux, la pompe restant une défense.
 
 | P | Condition | Action | Chemin | Latence max |
 |---|---|---|---|---|
@@ -354,7 +354,7 @@ I5  gas_eth >= gas_min_eth (sinon blocage des opérations non critiques + alerte
 I6  aucun transfert en transit > 15 min sans alerte ; > 60 min : CRITICAL (§9.3)
 I7  une seule opération d'exécution en cours à tout instant
 I8  après chaque écrémage-recomposition : dette/spot et margin_ratio de retour aux cibles à ±0,5 pt
-I9  paramètres de risque des places relus à chaque snapshot : bandes Aave cohérentes avec le LT lu, margin_ratio_reduce au-dessus de la maintenance margin HL lue, et celle-ci égale à maintenance_margin
+I9  paramètres de risque des places relus à chaque snapshot : bandes Aave cohérentes avec le LT lu, margin_ratio_reduce au moins margin_ratio_reduce_min_gap au-dessus de la maintenance margin HL lue, celle-ci égale à maintenance_margin, et le re-centrage bas avant la pompe
 ```
 
 Les chiffres ci-dessus sont les valeurs par défaut de `invariants.*`. La croisière est l'état RUNNING sans opération ni urgence en cours. La LTV de I2 et de I8 est la LTV spot, celle du solveur : celle qu'Aave affiche est plus basse, le coussin comptant comme collatéral.
@@ -363,7 +363,7 @@ Escalade :
 - I1, la partie « en croisière » de I2 et I3, I4, I6 sous une heure, I8 : WARN.
 - La partie « jamais » de I2 et I3, c'est-à-dire une défense de la table qui n'est pas partie à temps : CRITICAL et dégonflage, puisqu'il ne reste rien d'autre à attendre.
 - I7, ou un transfert en transit depuis plus d'une heure : CRITICAL et gel des opérations non critiques.
-- I9, des seuils rendus inutilisables par la gouvernance d'une place : CRITICAL et gel des opérations non critiques. Le bot ne modifie jamais ses propres seuils (décision figée n° 5) : c'est à l'opérateur de corriger la config. Une maintenance margin qui a bougé sans rendre les seuils inutilisables : WARN.
+- I9, des seuils rendus inutilisables par la gouvernance d'une place : CRITICAL et gel des opérations non critiques. Le bot ne modifie jamais ses propres seuils (décision figée n° 5) : c'est à l'opérateur de corriger la config. Une maintenance margin qui a bougé sans rendre les seuils inutilisables, ou une pompe qui tirerait avant le re-centrage bas : WARN.
 - I5 : WARN et gel des opérations non critiques.
 
 Chaque invariant émet son propre événement d'alerte : le regroupement ne doit jamais cacher un invariant derrière un autre.

@@ -284,6 +284,34 @@ def test_i9_an_aave_governance_cut_mid_run_is_critical(
     assert [v.severity for v in violations] == [Severity.CRITICAL]
 
 
+def test_i9_requires_a_one_point_gap_above_the_maintenance_margin(
+    stable_snapshot: Snapshot, config: Config, now: datetime
+) -> None:
+    """Revue finance 2026-10-05, O7: "above the MM" let P2 sit 0.17 pt from it.
+
+    At 18x the MM is 2.78 %: P2 at 3.5 % is still above it, but by 0.72 pt.
+    """
+    snap = replace(stable_snapshot, hl_maintenance_margin=1 / (2 * 18))
+    assert ("I9", Severity.CRITICAL) in _codes(check_invariants(snap, config, _at_rest(now)))
+    # At 20x the gap is exactly 1 pt: allowed, only the moved MM warns.
+    at_20x = replace(stable_snapshot, hl_maintenance_margin=1 / (2 * 20))
+    assert _codes(check_invariants(at_20x, config, _at_rest(now))) == [("I9", Severity.WARN)]
+
+
+def test_i9_warns_when_the_pump_would_fire_before_the_recentre(
+    stable_snapshot: Snapshot, config: Config, now: datetime
+) -> None:
+    """Revue finance 2026-10-05, O8: an inverted order is costly, not fatal — WARN only.
+
+    LT 0.69 puts the pump at 0.65: from 0.625, cushion spent, a 3.85 % drop
+    reaches it, before the 6 % re-centre.
+    """
+    snap = replace(stable_snapshot, aave_lt_wsteth=0.69)
+    violations = [v for v in check_invariants(snap, config, _at_rest(now)) if v.code == "I9"]
+    assert [v.severity for v in violations] == [Severity.WARN]
+    assert "ordre des défenses" in violations[0].message
+
+
 # --- I8 -------------------------------------------------------------------------
 
 

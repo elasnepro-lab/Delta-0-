@@ -15,7 +15,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from delta0.config import Config
-from delta0.decision import bands_incoherence, derive_bands, hl_margin_incoherence
+from delta0.decision import (
+    bands_incoherence,
+    bands_order_warning,
+    derive_bands,
+    hl_margin_incoherence,
+)
 from delta0.errors import BootRefused
 from delta0.logging import get_logger
 from delta0.state import StateStore
@@ -83,6 +88,11 @@ async def reconcile_at_boot(
         ),
         lt=bands.lt,
     )
+    order = bands_order_warning(snapshot.aave_lt_wsteth, config)
+    if order is not None:
+        w = f"ordre des défenses inversé : {order}"
+        log.warning("reconcile_bands_order", message=w, lt=bands.lt)
+        warnings.append(w)
 
     # --- Anchor drift ---------------------------------------------------------
     anchor_str = await store.kv_get("anchor_price")

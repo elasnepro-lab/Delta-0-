@@ -89,6 +89,10 @@ class EmergencyConfig(BaseModel):
 
     margin_ratio_pump: _Ratio
     margin_ratio_reduce: _Ratio
+    # How far above the maintenance margin read from Hyperliquid P2 must sit.
+    # "Above" alone let P2 fire 0.17 pt before the liquidation at 15x — about
+    # one second of a +9 %/min squeeze (revue finance 2026-10-05, O7).
+    margin_ratio_reduce_min_gap: _Ratio
     reduce_fraction: _Ratio
     # USDC left free on Hyperliquid, as a fraction of the notional. This is
     # what P2 spends: adding isolated margin is the only action measured to

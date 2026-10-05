@@ -105,6 +105,24 @@ async def test_boot_refuses_p2_under_the_hyperliquid_maintenance_margin(
 
 
 @pytest.mark.asyncio
+async def test_boot_refuses_p2_less_than_a_point_above_the_maintenance_margin(
+    store: StateStore, config: Config
+) -> None:
+    """O7: at 18x P2 is above the MM, by 0.72 pt only — not enough to start."""
+    with pytest.raises(BootRefused, match="maintenance margin"):
+        await reconcile_at_boot(store, _snap(hl_maintenance_margin=1 / (2 * 18)), config)
+
+
+@pytest.mark.asyncio
+async def test_boot_warns_when_the_pump_would_fire_before_the_recentre(
+    store: StateStore, config: Config
+) -> None:
+    """O8: a warning in the boot report, not a refusal."""
+    report = await reconcile_at_boot(store, _snap(aave_lt_wsteth=0.69), config)
+    assert any("ordre des défenses" in w for w in report.warnings)
+
+
+@pytest.mark.asyncio
 async def test_emode_nonzero_warns(store: StateStore, config: Config) -> None:
     snap = _snap(aave_emode=1)
     report = await reconcile_at_boot(store, snap, config)

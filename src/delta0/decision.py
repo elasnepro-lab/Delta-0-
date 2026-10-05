@@ -321,11 +321,38 @@ def hl_margin_incoherence(maintenance_margin: float, config: Config) -> str | No
     if maintenance_margin <= 0.0:
         return "maintenance margin read as 0 — Hyperliquid market meta unavailable"
     reduce_at = config.emergency.margin_ratio_reduce
-    if reduce_at <= maintenance_margin:
+    gap = config.emergency.margin_ratio_reduce_min_gap
+    # Same rounding trap as the regime bands: compare in basis points, not in
+    # floats that sit a hair off their decimal value.
+    if round((reduce_at - maintenance_margin) * 10_000, 6) < round(gap * 10_000, 6):
         return (
-            f"margin_ratio_reduce {reduce_at:.4f} is at or below the maintenance margin "
-            f"{maintenance_margin:.4f} read from Hyperliquid: P2 would fire after the "
-            "liquidation. Raise the emergency margin ratios or lower short_leverage."
+            f"margin_ratio_reduce {reduce_at:.4f} sits less than {gap:.4f} above the "
+            f"maintenance margin {maintenance_margin:.4f} read from Hyperliquid: P2 would "
+            "fire too close to the liquidation, or after it. Raise the emergency margin "
+            "ratios or lower short_leverage."
+        )
+    return None
+
+
+def bands_order_warning(lt: float, config: Config) -> str | None:
+    """Warn when, cushion spent, the bridge pump would fire before the re-centre.
+
+    The table expects the planned re-centre (P7, -6 %) to act before the
+    emergency pump (P6). A governance cut of the LT pulls the pump closer: from
+    the target, with the cushion gone, it fires at a price drop of
+    1 - target / pump threshold. Below the re-centre band the order inverts.
+    Not dangerous — the pump is a defence — but costlier, and the operator
+    should know. A warning, not a refusal (revue finance 2026-10-05, O8).
+    """
+    if bands_incoherence(lt, config) is not None:
+        return None  # already CRITICAL: the louder message says it
+    bands = derive_bands(lt, config)
+    drop_to_pump = bands.price_drop_to(bands.ltv_pump, config.target_ltv)
+    if drop_to_pump < config.recenter_down:
+        return (
+            f"cushion spent, the pump (LTV {bands.ltv_pump:.4f}, LT {lt:.4f}) fires at "
+            f"-{100 * drop_to_pump:.2f} %, before the re-centre at "
+            f"-{100 * config.recenter_down:.2f} %"
         )
     return None
 
