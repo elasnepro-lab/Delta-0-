@@ -135,10 +135,12 @@ def apply_action(position: Position, action: Action, eth_price: float) -> None:
         # Sell collateral, repay with the proceeds, until the target is met.
         target_ltv = float(params["target_ltv_after"])
         wsteth_price = eth_price * position.wsteth_eth_ratio
-        # On the spot alone, like the solver and `decision` (F7).
+        # On the spot alone, like the solver and `decision` (F7). Selling also
+        # shrinks the spot, so the sale is the excess over (1 - t), not the
+        # excess (revue finance 2026-10-05, N2 ; README §8.7).
         excess = position.debt_usd - target_ltv * position.wsteth * wsteth_price
         if excess > 0:
-            sold = min(excess / wsteth_price, position.wsteth)
+            sold = min(excess / (wsteth_price * (1.0 - target_ltv)), position.wsteth)
             position.wsteth -= sold
             position.debt_usd -= sold * wsteth_price
 

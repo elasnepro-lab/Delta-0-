@@ -254,6 +254,15 @@ Fermer une partie d'une position en marge isolée ne déplace pas son prix de li
 ### 8.7 EMERGENCY_REPAY et désendettement (P3, P4)
 Tranche standard : 25 % du coussin initial. P3 : withdraw coussin -> repay. P4 : dès que le coussin ne couvre plus une tranche, boucle locale : repay ce qui reste -> withdraw wstETH rendu disponible -> swap -> repay, jusqu'à ltv_spot <= target_ltv + 0,01. Puis re-truage du short (le spot a diminué).
 
+Ce que P4 vend : chaque wstETH vendu rembourse son prix de marché, net des frais et du glissement, mais retire aussi son prix oracle du spot sur lequel la cible se mesure. Vendre seulement l'excédent ne suffit donc pas, puisque le spot rétrécit avec la vente. Avec t = `target_ltv` + 0,01 :
+
+```
+excédent   = dette − t × spot                       # spot au prix oracle
+vente_wsteth = excédent / (prix_marché × (1 − frais − glissement) − t × prix_oracle)
+```
+
+Sans frais ni décote, c'est (dette − t × spot) / (1 − t) en dollars de spot, environ trois fois l'excédent à t = 0,685. Si le dénominateur est nul ou négatif (décote extrême), la cible est hors d'atteinte par la vente : tout le collatéral part, et l'alerte le dit.
+
 La cible de P4 et de P6 est sur le spot seul, comme celle du solveur (§3) : viser la LTV Aave, coussin compris, ferait converger le bot vers un bilan plus endetté que celui sur lequel ses bandes sont calibrées.
 
 Réserve : le budget de 60 s de P4 sans flashloan n'est pas mesuré. Si la mesure l'infirme, c'est la décision figée n° 2 (§17) qui se rouvre, pas le recours au pont.
