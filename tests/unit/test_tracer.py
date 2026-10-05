@@ -108,6 +108,41 @@ async def test_tracer_records_latency_samples(
     assert dec_stats["count"] >= 1
 
 
+@pytest.mark.asyncio
+async def test_the_loop_runs_the_invariants_on_every_snapshot(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+) -> None:
+    """Revue finance 2026-10-05, N3: I9 was reachable from no loop at all.
+
+    A LT cut to 0.70 mid-run puts the pump under the level P6 repays down to:
+    I9 must turn CRITICAL on that very snapshot.
+    """
+    watcher = _FakeWatcher(snapshots=[replace(_base_snap(), aave_lt_wsteth=0.70)])
+    wd = Watchdog(config=config.watchdog, project_root=tmp_path)
+    loop = TracerLoop(watcher=watcher, watchdog=wd, store=store, config=config, cadence_s=0.0)
+    await loop.run(duration_s=0.01)
+    assert loop.last_verdict is not None
+    assert loop.last_verdict.level == "CRITICAL"
+    assert any(v.code == "I9" for v in loop.last_verdict.violations)
+    assert loop.last_verdict.freeze_non_critical
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_snapshot_leaves_the_invariants_quiet(
+    config: Config,
+    store: StateStore,
+    tmp_path: Path,
+) -> None:
+    watcher = _FakeWatcher(snapshots=[_base_snap()])
+    wd = Watchdog(config=config.watchdog, project_root=tmp_path)
+    loop = TracerLoop(watcher=watcher, watchdog=wd, store=store, config=config, cadence_s=0.0)
+    await loop.run(duration_s=0.01)
+    assert loop.last_verdict is not None
+    assert loop.last_verdict.level == "OK"
+
+
 class _UnreachableWatcher:
     """A venue that does not answer: the loop must ride it out.
 

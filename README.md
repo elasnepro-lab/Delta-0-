@@ -301,7 +301,7 @@ Tout changement d'exposition se fait par tranches de 25 % de l'écart mesuré au
 - E-mode : désactivé, vérifié au boot (l'e-mode ETH interdirait l'emprunt USDC).
 - Approvals ERC-20 (USDC et wstETH vers le Pool, USDC vers le pont HL) : posées une fois au setup, montant plafonné, re-vérifiées au boot. Le chemin critique doit toujours être UNE transaction.
 - HF et LTV : toujours lus on-chain, jamais recalculés localement pour les décisions P1-P6 (le calcul local sert de contrôle de cohérence).
-- LT et LTV max : ceux du compte (`getUserAccountData`) dès qu'il porte du collatéral, puisque ce sont eux qui décident d'une liquidation. Sur un compte vide, Aave les rend à 0 : le bot prend alors ceux de la réserve wstETH (`ProtocolDataProvider.getReserveConfigurationData`), qui s'appliqueront dès le premier dépôt. Un LT qui reste illisible refuse le démarrage, avec un message et un code de sortie. Limite : si la lecture de démarrage échoue elle-même, le mode observation saute la réconciliation et ce contrôle avec elle (armé, `--live-micro-ops` refuse le démarrage), et rien ne revérifie le LT en cours de route.
+- LT et LTV max : ceux du compte (`getUserAccountData`) dès qu'il porte du collatéral, puisque ce sont eux qui décident d'une liquidation. Sur un compte vide, Aave les rend à 0 : le bot prend alors ceux de la réserve wstETH (`ProtocolDataProvider.getReserveConfigurationData`), qui s'appliqueront dès le premier dépôt. Un LT qui reste illisible refuse le démarrage, avec un message et un code de sortie. Limite : si la lecture de démarrage échoue elle-même, le mode observation saute la réconciliation et ce contrôle avec elle (armé, `--live-micro-ops` refuse le démarrage). En cours de route, I9 revérifie le LT à chaque cycle de la boucle : lu à 0 ou incohérent avec les bandes, il passe en CRITICAL.
 - Montants envoyés on-chain : convertis en unités natives avec un arrondi explicite par opération. Vers le bas pour ce qui dépense ou crée de la dette (supply, borrow, withdraw, dépôt au pont), vers le haut pour une autorisation ou un remboursement (approve, repay, qu'Aave plafonne à la dette). Jamais `int(montant × 10**décimales)`, qui tronque vers zéro un montant USDC à six décimales sur 65. Les observations et les ratios de décision restent en flottants.
 
 ### 9.3 Pont
@@ -356,6 +356,8 @@ Escalade :
 - I5 : WARN et gel des opérations non critiques.
 
 Chaque invariant émet son propre événement d'alerte : le regroupement ne doit jamais cacher un invariant derrière un autre.
+
+Limite : la seule boucle qui évalue aujourd'hui les invariants est celle du traceur. Sans exécuteur, elle ne sait qu'alerter et suspendre ses micro-opérations ; le dégonflage qu'un verdict peut demander attend les exécuteurs, et I6 et I7 attendent le suivi des transferts et des exécutions en vol.
 
 ---
 

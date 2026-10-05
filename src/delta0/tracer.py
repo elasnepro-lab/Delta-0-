@@ -6,7 +6,8 @@ Per README §14:
 
 Two independent streams run in the same loop:
 1. **Shadow journal**: every cycle, `watcher.snapshot() -> decide() -> journal
-   if non-NOOP`. Zero side-effects, always active.
+   if non-NOOP`, then the invariants on the same snapshot. Zero side-effects,
+   always active.
 2. **Micro-op scheduler** (opt-in, M1-B2): if executors are provided, fires
    Aave / HL / bridge tracer round-trips on config-driven intervals. Each
    round-trip measures the real latency of a critical path (README §7).
@@ -27,11 +28,21 @@ from delta0.decision import BlindState, OperationalContext, decide
 from delta0.executor import AaveTraceExecutor
 from delta0.failure import OPERATIONAL_ERRORS
 from delta0.hl_executor import HLTraceExecutor
+from delta0.invariants import (
+    InvariantContext,
+    InvariantVerdict,
+    assess,
+    breach_since,
+    check_invariants,
+    cushion_breached,
+    emit,
+    margin_breached,
+)
 from delta0.latency import elapsed_ms, now_perf
 from delta0.logging import get_logger, set_cycle_id
 from delta0.safety import SafetyRefused
 from delta0.state import StateStore
-from delta0.types import Snapshot
+from delta0.types import Action, Priority, Snapshot
 from delta0.venues.bridge import BridgeExecutor
 from delta0.venues.hl_stream import HyperliquidStream
 from delta0.watchdog import KillSignal, Watchdog
@@ -94,6 +105,14 @@ class TracerLoop:
     _last_hl_cancel: float = field(default=float("-inf"))
     _last_bridge_cycle: float = field(default=float("-inf"))
 
+    # What the invariants need and a snapshot cannot say (README §11): when
+    # each threshold was first crossed, and when each flank last answered.
+    _cushion_breach_since: datetime | None = None
+    _margin_breach_since: datetime | None = None
+    _last_down_defence_at: datetime | None = None
+    _last_up_defence_at: datetime | None = None
+    last_verdict: InvariantVerdict | None = None
+
     async def run(self, duration_s: float | None = None) -> int:
         """Run the TRACER loop for `duration_s` (or forever if None).
 
@@ -151,13 +170,65 @@ class TracerLoop:
                     reason=action.reason,
                 )
 
+            # --- Invariants --------------------------------------------------
+            verdict = self._check_invariants(snap, action, ctx.blind_state)
+
             # --- Scheduled micro-ops (opt-in) --------------------------------
-            await self._maybe_fire_micro_ops(now_mono=time.monotonic(), snap=snap)
+            # A CRITICAL verdict, or gas under its floor, freezes everything
+            # non-critical — and a measuring round-trip is nothing else.
+            if verdict.freeze_non_critical:
+                log.warning(
+                    "micro_ops_frozen",
+                    message="micro-opérations suspendues : un invariant gèle le non-critique",
+                    level=verdict.level,
+                )
+            else:
+                await self._maybe_fire_micro_ops(now_mono=time.monotonic(), snap=snap)
 
             # --- Wait -------------------------------------------------------
             await asyncio.sleep(self.cadence_s)
 
         return shadow_count
+
+    def _check_invariants(
+        self, snap: Snapshot, action: Action, blind: BlindState
+    ) -> InvariantVerdict:
+        """I1-I9 on this cycle's snapshot, with the bookkeeping they depend on.
+
+        They were written in chantier 6.1 and called by nothing: the second
+        revue finance (2026-10-05, N3) found I9 — the governance check meant to
+        run on every snapshot — reachable from no loop at all. In the tracer a
+        defence is the intent `decide()` emitted, since nothing executes it.
+
+        Not tracked here yet: transfers and executions in flight (chantiers
+        4.5 and 3.2), so I6 and I7 stay quiet. And the tracer cannot deflate:
+        a verdict asking for it is logged CRITICAL by `emit`, nothing more.
+        """
+        now = snap.ts
+        if action.priority in (Priority.P3_EMERGENCY_REPAY, Priority.P4_DELEVERAGE):
+            self._last_down_defence_at = now
+        if action.priority in (Priority.P1_LIQUIDATION_DETECTED, Priority.P2_EMERGENCY_REDUCE):
+            self._last_up_defence_at = now
+        self._cushion_breach_since = breach_since(
+            self._cushion_breach_since, cushion_breached(snap, self.config), now
+        )
+        self._margin_breach_since = breach_since(
+            self._margin_breach_since, margin_breached(snap, self.config), now
+        )
+        ctx = InvariantContext(
+            now=now,
+            # No emergency and both venues in sight: the steady state I1-I3
+            # describe, as far as a loop without a state machine can tell.
+            cruising=action.kind == "NOOP" and blind is BlindState.NOMINAL,
+            cushion_breach_since=self._cushion_breach_since,
+            last_down_defence_at=self._last_down_defence_at,
+            margin_breach_since=self._margin_breach_since,
+            last_up_defence_at=self._last_up_defence_at,
+        )
+        verdict = assess(check_invariants(snap, self.config, ctx))
+        emit(verdict, log)
+        self.last_verdict = verdict
+        return verdict
 
     async def _maybe_fire_micro_ops(self, *, now_mono: float, snap: Snapshot) -> None:
         """Fire scheduled micro-ops when their interval has elapsed.
