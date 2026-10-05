@@ -642,7 +642,13 @@ def _p10_regime_step(snapshot: Snapshot, config: Config, ctx: OperationalContext
     origin = ctx.regime_origin_exposure_mult
     full_gap = abs(ctx.desired_exposure_mult - (current if origin is None else origin))
     tranche = min(abs(delta), _REGIME_TRANCHE * max(full_gap, abs(delta)))
-    step_target = current + (tranche if delta > 0 else -tranche)
+    # The last tranche lands ON the target: four quarters summed in floating
+    # point left a parked montage at 1e-16 of exposure, a dust short whose
+    # margin ratio fired pumps and a bogus liquidation in the A/B of 2026-10-05.
+    if abs(delta) - tranche <= _EXPOSURE_EPS:
+        step_target = ctx.desired_exposure_mult
+    else:
+        step_target = current + (tranche if delta > 0 else -tranche)
 
     # Dead zone first: a step worth nothing must not use up the hourly slot of
     # one that would. The threshold is the one the project already uses for

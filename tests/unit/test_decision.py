@@ -408,6 +408,29 @@ def test_p10_reaches_the_target_in_four_tranches_not_forty_eight(
     assert held == pytest.approx(1.5)
 
 
+def test_p10_parks_at_exactly_zero_not_at_floating_point_dust(
+    stable_snapshot: Snapshot,
+    config: Config,
+    nominal_ctx: OperationalContext,
+) -> None:
+    """Four quarters of 2.105 summed in floating point do not make 2.105.
+
+    The dust left a 3e-15 ETH short whose margin ratio fired 452 pumps and a
+    bogus liquidation in the A/B of 2026-10-05, the capital sitting untouched
+    in the wallet. The last tranche must land exactly on the target.
+    """
+    held, origin = config.exposure_mult, config.exposure_mult
+    for _ in range(4):
+        ctx = replace(
+            nominal_ctx,
+            current_exposure_mult=held,
+            desired_exposure_mult=0.0,
+            regime_origin_exposure_mult=origin,
+        )
+        held = float(decide(stable_snapshot, config, ctx).params["step_target_exposure_mult"])
+    assert held == 0.0
+
+
 def test_p10_takes_one_tranche_per_hour_at_most(
     stable_snapshot: Snapshot,
     config: Config,
