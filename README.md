@@ -387,7 +387,7 @@ Le digest quotidien EST le tableau d'exactitude, cinq dimensions, cinq chiffres,
 | Fidélité (il exécute juste) | delta post-opération, ratios restaurés (I8), slippage vs devis | ±2 %, ±0,5 pt, <= 30 bps |
 | Vitesse (il agit à temps) | p95 de chaque chemin vs budget (2 s / 10 s / 3 min / 8 min) | p95 <= budget |
 | Robustesse (il survit à lui-même) | réconciliations propres, écarts inexpliqués, états silencieux | zéro |
-| Coût (il tient son budget) | frais + accidents réalisés vs provision (40 + 250 $/mois) | <= provision en cumul |
+| Coût (il tient son budget) | frais + accidents réalisés vs provisions de `scripts/classeur.py`, proportionnelles à leur base | <= provision en cumul |
 
 ---
 

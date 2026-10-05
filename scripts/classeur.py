@@ -29,25 +29,103 @@ REPO = Path(__file__).resolve().parents[1]
 # Re-read it with scripts/read_aave_params.py before trusting any of this.
 DEFAULT_LT = 0.79
 
-# Carry assumptions. These are a SCENARIO, not an expectation: funding averaged
-# far less than 11 % over long stretches of 2023-2024 (audit F10). The régime
-# report of M2b is what should replace them.
-FUNDING_APR = 0.11
-STAKING_APR = 0.027
-BORROW_APR = 0.05
+# Carry assumptions, read on 2026-10-05 (revue finance du même jour, m9). A
+# SCENARIO, not an expectation: these are 30-day readings, and the funding went
+# from 21.6 %/yr in 2023 to 5.25 % in 2026 — one window says nothing of the next.
+# Funding: Hyperliquid ETH, 720 hourly points paginated. Borrow: Aave v3 Arbitrum
+# USDC variable APR. Staking: inferred from three readings of the oracle ratio.
+FUNDING_APR = 0.1019
+STAKING_APR = 0.022
+BORROW_APR = 0.03944
 
-# Section H of the audit, split by nature rather than lumped. "Expected" lines
-# are what a normal year costs; only the tail is genuinely optional.
+# A provision is a rate on the base that makes it grow, plus what does not grow.
+# They used to be fixed dollars, roughly right at 20 k$ and absurd at 100 k$: the
+# prudent year read 18.2 % there, 3.9 % once proportional (revue finance F11).
+# Each line says where its rate comes from; NON VÉRIFIÉE where nothing was read.
+
+
+@dataclass(frozen=True)
+class Provision:
+    name: str
+    category: str  # attendu | plausible | queue
+    base: str  # equity | debt | notional | fixed
+    rate: float
+    fixed_usd: float
+    source: str
+
+
 PROVISIONS = (
-    ("carry négatif avant PARKED + whipsaw", 1_000.0, "attendu"),
-    ("frais de re-centrage hors budget", 100.0, "attendu"),
-    ("pompes dues au funding négatif", 100.0, "attendu"),
-    ("pic de taux d'emprunt USDC", 400.0, "plausible"),
-    ("slippage d'urgence P4", 300.0, "queue"),
-    ("liquidation Aave « propre »", 1_300.0, "queue"),
-    ("divergence mark/oracle résiduelle", 100.0, "queue"),
-    ("refus du garde-fou à mi-cycle", 20.0, "queue"),
+    Provision(
+        "coûts d'exploitation",
+        "attendu",
+        "equity",
+        0.03,
+        275.0,
+        "backtest FIDÈLE à 0,625, porte s0-f300 : 2,1 / 3,1 / 3,9 / 3,6 % de l'équité "
+        "par an (2023-2026) ; fixe = ~260 traversées/an x 1 $ + gaz",
+    ),
+    Provision(
+        "prime de la porte de régime",
+        "attendu",
+        "equity",
+        0.015,
+        0.0,
+        "A/B du 2026-10-05 : s0-f300 contre porte OFF, -1,3 pt sur la période, -1,6 pt sur 12 mois",
+    ),
+    Provision(
+        "pic de taux d'emprunt USDC",
+        "plausible",
+        "debt",
+        0.56 * 7 / 365,
+        0.0,
+        "7 jours à 60 % APR au lieu de ~4 %",
+    ),
+    Provision(
+        "glissement d'urgence P4",
+        "queue",
+        "equity",
+        0.015,
+        0.0,
+        "150 bps x 2 épisodes sur la vente de P4 (formule N2)",
+    ),
+    Provision(
+        "liquidation Aave",
+        "queue",
+        "debt",
+        0.5 * 0.072,
+        0.0,
+        "close factor 50 % (NON VÉRIFIÉ) x pénalité 7,2 % (bonus 1,072 lu le 2026-10-05)",
+    ),
+    Provision(
+        "liquidation Hyperliquid",
+        "queue",
+        "notional",
+        0.025,
+        0.0,
+        "marge de maintenance perdue 2 % (mesurée sur notre compte, D2) + jambe nue "
+        "jusqu'à P1 0,5 % (NON VÉRIFIÉE)",
+    ),
+    Provision(
+        "divergence mark/oracle résiduelle",
+        "queue",
+        "notional",
+        0.0025,
+        0.0,
+        "ordre de grandeur, NON VÉRIFIÉ",
+    ),
+    Provision(
+        "refus du garde-fou à mi-cycle",
+        "queue",
+        "fixed",
+        0.0,
+        20.0,
+        "une intervention manuelle, qui ne grossit pas avec le capital",
+    ),
 )
+
+# The second size the classeur prints beside the config's: proportional lines
+# only show their nature once two sizes sit side by side.
+SECOND_CAPITAL = 100_000.0
 
 
 @dataclass(frozen=True)
@@ -83,6 +161,31 @@ class Chassis:
     @property
     def carry_gross(self) -> float:
         return FUNDING_APR * self.spot + STAKING_APR * self.spot - BORROW_APR * self.debt
+
+    def scaled(self, capital: float) -> Chassis:
+        """The same sheet at another capital: every leg is linear in it."""
+        k = capital / self.capital
+        return Chassis(
+            capital=capital,
+            cushion=self.cushion * k,
+            reserve=self.reserve * k,
+            target_ltv=self.target_ltv,
+            lt=self.lt,
+            spot=self.spot * k,
+            debt=self.debt * k,
+            margin=self.margin * k,
+        )
+
+
+def provision_usd(line: Provision, chassis: Chassis) -> float:
+    """One provision on one sheet. The notional is the spot: the short matches it."""
+    base = {
+        "equity": chassis.capital,
+        "debt": chassis.debt,
+        "notional": chassis.spot,
+        "fixed": 0.0,
+    }[line.base]
+    return line.rate * base + line.fixed_usd
 
 
 # Same formula on both sides, so any gap beyond float noise is a real disagreement.
@@ -166,17 +269,38 @@ def print_sheet(chassis: Chassis, config: Config) -> None:
         f"   ({100 * chassis.carry_gross / chassis.capital:.1f} % du capital)"
     )
 
-    expected = sum(a for _, a, n in PROVISIONS if n == "attendu")
-    total = sum(a for _, a, _ in PROVISIONS)
-    print(f"\n  {'- coûts attendus':<28}{-expected:>12,.0f} $")
-    print(
-        f"  {'= année typique':<28}{chassis.carry_gross - expected:>12,.0f} $"
-        f"   ({100 * (chassis.carry_gross - expected) / chassis.capital:.1f} %)"
+    print_provisions(chassis)
+
+
+def print_provisions(chassis: Chassis) -> None:
+    sheets = [chassis]
+    if chassis.capital != SECOND_CAPITAL:
+        sheets.append(chassis.scaled(SECOND_CAPITAL))
+    heads = "".join(f"{f'{s.capital:,.0f} $':>14}" for s in sheets)
+    print(f"\n  --- provisions (taux sur leur base, sources ci-dessous) ---\n  {'':<46}{heads}")
+    for line in PROVISIONS:
+        cells = "".join(f"{provision_usd(line, s):>14,.0f}" for s in sheets)
+        print(f"  {line.name:<35}{line.category:>11}{cells}")
+
+    print(f"\n  {'':<46}{heads}")
+    rows = (
+        ("BRUT", lambda s: s.carry_gross),
+        ("= année typique", lambda s: s.carry_gross - _sum(s, ("attendu",))),
+        ("= année prudente", lambda s: s.carry_gross - _sum(s, ("attendu", "plausible", "queue"))),
     )
-    print(
-        f"  {'= année prudente':<28}{chassis.carry_gross - total:>12,.0f} $"
-        f"   ({100 * (chassis.carry_gross - total) / chassis.capital:.1f} %)"
-    )
+    for label, value in rows:
+        cells = "".join(
+            f"{value(s):>9,.0f} {100 * value(s) / s.capital:>3.1f}%"[-14:].rjust(14) for s in sheets
+        )
+        print(f"  {label:<46}{cells}")
+    print("\n  L'année prudente additionne tous les accidents de queue la même année.")
+    print("  Sources :")
+    for line in PROVISIONS:
+        print(f"    - {line.name} : {line.source}")
+
+
+def _sum(chassis: Chassis, categories: tuple[str, ...]) -> float:
+    return sum(provision_usd(p, chassis) for p in PROVISIONS if p.category in categories)
 
 
 def print_comparison(config: Config, lt: float) -> None:
