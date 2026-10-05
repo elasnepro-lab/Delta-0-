@@ -412,6 +412,23 @@ def test_l_urgence_traverse_le_carnet_et_le_paie() -> None:
 # --- le désendettement, là où deux prix se croisent -----------------------------
 
 
+def _ltv_spot(livre: Book, minute: Minute) -> float:
+    return livre.debt_usd / (livre.wsteth * oracle_price(minute.eth.close, minute.ratio))
+
+
+@pytest.mark.parametrize("decote", [1.0, 0.935])
+def test_le_desendettement_atteint_la_cible_sur_le_spot(decote: float) -> None:
+    """Revue finance 2026-10-05, N2 : vendre l'excédent seul laissait un tiers du chemin.
+
+    La vente rétrécit le spot sur lequel la cible se mesure : il faut vendre
+    l'excédent divisé par (prix net - t x prix oracle), décote et frais compris.
+    """
+    livre = book(cushion_usd=0.0)
+    minute = flat_minute(steth_market=decote)
+    act(livre, acted("STEPWISE_DELEVERAGE", target_ltv_after=0.685), minute)
+    assert _ltv_spot(livre, minute) == pytest.approx(0.685, rel=1e-6)
+
+
 def test_le_desendettement_vend_au_prix_du_marche_pas_a_celui_de_l_oracle() -> None:
     """Le décrochage de juin 2022 : même excédent, plus de collatéral à vendre."""
     livre_pair = book(cushion_usd=0.0)
@@ -424,7 +441,6 @@ def test_le_desendettement_vend_au_prix_du_marche_pas_a_celui_de_l_oracle() -> N
     vendu_pair = 16.0 - livre_pair.wsteth
     vendu_decote = 16.0 - livre_decote.wsteth
     assert vendu_decote > vendu_pair
-    assert vendu_decote == pytest.approx(vendu_pair / 0.935, rel=1e-6)
 
 
 def test_le_desendettement_sans_prix_de_marche_refuse() -> None:

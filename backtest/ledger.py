@@ -452,7 +452,12 @@ def _deleverage(book: Book, action: Action, world: World) -> Applied:
     kept = 1.0 - (world.costs.swap_fee.value + world.costs.swap_slippage.value) * BPS
     if kept <= 0.0:
         raise ValueError("frais d'échange au-delà de 100 % : barème incohérent")
-    wanted = excess / (sale * kept)
+    # Chaque wstETH vendu rembourse `sale·kept` de dette mais retire aussi
+    # `oracle` du spot sur lequel la cible se mesure. Vendre l'excédent seul
+    # laissait la LTV spot à 0,745 au lieu de 0,685 sur un krach de 15 % : un
+    # tiers de la vente nécessaire. Revue finance 2026-10-05, N2 ; README §8.7.
+    per_unit = sale * kept - target_ltv * oracle
+    wanted = excess / per_unit if per_unit > 0.0 else book.wsteth
     sold = min(wanted, book.wsteth)
     gross = sold * sale
 
