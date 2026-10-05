@@ -32,7 +32,7 @@ La performance vient de l'exécution, pas de l'idée : le rendement est un fait 
 | Terme | Définition |
 |---|---|
 | Notionnel | Taille du short × prix mark, en USD. Base de calcul du funding. |
-| Delta | Valeur spot (wstETH en USD) moins notionnel du short. Cible : 0. |
+| Delta | Quantité d'ETH du collatéral (wstETH × taux de conversion) moins taille du short, en ETH. Cible : 0. Exprimé en ETH et non en USD, pour qu'un mouvement de prix seul ne crée pas de delta (§5). |
 | LTV Aave | Dette totale USD / collatéral total USD sur Aave, coussin compris. C'est la LTV qu'Aave affiche et qui fait le HF : lecture, rapports, contrôles de cohérence. Elle n'a pas de cible. |
 | LTV spot | Dette totale USD / valeur du spot (wstETH seul, sans le coussin). C'est la base de `target_ltv` (décision n° 3, §17), du solveur (§3), des montants remboursés par P4 et P6, et de I2 et I8 en croisière. |
 | HF (health factor) | (Collatéral × seuil de liquidation) / dette, lu on-chain via Aave. Liquidation si HF < 1. |

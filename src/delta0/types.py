@@ -145,8 +145,11 @@ class Snapshot:
 
         The hedge is a short on ETH, so neutrality is an equality of ETH
         quantities, not of dollar amounts. Stating it this way makes the delta
-        immune to the USD base: a stETH depeg moves the Aave leg's LTV, which
-        is an Aave problem, and leaves this figure alone. See README §5.
+        immune to the USD base. A stETH MARKET depeg moves neither this figure
+        nor the Aave LTV — since 2023-06-26 the oracle prices wstETH at the
+        conversion rate times ETH/USD (docs/backtest/verification-oracle-wsteth.md)
+        — it costs only at the exit. A slashing, which lowers the rate itself,
+        moves both. See README §5.
         """
         return self.wsteth_atoken_balance * self.wsteth_eth_ratio
 

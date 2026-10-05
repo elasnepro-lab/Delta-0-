@@ -5,8 +5,9 @@ Cross-field validators enforce the invariants that the classeur Model C guarante
 - exposure_mult == 1 / (1 - target_ltv + 1 / short_leverage)
 - Upper flank ordering (reduce < pump); the recenter bands are not compared to
   the emergency thresholds (see `_check_recenter_bands`).
-- Down-flank margins strictly ordered (pump > cushion > deleverage); the bands
-  they give are checked against the on-chain LT at boot, not here.
+- Down-flank margins strictly ordered (pump > cushion; P3 and P4 share the
+  cushion threshold); the bands they give are checked against the on-chain LT
+  at boot and by I9 on every snapshot, not here.
 
 If any invariant fails, the bot refuses to boot — that is by design.
 """
@@ -404,9 +405,9 @@ class Config(BaseModel):
         # The thresholds themselves depend on the on-chain LT, so they cannot be
         # checked here — `derive_bands` builds them, and `bands_incoherence`, run
         # by `reconcile_at_boot`, refuses the boot in every mode when they
-        # collapse onto the target or the LT reads 0. Two gaps remain: in
-        # observation mode a failed boot snapshot skips the reconciliation, and
-        # nothing re-checks the LT during a run. What IS checkable without the
+        # collapse onto the target or the LT reads 0, and I9 re-checks it on
+        # every snapshot. One gap remains: in observation mode a failed boot
+        # snapshot skips the reconciliation. What IS checkable without the
         # chain: the widest margin must still leave the pump above the target,
         # whatever plausible LT we face. With LT >= target + widest margin the
         # pump sits above target by construction; below that the config can

@@ -244,6 +244,12 @@ class HyperliquidReader:
         a position with 1.24 of margin left `total` at 29.79 for 29.80 before
         (hl_findings §16). Revue finance 2026-10-02, F1.
 
+        Measured again on 2026-10-05 with a position open: `hold` equals
+        `marginUsed` to the micro-dollar (hl_findings §17). `hold` also carries
+        the margin of RESTING orders, so while a maker order waits (P8, a
+        re-centre) the free reserve reads low — the safe side, accepted
+        (revue finance 2026-10-05, m25).
+
         This is what the fast up-flank defence spends: adding isolated margin
         from here is one local request, no bridge.
         """

@@ -116,14 +116,14 @@ def test_p3_edge_at_threshold(
     assert action.params["repay_amount_usdc"] == pytest.approx(cushion_tranche_size(config))
 
 
-def test_p4_fires_when_ltv_over_deleverage_and_cushion_empty(
+def test_p4_fires_at_the_cushion_threshold_once_the_cushion_is_empty(
     stable_snapshot: Snapshot,
     config: Config,
     nominal_ctx: OperationalContext,
 ) -> None:
     # Coussin vide d'abord : il entre dans le collatéral, donc dans le HF.
     depleted = replace(stable_snapshot, usdc_atoken_balance=100.0)  # < tranche 250 $
-    snap = _snap_with_ltv(depleted, 0.78)  # au-delà du désendettement (0.775)
+    snap = _snap_with_ltv(depleted, 0.78)  # au-delà du seuil coussin (0,765), P4 le partage
     action = decide(snap, config, nominal_ctx)
     assert action.priority is Priority.P4_DELEVERAGE
     assert action.kind == "STEPWISE_DELEVERAGE"

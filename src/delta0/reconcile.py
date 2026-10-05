@@ -31,7 +31,9 @@ log = get_logger(__name__)
 # An anchor drift above this magnitude at boot is worth a human look
 # (typical daily moves are well under it).
 _ANCHOR_DRIFT_ALERT = 0.15
-# HF below this is worth surfacing as CRITICAL — 1.10 leaves ~5 pt to LT.
+# HF below this is worth surfacing at boot. At LT 0.79, HF 1.10 is an Aave LTV
+# of 0.718: 7.2 points under the LT, an 8.4 % fall from there to liquidation
+# (the old comment said "~5 pt"; revue finance 2026-10-02, m11).
 _HF_ALERT_FLOOR = 1.10
 
 
@@ -83,7 +85,7 @@ async def reconcile_at_boot(
         message=(
             f"bandes dérivées du LT {bands.lt:.4f} : pompe {bands.ltv_pump:.4f} "
             f"(-{100 * bands.price_drop_to(bands.ltv_pump, config.target_ltv):.2f} %), "
-            f"coussin puis désendettement {bands.ltv_cushion:.4f} "
+            f"coussin puis désendettement {bands.ltv_cushion:.4f}, coussin plein "
             f"(-{100 * bands.price_drop_to(bands.ltv_cushion, config.target_ltv):.2f} %)"
         ),
         lt=bands.lt,
