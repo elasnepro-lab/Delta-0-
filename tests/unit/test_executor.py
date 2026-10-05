@@ -272,3 +272,19 @@ async def test_dry_run_samples_never_enter_the_critical_path_stats(
     assert await store.latency_paths() == ["dry.path.aave_supply"]
     live_stats = await store.latency_stats("path.aave_supply")
     assert live_stats["count"] == 0
+
+
+def test_the_safety_cap_prices_wsteth_at_the_observed_oracle_not_3000(config: Config) -> None:
+    """Revue finance 2026-10-02, m14: 3 000 $ "conservative" was 11 % UNDER the price.
+
+    For a ceiling, under-estimating is the dangerous side. Without an observed
+    price the estimate is infinite, so the cap refuses instead of guessing.
+    """
+    executor = AaveTraceExecutor.__new__(AaveTraceExecutor)
+    executor._config = config
+    executor._wsteth_price_usd = None
+    wsteth = config.venues.wsteth_address
+    assert executor._estimate_notional(wsteth, 0.01) == float("inf")
+    executor.observe_wsteth_price(3_396.13)
+    assert executor._estimate_notional(wsteth, 0.01) == pytest.approx(33.9613)
+    assert executor._estimate_notional(config.venues.usdc_address, 5.0) == 5.0

@@ -49,6 +49,9 @@ from delta0.types import Action, ActionKind, Snapshot, equity_usd
 # collecté : les appliquer à 2021 est une HYPOTHÈSE, pas une lecture, et elle
 # pèse d'autant plus que le segment est ancien.
 LT_TODAY = 0.79
+# The USDC cushion is collateral at USDC's own threshold, read on 2026-10-05.
+# Weighing it at the wstETH's 0.79 made the bands 0.03 pt optimistic (m1).
+LT_USDC_TODAY = 0.78
 LTV_MAX_TODAY = 0.75
 
 # Ce que le backtest ne simule pas, et qui doit rester hors du chemin des
@@ -166,10 +169,10 @@ def settle_funding(book: Book, event: FundingEvent, mark: float) -> float:
 
 def health_factor(book: Book, wsteth_price: float) -> float:
     """Le facteur de santé, calculé faute de pouvoir le lire sur la chaîne."""
-    collateral = book.wsteth * wsteth_price + book.cushion_usd
     if book.debt_usd <= 0.0:
         return float("inf")
-    return book.lt * collateral / book.debt_usd
+    weighted = book.lt * book.wsteth * wsteth_price + LT_USDC_TODAY * book.cushion_usd
+    return weighted / book.debt_usd
 
 
 def oracle_price(eth_price: float, ratio: float) -> float:

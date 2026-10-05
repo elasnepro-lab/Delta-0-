@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -60,6 +60,7 @@ async def test_scheduler_fires_aave_cycle_when_interval_zero(
     tmp_path: Path,
 ) -> None:
     aave = AsyncMock()
+    aave.observe_wsteth_price = MagicMock()  # synchronous: hands over the oracle price
     cfg = config.model_copy(
         update={"tracer": config.tracer.model_copy(update={"aave_cycle_every_s": 1})},
     )
@@ -89,6 +90,7 @@ async def test_scheduler_does_not_fire_before_interval(
     tmp_path: Path,
 ) -> None:
     aave = AsyncMock()
+    aave.observe_wsteth_price = MagicMock()  # synchronous: hands over the oracle price
     # 1 hour interval — should never fire within a 50ms test.
     cfg = config.model_copy(
         update={"tracer": config.tracer.model_copy(update={"aave_cycle_every_s": 3600})},
@@ -153,6 +155,7 @@ async def test_scheduler_survives_safety_refused(
     tmp_path: Path,
 ) -> None:
     aave = AsyncMock()
+    aave.observe_wsteth_price = MagicMock()  # synchronous: hands over the oracle price
     aave.approve.side_effect = SafetyRefused("test refusal")
     cfg = config.model_copy(
         update={"tracer": config.tracer.model_copy(update={"aave_cycle_every_s": 1})},
@@ -246,6 +249,7 @@ async def test_the_aave_cycle_never_runs_next_to_a_position(
     cycle that died half-way is enough to refuse the next cycle.
     """
     aave = AsyncMock()
+    aave.observe_wsteth_price = MagicMock()  # synchronous: hands over the oracle price
     cfg = config.model_copy(
         update={"tracer": config.tracer.model_copy(update={"aave_cycle_every_s": 1})},
     )

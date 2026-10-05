@@ -17,6 +17,7 @@ No writes. No approvals. No mutations. That is the point of M0.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -113,6 +114,7 @@ _ERC20_BALANCE_ABI: list[dict[str, Any]] = [
 
 # Aave scales collateral/debt in "base currency" with 8 decimals.
 _BASE_DECIMALS = 10**8
+_ORACLE_TTL_S = 3600.0
 # HF is returned in wad (1e18); infinity when there is no debt.
 _HF_WAD = 10**18
 # Interest rates are in RAY (1e27) and expressed as annualized values.
@@ -375,6 +377,7 @@ class AaveReader:
         # hardcoded address would keep pricing the collateral with the old one.
         self._oracle: AsyncContract | None = None
         self._oracle_unit: int | None = None
+        self._oracle_resolved_at: float = float("-inf")
 
     async def read_snapshot(
         self,
@@ -581,8 +584,15 @@ class AaveReader:
         return _reserve_rates(reserve_data)
 
     async def _get_oracle(self) -> tuple[AsyncContract, int]:
-        """Resolve and cache the price oracle the pool currently points at."""
-        if self._oracle is None or self._oracle_unit is None:
+        """Resolve the price oracle the pool currently points at, again every hour.
+
+        It was resolved once per process: an oracle swapped by governance went
+        unseen until a restart (revue finance 2026-10-02, m13). Three calls an
+        hour cost nothing next to a snapshot every five seconds.
+        """
+        stale = time.monotonic() - self._oracle_resolved_at >= _ORACLE_TTL_S
+        if self._oracle is None or self._oracle_unit is None or stale:
+            previous = None if self._oracle is None else self._oracle.address
             provider_address = await self._pool.functions.ADDRESSES_PROVIDER().call()
             provider = self._w3.eth.contract(
                 address=AsyncWeb3.to_checksum_address(provider_address),
@@ -595,11 +605,19 @@ class AaveReader:
             )
             self._oracle_unit = await oracle.functions.BASE_CURRENCY_UNIT().call()
             self._oracle = oracle
-            log.info(
-                "aave_oracle_resolved",
-                message="oracle Aave résolu depuis l'AddressesProvider",
-                oracle=str(oracle_address),
-            )
+            self._oracle_resolved_at = time.monotonic()
+            if previous is not None and previous != oracle.address:
+                log.warning(
+                    "aave_oracle_changed",
+                    message=f"oracle Aave changé : {previous} -> {oracle.address}",
+                    oracle=str(oracle_address),
+                )
+            elif previous is None:
+                log.info(
+                    "aave_oracle_resolved",
+                    message="oracle Aave résolu depuis l'AddressesProvider",
+                    oracle=str(oracle_address),
+                )
         return self._oracle, self._oracle_unit
 
     async def read_oracle_prices(self, wsteth: str, weth: str) -> AaveOraclePrices:

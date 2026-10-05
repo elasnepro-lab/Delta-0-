@@ -28,6 +28,9 @@ REPO = Path(__file__).resolve().parents[1]
 # Read on-chain 2026-09-08, block 503134105 — memory/aave_findings.md §9.
 # Re-read it with scripts/read_aave_params.py before trusting any of this.
 DEFAULT_LT = 0.79
+# USDC as collateral on Aave Arbitrum, read 2026-10-05 (revue finance m1): the
+# cushion liquidates at its own threshold, not the wstETH's.
+LT_USDC = 0.78
 
 # Carry assumptions, read on 2026-10-05 (revue finance du même jour, m9). A
 # SCENARIO, not an expectation: these are 30-day readings, and the funding went
@@ -156,7 +159,8 @@ class Chassis:
     def band(self, *, cushion_intact: bool = True) -> float:
         """Price fall that takes this sheet to the liquidation threshold."""
         cushion = self.cushion if cushion_intact else 0.0
-        return max(0.0, 1.0 - (self.debt / self.lt - cushion) / self.spot)
+        # Liquidation when debt = LT x spot x (1 - fall) + LT_USDC x cushion.
+        return max(0.0, 1.0 - (self.debt - LT_USDC * cushion) / (self.lt * self.spot))
 
     @property
     def carry_gross(self) -> float:

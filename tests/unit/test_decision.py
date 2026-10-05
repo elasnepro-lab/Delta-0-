@@ -306,6 +306,22 @@ def test_p8_sees_a_long_instead_of_a_flat_delta(
     assert action.params["target_short_size_eth"] == pytest.approx(20.0)
 
 
+def test_a_long_is_left_to_p8_not_fed_by_p2_or_p5(
+    stable_snapshot: Snapshot,
+    config: Config,
+    nominal_ctx: OperationalContext,
+) -> None:
+    """Revue finance 2026-10-05, m23: a long with thin margin drew P2 and P5.
+
+    Both would pour margin into a position P8 must close; with the long's
+    margin under both thresholds, the table now answers with P8.
+    """
+    snap = replace(stable_snapshot, short_size_eth=-20.0, isolated_margin_usd=500.0)
+    assert snap.margin_ratio < config.emergency.margin_ratio_reduce
+    action = decide(snap, config, nominal_ctx)
+    assert action.priority is Priority.P8_DELTA_RETRUE
+
+
 def test_p8_ignores_a_pure_price_move(
     stable_snapshot: Snapshot,
     config: Config,

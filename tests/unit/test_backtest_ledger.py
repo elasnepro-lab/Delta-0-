@@ -174,8 +174,9 @@ def test_le_prix_oracle_ne_depend_que_du_taux_et_de_l_eth() -> None:
 
 
 def test_le_facteur_de_sante_compte_le_coussin_dans_le_collateral() -> None:
+    """Chacun à son seuil : le wstETH à 0,79, le coussin USDC à 0,78 (m1)."""
     livre = book()
-    attendu = LT * (16.0 * oracle_price(MARK, RATIO) + 1_000.0) / 35_000.0
+    attendu = (LT * 16.0 * oracle_price(MARK, RATIO) + 0.78 * 1_000.0) / 35_000.0
     assert health_factor(livre, oracle_price(MARK, RATIO)) == pytest.approx(attendu)
 
 

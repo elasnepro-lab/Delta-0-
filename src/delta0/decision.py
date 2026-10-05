@@ -438,6 +438,10 @@ def _p2_emergency_reduce(snapshot: Snapshot, config: Config) -> Action | None:
     moving the price at which it happens. It carries an alert for that reason.
     """
     reduce_at = config.emergency.margin_ratio_reduce
+    if snapshot.short_size_eth <= 0.0:
+        # No short, or a LONG left by a wrong fill: feeding its margin would keep
+        # alive a position P8 must close (revue finance 2026-10-05, m23).
+        return None
     if snapshot.margin_ratio > reduce_at:
         return None
 
@@ -526,6 +530,8 @@ def _p4_stepwise_deleverage(snapshot: Snapshot, config: Config) -> Action | None
 
 
 def _p5_pump_up(snapshot: Snapshot, config: Config) -> Action | None:
+    if snapshot.short_size_eth <= 0.0:
+        return None  # same as P2: a long is P8's to close, not ours to fund (m23)
     if snapshot.margin_ratio > config.emergency.margin_ratio_pump:
         return None
     # Refill the margin to target level.

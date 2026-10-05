@@ -245,6 +245,7 @@ class TracerLoop:
             and now_mono - self._last_aave_cycle >= tracer_cfg.aave_cycle_every_s
         ):
             self._last_aave_cycle = now_mono
+            self.aave_executor.observe_wsteth_price(snap.wsteth_price_usd)
             await self._fire_aave_cycle(snap)
 
         if (

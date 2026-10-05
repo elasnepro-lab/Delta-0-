@@ -39,10 +39,19 @@ def _reader(**answers: Any) -> HyperliquidReader:
     return reader
 
 
+def _ctx(**marks: str) -> list[Any]:
+    """`metaAndAssetCtxs` as Hyperliquid serves it: universe and contexts, index-aligned."""
+    names = list(marks)
+    return [
+        {"universe": [{"name": n, "maxLeverage": 25} for n in names]},
+        [{"markPx": marks[n], "midPx": "0"} for n in names],
+    ]
+
+
 class _HungInfo:
-    def all_mids(self) -> dict[str, str]:
+    def meta_and_asset_ctxs(self) -> list[Any]:
         time.sleep(0.3)
-        return {"ETH": "2500"}
+        return _ctx(ETH="2500")
 
 
 @pytest.mark.asyncio
@@ -66,7 +75,7 @@ async def test_a_hung_call_is_a_timeout_the_loop_survives(
 
 @pytest.mark.asyncio
 async def test_the_sdk_parse_error_envelope_becomes_a_venue_error() -> None:
-    reader = _reader(all_mids={"error": "Could not parse JSON: <html>"})
+    reader = _reader(meta_and_asset_ctxs={"error": "Could not parse JSON: <html>"})
     with pytest.raises(HLReadError, match="Could not parse JSON") as excinfo:
         await reader.read_mark_price("ETH")
     assert issubclass(excinfo.type, OPERATIONAL_ERRORS)
@@ -75,7 +84,7 @@ async def test_the_sdk_parse_error_envelope_becomes_a_venue_error() -> None:
 @pytest.mark.asyncio
 async def test_a_missing_coin_is_a_venue_error_not_a_key_error() -> None:
     with pytest.raises(HLReadError, match="ETH"):
-        await _reader(all_mids={"BTC": "60000"}).read_mark_price("ETH")
+        await _reader(meta_and_asset_ctxs=_ctx(BTC="60000")).read_mark_price("ETH")
 
 
 @pytest.mark.asyncio
@@ -90,11 +99,26 @@ async def test_a_malformed_funding_history_is_a_venue_error() -> None:
 @pytest.mark.asyncio
 async def test_a_well_formed_read_still_reads() -> None:
     reader = _reader(
-        all_mids={"ETH": "2509.35"},
+        meta_and_asset_ctxs=_ctx(BTC="60000", ETH="2509.35"),
         funding_history=[{"fundingRate": "0.0000125"}],
     )
     assert await reader.read_mark_price("ETH") == pytest.approx(2509.35)
     assert await reader.read_last_hour_funding("ETH") == pytest.approx(0.0000125)
+    meta = await reader.read_market_meta("ETH")
+    assert meta.mark_price == pytest.approx(2509.35)
+    assert meta.maintenance_margin_ratio == pytest.approx(0.02)
+
+
+@pytest.mark.asyncio
+async def test_the_mark_is_the_mark_not_the_order_book_mid() -> None:
+    """Revue finance 2026-10-02, m6: `allMids` was read and called the mark.
+
+    Hyperliquid liquidates on `markPx`; the mid can sit several bp away in stress.
+    """
+    answer = _ctx(ETH="2510.00")
+    answer[1][0]["midPx"] = "2505.00"
+    reader = _reader(meta_and_asset_ctxs=answer)
+    assert await reader.read_mark_price("ETH") == pytest.approx(2510.0)
 
 
 class _FundingPages:
@@ -229,3 +253,21 @@ async def test_a_long_keeps_its_sign_instead_of_passing_for_a_short() -> None:
     position = await _reader(user_state=_position_state("20.0")).read_position("ETH")
     assert position is not None
     assert position.short_size_eth == pytest.approx(-20.0)
+
+
+@pytest.mark.asyncio
+async def test_the_funding_cache_does_not_serve_one_pair_for_another(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Revue finance 2026-10-05, m27: the hourly cache ignored the pair it was asked for."""
+
+    class _TwoPairs:
+        def funding_history(self, coin: str, start: int, end: int | None = None) -> Any:
+            _ = start, end
+            rate = "0.00001" if coin == "ETH" else "0.00003"
+            return [{"time": _NOW_MS - 3_600_000, "fundingRate": rate}]
+
+    reader = _funding_reader(_TwoPairs(), monkeypatch)  # type: ignore[arg-type]
+    eth = await reader.read_funding_avg_30d("ETH")
+    btc = await reader.read_funding_avg_30d("BTC")
+    assert btc == pytest.approx(3 * eth)
