@@ -588,7 +588,7 @@ def test_une_exposition_negative_est_refusee(config: Config) -> None:
     ("au_dessus_du_seuil", "attendu"),
     [
         (0.08, "plein"),  # 800 bps au-dessus de f*, au-dessus de spread_full_bps
-        (0.05, "plein"),  # pile sur spread_full_bps : la borne est incluse
+        (0.03, "plein"),  # pile sur spread_full_bps (300) : la borne est incluse
         (0.02, "moitie"),
         (0.0, "moitie"),  # pile sur safety_margin_bps (0 dans l'exemple) : incluse
         (-0.01, "zero"),  # sous le seuil de rentabilité

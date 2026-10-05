@@ -107,11 +107,11 @@ def test_the_classeur_runs_on_an_explored_target_and_a_rounded_config(
     rounded = tmp_path / "rounded.yaml"
     rounded.write_text(
         example_config_path.read_text(encoding="utf-8").replace(
-            f"exposure_mult: {config.exposure_mult}", "exposure_mult: 2.352941"
+            f"exposure_mult: {config.exposure_mult}", "exposure_mult: 2.105263"
         ),
         encoding="utf-8",
     )
-    assert "exposure_mult: 2.352941" in rounded.read_text(encoding="utf-8")
+    assert "exposure_mult: 2.105263" in rounded.read_text(encoding="utf-8")
     monkeypatch.setattr(sys, "argv", ["classeur", "--config", str(rounded)])
     classeur.main()  # must not raise SystemExit
 

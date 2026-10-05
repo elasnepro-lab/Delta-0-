@@ -116,10 +116,10 @@ async def test_the_loop_runs_the_invariants_on_every_snapshot(
 ) -> None:
     """Revue finance 2026-10-05, N3: I9 was reachable from no loop at all.
 
-    A LT cut to 0.70 mid-run puts the pump under the level P6 repays down to:
+    A LT cut to 0.67 mid-run puts the pump under the level P6 repays down to:
     I9 must turn CRITICAL on that very snapshot.
     """
-    watcher = _FakeWatcher(snapshots=[replace(_base_snap(), aave_lt_wsteth=0.70)])
+    watcher = _FakeWatcher(snapshots=[replace(_base_snap(), aave_lt_wsteth=0.67)])
     wd = Watchdog(config=config.watchdog, project_root=tmp_path)
     loop = TracerLoop(watcher=watcher, watchdog=wd, store=store, config=config, cadence_s=0.0)
     await loop.run(duration_s=0.01)

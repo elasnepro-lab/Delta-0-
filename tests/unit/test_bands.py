@@ -110,7 +110,9 @@ def test_p6_does_not_pump_nothing(
 
     A PUMP_DOWN of 0 USD on every cycle starved P7 to P10 for good (F8).
     """
-    cut = replace(stable_snapshot, aave_lt_wsteth=0.70, hf=0.70 * 51_000 / 33_750)
+    # LT 0.65 puts the pump at 0.61: HF 1.061 is under it, with the book already
+    # below the 0.635 P6 repays down to.
+    cut = replace(stable_snapshot, aave_lt_wsteth=0.65, hf=0.65 * 51_000 / 31_250)
     action = decide(cut, config, nominal_ctx)
     assert action.kind != "PUMP_DOWN"
 
