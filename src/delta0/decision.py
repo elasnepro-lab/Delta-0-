@@ -209,9 +209,9 @@ def regime_spread(
 
 def regime_candidate(spread: float, config: Config) -> float:
     """The exposition this spread calls for, before any hysteresis. README §8.9."""
-    if spread >= config.regime.spread_full_bps * 1e-4:
+    if spread >= config.regime.spread_full_bps / 10_000:
         return config.exposure_mult
-    if spread >= config.regime.safety_margin_bps * 1e-4:
+    if spread >= config.regime.safety_margin_bps / 10_000:
         return config.exposure_mult_half
     return 0.0
 

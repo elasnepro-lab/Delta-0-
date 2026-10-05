@@ -6,10 +6,10 @@
 
 capital_usd: 20000
 short_leverage: 10
-target_ltv: 0.675          # revisable : voir scripts/classeur.py --compare
+target_ltv: 0.625          # decision du 2026-10-05 : 0,675 meurt le 2024-08-05 au backtest (README §17 n° 3)
 target_margin_ratio: 0.10
-exposure_mult: 2.3529411765  # = 1 / (1 - target_ltv + 1 / short_leverage), verifie au boot
-exposure_mult_half: 1.5      # lu par aucun code avant le chantier 8.6 (porte de régime)
+exposure_mult: 2.1052631579  # = 1 / (1 - target_ltv + 1 / short_leverage), verifie au boot
+exposure_mult_half: 1.3421052632  # meme proportion de l'exposition pleine que 1,5 / 2,353 : celle de l'A/B du 2026-10-05
 maintenance_margin: 0.02     # attendue de la place ; I9 alerte si la valeur lue (1 / (2 x maxLeverage)) en diffère
 cushion_pct: 0.05            # 5% of capital held as USDC supply on Aave = 1000$
 cushion_floor_pct: 0.025     # invariant I4 (évalué dès la phase 3) ; reconstitution à l'écrémage en 8.5
@@ -23,10 +23,11 @@ skim_policy: recompose       # lu par aucun code avant 8.5 (écrémage)
 # Lu par aucun code avant 8.6 : la porte de régime n'est pas encore évaluée.
 regime:
   # Les deux seuils se mesurent AU-DESSUS du seuil de rentabilite
-  # f* = target_ltv x emprunt_30j - staking_30j (README §8.9), plus au-dessus
-  # du taux d'emprunt. PROVISOIRES : a calibrer par l'A/B de la porte (7.4).
-  safety_margin_bps: 0       # en dessous : PARKED
-  spread_full_bps: 500       # funding30d >= borrow + 5pts -> full exposure
+  # f* = target_ltv x emprunt_30j - staking_30j (README §8.9). Retenus le
+  # 2026-10-05 apres l'A/B de la porte : le reglage le moins couteux, la porte
+  # gardee comme assurance contre un funding durablement sous f*.
+  safety_margin_bps: 0       # en dessous de f* : PARKED (tout en USDC)
+  spread_full_bps: 300       # au-dessus de f* + 3 pts : exposition pleine
   hysteresis_days: 7
 
 gas_min_eth: 0.003           # invariant I5 : en dessous, opérations non critiques gelées (boucle : phase 3)

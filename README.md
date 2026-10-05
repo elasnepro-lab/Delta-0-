@@ -171,7 +171,7 @@ Toutes les lectures Aave d'un cycle viennent du même bloc.
 INIT -> DRY_RUN -> BUILDING -> RUNNING
 RUNNING <-> RECENTERING          (opération planifiée, minutes)
 RUNNING -> EMERGENCY -> REPAIRING -> RUNNING
-RUNNING -> DEFLATING -> PARKED   (porte de régime fermée : wstETH sans dette, pas de short)
+RUNNING -> DEFLATING -> PARKED   (porte de régime fermée : tout en USDC, ni wstETH, ni dette, ni short)
 PARKED  -> BUILDING              (porte rouverte, hystérésis respectée)
 tout état -> BLIND -> SAFE_DEFLATE -> PARKED ou STOPPED
 tout état -> UNWINDING -> STOPPED (ordre opérateur)
@@ -287,6 +287,8 @@ Les trois termes sont des moyennes sur la MÊME fenêtre de 30 jours : `borrow_3
 - regime_spread >= spread_full_bps pendant hysteresis_days -> cible exposure_mult.
 - regime.safety_margin_bps <= regime_spread < spread_full_bps pendant hysteresis_days -> cible exposure_mult_half.
 - regime_spread < regime.safety_margin_bps pendant hysteresis_days -> cible 0 (DEFLATING vers PARKED).
+
+PARKED est entièrement en USDC : le collatéral est vendu, la dette remboursée, le short fermé. Garder le wstETH sans dette conserverait le staking et éviterait un aller-retour de swap, mais laisserait tout le capital exposé au prix de l'ETH pendant le régime garé, ce que les non-objectifs interdisent (§17). Décidé le 2026-10-05.
 
 `regime.safety_margin_bps` est le conservatisme de la porte, assumé et réglable : ce qu'on exige au-delà du seuil de rentabilité avant d'accepter le risque du montage. Il remplace le zéro implicite de l'ancienne règle, qui comparait le funding au taux d'emprunt plein et rangeait en PARKED des régimes encore rentables sans que ce choix soit écrit nulle part.
 
@@ -486,7 +488,7 @@ Testnet Hyperliquid pour la jambe perp ; fork Arbitrum (anvil) pour la jambe Aav
 Décisions figées (ne pas rouvrir pendant l'implémentation) :
 1. Une seule venue perp (Hyperliquid), une seule chaîne (Arbitrum), une seule paire (ETH).
 2. Pas de smart contract custom en v1 : boucle itérative à la construction, désendettement par étapes via le coussin (le flashloan one-shot est une optimisation v2).
-3. Levier short fixe 10x, LTV cible 67,5 %, exposition dérivée ; l'exposition n'est pilotée que par la porte de régime. La cible valait 70 % tant que le LT supposé était 0,81 (Ethereum) ; au LT réel d'Arbitrum, 0,79, elle ne laissait qu'environ −11,4 % de bande.
+3. Levier short fixe 10x, LTV cible 62,5 %, exposition dérivée ; l'exposition n'est pilotée que par la porte de régime. La cible valait 70 % tant que le LT supposé était 0,81 (Ethereum) ; au LT réel d'Arbitrum, 0,79, elle ne laissait qu'environ −11,4 % de bande. Ramenée à 67,5 % puis, le 2026-10-05, à 62,5 % : au backtest sur le segment FIDÈLE, 0,675 meurt le 2024-08-05 sur Aave quel que soit le réglage de la porte, et la frontière de survie passe entre 0,675 et 0,650. La porte est gardée comme assurance contre un funding durablement sous son seuil de rentabilité, réglée au moins coûteux de l'A/B : elle n'a jamais protégé sur l'historique disponible, et coûte de l'ordre d'un point et demi par an.
 4. Politique d'écrémage v1 : recomposition quand la porte est OUVERTE, désendettement sinon. Le bot ne verse jamais de dividende de sa propre initiative.
 5. Le bot ne modifie jamais ses propres seuils ; tout changement de config exige un redémarrage explicite.
 6. Clés sur le serveur du bot, capital plafonné en conséquence.

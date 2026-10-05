@@ -270,14 +270,14 @@ def test_i9_p2_past_the_hyperliquid_liquidation_is_critical(
     assert not verdict.deflate
 
 
-@pytest.mark.parametrize("lt", [0.0, 0.70])
+@pytest.mark.parametrize("lt", [0.0, 0.67])
 def test_i9_an_aave_governance_cut_mid_run_is_critical(
     stable_snapshot: Snapshot, config: Config, now: datetime, lt: float
 ) -> None:
     """Revue finance 2026-10-02, F8: the bands were checked at boot only.
 
-    A LT read as 0 silenced every down-flank defence; a LT cut to 0.70 put the
-    pump (0.66) under the level P6 repays down to (0.685).
+    A LT read as 0 silenced every down-flank defence; a LT cut to 0.67 puts the
+    pump (0.63) under the level P6 repays down to (0.635).
     """
     snap = replace(stable_snapshot, aave_lt_wsteth=lt)
     violations = [v for v in check_invariants(snap, config, _at_rest(now)) if v.code == "I9"]
@@ -290,8 +290,11 @@ def test_i9_an_aave_governance_cut_mid_run_is_critical(
 def test_i8_checks_the_targets_after_a_recompose(
     stable_snapshot: Snapshot, config: Config, now: datetime
 ) -> None:
-    # Debt/spot 0.685 against a 0.675 target: past I8's tolerance, under I2's.
-    off = replace(stable_snapshot, usdc_variable_debt_balance=0.685 * stable_snapshot.spot_usd)
+    # One point over the target: past I8's tolerance (0.5 pt), under I2's (2 pt).
+    off = replace(
+        stable_snapshot,
+        usdc_variable_debt_balance=(config.target_ltv + 0.01) * stable_snapshot.spot_usd,
+    )
     recomposed = _at_rest(now, just_recomposed=True)
     assert _codes(check_invariants(off, config, recomposed)) == [("I8", Severity.WARN)]
 
@@ -306,10 +309,10 @@ def test_i2_in_cruise_reads_the_spot_ltv_not_aave_s(
 ) -> None:
     """Revue finance 2026-10-02, m4: Aave's LTV counts the cushion and reads low.
 
-    Debt/spot 0.70 is past the 0.695 ceiling, while Aave's view of the same book
-    (0.686, cushion included) sits under it and used to keep I2 quiet.
+    Debt/spot 0.65 is past the 0.645 ceiling, while Aave's view of the same book
+    (0.637, cushion included) sits under it and used to keep I2 quiet.
     """
-    high = replace(stable_snapshot, usdc_variable_debt_balance=35_000.0)
+    high = replace(stable_snapshot, usdc_variable_debt_balance=32_500.0)
     assert high.ltv < config.target_ltv + config.invariants.cruise_ltv_headroom
     assert _codes(check_invariants(high, config, _at_rest(now))) == [("I2", Severity.WARN)]
 
