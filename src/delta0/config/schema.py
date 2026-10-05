@@ -62,10 +62,24 @@ _Bps = Annotated[int, Field(ge=0, le=10_000)]
 
 
 class RegimeConfig(BaseModel):
+    """The regime gate, README §8.9: both bands sit ABOVE the break-even f*."""
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     spread_full_bps: _Bps
+    # What the gate demands above break-even before keeping any exposure: the
+    # conservatism, written down instead of hidden in a formula (O2).
+    safety_margin_bps: _Bps
     hysteresis_days: _PositiveInt
+
+    @model_validator(mode="after")
+    def _check_bands(self) -> RegimeConfig:
+        if self.safety_margin_bps >= self.spread_full_bps:
+            raise ValueError(
+                "regime.safety_margin_bps must be strictly lower than "
+                "regime.spread_full_bps (the half band sits between them)."
+            )
+        return self
 
 
 class EmergencyConfig(BaseModel):

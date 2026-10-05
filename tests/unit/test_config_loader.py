@@ -59,6 +59,17 @@ def test_reject_reduce_above_pump(example_config_path: Path, tmp_path: Path) -> 
         load_config(bad)
 
 
+def test_reject_a_safety_margin_above_the_full_band(
+    example_config_path: Path, tmp_path: Path
+) -> None:
+    raw = yaml.safe_load(example_config_path.read_text())
+    raw["regime"]["safety_margin_bps"] = raw["regime"]["spread_full_bps"]
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValidationError, match="safety_margin_bps"):
+        load_config(bad)
+
+
 def test_reject_ltv_margin_order(example_config_path: Path, tmp_path: Path) -> None:
     raw = yaml.safe_load(example_config_path.read_text())
     # A pump margin narrower than the cushion's would make the pump fire last.

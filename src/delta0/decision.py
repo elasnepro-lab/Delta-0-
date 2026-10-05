@@ -186,16 +186,32 @@ class Regime:
         return self.target == 0.0
 
 
-def regime_candidate(carry_spread: float, config: Config) -> float:
-    """The exposition this carry calls for, before any hysteresis. README §8.9."""
-    if carry_spread >= config.regime.spread_full_bps * 1e-4:
+def regime_spread(
+    funding_30d: float, borrow_30d: float, staking_30d: float, config: Config
+) -> float:
+    """Funding above its break-even, README §8.9. All three: 30-day means, annualized.
+
+    Per dollar of spot the montage earns the funding on the short and the
+    staking on the wstETH, and pays the borrow rate on `target_ltv` dollars of
+    debt: break-even is f* = target_ltv x borrow - staking. The gate used to
+    compare the funding to the FULL borrow rate, an instantaneous one at that,
+    and parked a montage that was still earning (revue finance 2026-10-02, O2;
+    2026-10-05, N1).
+    """
+    f_star = config.target_ltv * borrow_30d - staking_30d
+    return funding_30d - f_star
+
+
+def regime_candidate(spread: float, config: Config) -> float:
+    """The exposition this spread calls for, before any hysteresis. README §8.9."""
+    if spread >= config.regime.spread_full_bps * 1e-4:
         return config.exposure_mult
-    if carry_spread >= 0.0:
+    if spread >= config.regime.safety_margin_bps * 1e-4:
         return config.exposure_mult_half
     return 0.0
 
 
-def regime_step(state: Regime, carry_spread: float, config: Config) -> Regime:
+def regime_step(state: Regime, spread: float, config: Config) -> Regime:
     """One daily evaluation. Pure: same state and same spread, same answer.
 
     A candidate that repeats gains a day; a candidate that changes resets the
@@ -204,7 +220,7 @@ def regime_step(state: Regime, carry_spread: float, config: Config) -> Regime:
     keeps running rather than resetting, so a regime that stays put does not
     re-trigger anything.
     """
-    candidate = regime_candidate(carry_spread, config)
+    candidate = regime_candidate(spread, config)
     days = state.days + 1 if candidate == state.candidate else 1
     target = candidate if days >= config.regime.hysteresis_days else state.target
     return Regime(target=target, candidate=candidate, days=days)

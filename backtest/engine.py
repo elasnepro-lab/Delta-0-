@@ -63,6 +63,7 @@ from delta0.decision import (
     decide,
     exposure_mult_of,
     regime_candidate,
+    regime_spread,
     regime_step,
 )
 from delta0.types import Action, ActionKind, Snapshot
@@ -168,6 +169,39 @@ class Journal:
 
 
 @dataclass(slots=True)
+class Rates30d:
+    """L'emprunt et le staking moyens sur trente jours, que la porte compare au funding.
+
+    Ni l'un ni l'autre ne se moyenne depuis un taux affiché : ils se LISENT. La
+    dette croît comme le `variableBorrowIndex` d'Aave, le collatéral comme le
+    ratio Lido ; le rapport de deux relevés espacés de trente jours donne ce que
+    chacun a vraiment rapporté ou coûté. Même fenêtre que le funding, parce que
+    comparer une moyenne de trente jours à un taux instantané mesure deux
+    époques (revue finance 2026-10-05, N1).
+
+    Un relevé par jour suffit. Un changement de réserve (USDC.e puis USDC natif)
+    change d'index : la fenêtre repart de zéro, et tant qu'elle n'a pas un jour
+    d'épaisseur la porte retombe sur l'APR affiché et le ratio gelé.
+    """
+
+    window: deque[tuple[int, int, float, str]] = field(default_factory=deque)
+
+    def annualized(self, minute: Minute) -> tuple[float, float]:
+        if self.window and self.window[-1][3] != minute.reserve:
+            self.window.clear()
+        self.window.append((minute.ts_ms, minute.borrow_index, minute.ratio, minute.reserve))
+        while self.window and self.window[0][0] < minute.ts_ms - FUNDING_WINDOW_MS:
+            self.window.popleft()
+        first_ms, first_index, first_ratio, _ = self.window[0]
+        span_years = (minute.ts_ms - first_ms) / (DAY_MS * 365)
+        if span_years < 1 / 365 or first_index <= 0 or first_ratio <= 0.0:
+            return minute.borrow_apr, 0.0
+        borrow = (minute.borrow_index / first_index - 1.0) / span_years
+        staking = (minute.ratio / first_ratio - 1.0) / span_years
+        return borrow, staking
+
+
+@dataclass(slots=True)
 class Funding30d:
     """La moyenne de funding sur trente jours, celle que la porte de régime lit.
 
@@ -217,6 +251,7 @@ class Engine:
     _regime_day: int | None = None
     _regime_step_ms: int | None = None
     _regime_origin: float | None = None
+    _rates: Rates30d = field(default_factory=Rates30d)
 
     def run(self, timeline: Timeline, book: Book, start: Month, end: Month) -> Journal:
         for minute in timeline.walk(start, end):
@@ -373,7 +408,10 @@ class Engine:
         if day == self._regime_day:
             return
         self._regime_day = day
-        spread = self._funding.annualized(minute.ts_ms) - minute.borrow_apr
+        borrow_30d, staking_30d = self._rates.annualized(minute)
+        spread = regime_spread(
+            self._funding.annualized(minute.ts_ms), borrow_30d, staking_30d, self.config
+        )
         if self._regime is None:
             # Au premier jour la porte tient ce que le montage tient déjà : elle
             # arbitre la suite, elle ne re-dimensionne pas au démarrage sur une

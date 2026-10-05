@@ -22,6 +22,10 @@ skim_policy: recompose       # lu par aucun code avant 8.5 (écrémage)
 
 # Lu par aucun code avant 8.6 : la porte de régime n'est pas encore évaluée.
 regime:
+  # Les deux seuils se mesurent AU-DESSUS du seuil de rentabilite
+  # f* = target_ltv x emprunt_30j - staking_30j (README §8.9), plus au-dessus
+  # du taux d'emprunt. PROVISOIRES : a calibrer par l'A/B de la porte (7.4).
+  safety_margin_bps: 0       # en dessous : PARKED
   spread_full_bps: 500       # funding30d >= borrow + 5pts -> full exposure
   hysteresis_days: 7
 

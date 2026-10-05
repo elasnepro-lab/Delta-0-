@@ -21,6 +21,7 @@ Quatre choses comptent :
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
+from dataclasses import replace
 from itertools import pairwise
 from pathlib import Path
 
@@ -28,7 +29,7 @@ import pytest
 
 from backtest.binance import MINUTE_MS, Candle
 from backtest.costs import DEFAULT
-from backtest.engine import LATENCY_S, Engine, Funding30d, Venue
+from backtest.engine import DAY_MS, LATENCY_S, Engine, Funding30d, Rates30d, Venue
 from backtest.ledger import LT_TODAY, Book, Moment, prices
 from backtest.timeline import FundingEvent, Minute, Segment
 from delta0.config import load_config
@@ -322,6 +323,38 @@ def monte(pas: float, minutes: int) -> list[Minute]:
         for index in range(0, minutes, 60)
     }
     return frise([flat(2_500.0 + index * pas) for index in range(minutes)], funding=verse)
+
+
+def test_l_emprunt_et_le_staking_se_lisent_aux_index_sur_trente_jours() -> None:
+    """Revue finance 2026-10-05, N1 : la porte comparait au taux d'emprunt instantané.
+
+    Sur trente jours l'index de dette croît de 0,33 % et le ratio Lido de
+    0,18 % : 4,0 % d'emprunt et 2,2 % de staking annualisés, lus et non supposés.
+    """
+    debut = frise([flat(2_500.0)])[0]
+    fin = replace(
+        debut,
+        ts_ms=debut.ts_ms + 30 * DAY_MS,
+        borrow_index=int(debut.borrow_index * 1.0033),
+        ratio=debut.ratio * 1.0018,
+        borrow_apr=0.99,  # l'APR affiché ne doit plus entrer dans le calcul
+    )
+    taux = Rates30d()
+    taux.annualized(debut)
+    emprunt, staking = taux.annualized(fin)
+    assert emprunt == pytest.approx(0.0033 * 365 / 30, rel=1e-3)
+    assert staking == pytest.approx(0.0018 * 365 / 30, rel=1e-6)
+
+
+def test_un_changement_de_reserve_repart_d_une_fenetre_vide() -> None:
+    """USDC.e puis USDC natif : deux index qui ne se comparent pas."""
+    debut = frise([flat(2_500.0)])[0]
+    taux = Rates30d()
+    taux.annualized(replace(debut, reserve="usdce-arbitrum"))
+    bascule = replace(debut, ts_ms=debut.ts_ms + 10 * DAY_MS, borrow_index=debut.borrow_index * 7)
+    emprunt, staking = taux.annualized(bascule)
+    assert emprunt == bascule.borrow_apr  # pas un jour d'épaisseur : l'APR affiché
+    assert staking == 0.0
 
 
 def test_porte_fermee_la_table_ne_parle_jamais_de_regime() -> None:

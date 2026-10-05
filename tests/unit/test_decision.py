@@ -16,6 +16,7 @@ from delta0.decision import (
     decide,
     exposure_mult_of,
     regime_candidate,
+    regime_spread,
     regime_step,
     target_state,
 )
@@ -561,22 +562,50 @@ def test_une_exposition_negative_est_refusee(config: Config) -> None:
 
 
 @pytest.mark.parametrize(
-    ("spread", "attendu"),
+    ("au_dessus_du_seuil", "attendu"),
     [
-        (0.08, "plein"),  # 800 bps, au-dessus du seuil de 500
-        (0.05, "plein"),  # pile sur le seuil : la borne est incluse
+        (0.08, "plein"),  # 800 bps au-dessus de f*, au-dessus de spread_full_bps
+        (0.05, "plein"),  # pile sur spread_full_bps : la borne est incluse
         (0.02, "moitie"),
-        (0.0, "moitie"),  # carry nul mais pas négatif
-        (-0.01, "zero"),
+        (0.0, "moitie"),  # pile sur safety_margin_bps (0 dans l'exemple) : incluse
+        (-0.01, "zero"),  # sous le seuil de rentabilité
     ],
 )
-def test_le_regime_lit_le_spread_par_bandes(config: Config, spread: float, attendu: str) -> None:
+def test_le_regime_lit_l_ecart_au_seuil_de_rentabilite_par_bandes(
+    config: Config, au_dessus_du_seuil: float, attendu: str
+) -> None:
+    """README §8.9 : les deux bandes se mesurent au-dessus de f*, pas de l'emprunt."""
     attendus = {
         "plein": config.exposure_mult,
         "moitie": config.exposure_mult_half,
         "zero": 0.0,
     }
-    assert regime_candidate(spread, config) == attendus[attendu]
+    assert regime_candidate(au_dessus_du_seuil, config) == attendus[attendu]
+
+
+def test_le_seuil_de_rentabilite_compte_le_staking_et_la_seule_dette(config: Config) -> None:
+    """Revue finance 2026-10-05, N1 : l'ancienne règle comparait au taux d'emprunt plein.
+
+    Lectures du 5 octobre : funding 10,19 %, emprunt 3,944 %, staking ≈ 2,2 %.
+    f* = 0,675 x 3,944 - 2,2 ≈ 0,46 % ; l'écart vaut ≈ 9,7 %, et non les 6,25 %
+    de funding moins emprunt.
+    """
+    ecart = regime_spread(0.1019, 0.03944, 0.022, config)
+    f_star = config.target_ltv * 0.03944 - 0.022
+    assert ecart == pytest.approx(0.1019 - f_star)
+    assert ecart > 0.1019 - 0.03944
+
+
+def test_un_funding_sous_l_emprunt_mais_au_dessus_de_f_star_garde_l_exposition(
+    config: Config,
+) -> None:
+    """Le cas que l'ancienne règle gérait mal : 3 % de funding pour 3,9 % d'emprunt.
+
+    Le montage gagne encore — le staking paie une part de l'emprunt et la dette
+    ne porte que 67,5 % du spot — donc la porte ne le gare pas.
+    """
+    ecart = regime_spread(0.03, 0.03944, 0.022, config)
+    assert regime_candidate(ecart, config) > 0.0
 
 
 def test_la_porte_ne_bouge_pas_avant_la_confirmation(config: Config) -> None:
