@@ -32,7 +32,7 @@ La performance vient de l'exécution, pas de l'idée : le rendement est un fait 
 | Terme | Définition |
 |---|---|
 | Notionnel | Taille du short × prix mark, en USD. Base de calcul du funding. |
-| Delta | Valeur spot (wstETH en USD) moins notionnel du short. Cible : 0. |
+| Delta | Quantité d'ETH du collatéral (wstETH × taux de conversion) moins taille du short, en ETH. Cible : 0. Exprimé en ETH et non en USD, pour qu'un mouvement de prix seul ne crée pas de delta (§5). |
 | LTV Aave | Dette totale USD / collatéral total USD sur Aave, coussin compris. C'est la LTV qu'Aave affiche et qui fait le HF : lecture, rapports, contrôles de cohérence. Elle n'a pas de cible. |
 | LTV spot | Dette totale USD / valeur du spot (wstETH seul, sans le coussin). C'est la base de `target_ltv` (décision n° 3, §17), du solveur (§3), des montants remboursés par P4 et P6, et de I2 et I8 en croisière. |
 | HF (health factor) | (Collatéral × seuil de liquidation) / dette, lu on-chain via Aave. Liquidation si HF < 1. |
@@ -223,7 +223,7 @@ Précondition : porte de régime OUVERTE (regime_spread >= spread_full_bps confi
 ### 8.2 Sortie complète (UNWIND)
 Ordre inverse strict : fermer le short (maker par tranches) -> retirer la marge -> bridge retour -> rembourser toute la dette -> dérouler la boucle (withdraw -> swap -> repay itératif) -> retirer coussin et wstETH. État final : wstETH libre, zéro dette, zéro position.
 
-### 8.3 RECENTER_UP (prix >= anchor × 1,045)
+### 8.3 RECENTER_UP (prix >= anchor × (1 + recenter_up))
 1. Calculer les cibles via le solveur d'état cible (equity courante).
 2. Borrow le complément de marge sur Aave (la hausse a libéré la capacité), vérifier ltv_after <= target_ltv + 0,01.
 3. Bridge vers HL, add margin isolée.
@@ -237,7 +237,7 @@ Ordre inverse strict : fermer le short (maker par tranches) -> retirer la marge 
 4. anchor = prix mark.
 
 ### 8.5 SKIM-RECOMPOSITION (écrémage hebdomadaire, politique v1)
-1. excess = marge HL - margin_target. Si excess < skim_min_usd : ne rien faire (frais fixes).
+1. excess = marge HL - margin_target, la cible de marge du solveur au niveau d'exposition commandé. Si excess <= skim_min_usd : ne rien faire (frais fixes). Le premier créneau s'ouvre une semaine après la référence posée par la boucle (au BUILD), pas au démarrage.
 2. Retirer excess, bridge retour.
 3. Affecter dans l'ordre :
    a. Reconstitution du coussin jusqu'à cushion_pct × capital courant.
@@ -342,13 +342,13 @@ Tout changement d'exposition se fait par tranches de 25 % de l'écart mesuré au
 - Mesure en continu : latence WS (fraîcheur du dernier tick), latence RPC, temps de confirmation tx, durées réelles de pont (aller et retour). Conserve p50/p95 glissants sur 7 jours.
 - BLIND si : WS muet > ws_stale_s, ou RPC en échec > rpc_fail_s, ou tx_fail_max transactions consécutives échouées.
 - En BLIND : seules les priorités 1 à 4 restent autorisées, sur la venue encore joignable. Si HL seul joignable : réduire le short à 50 % et geler. Si Aave seul joignable : rembourser depuis le coussin et geler. Si aucune : alerte CRITICAL en boucle, aucune action.
-- Si p95 mesuré d'un chemin > budget × latency_budget_factor : mode prudent, re-centrage anticipé à +3 % / -4,5 % au lieu de +4,5 % / -6 %.
+- Si p95 mesuré d'un chemin > budget × latency_budget_factor : mode prudent, re-centrage anticipé à +3 % / -4,5 % au lieu de `recenter_up` / `recenter_down`.
 
 ### Invariants (vérifiés à chaque snapshot, violation = alerte + action de la table)
 ```
 I1  abs(delta_pct) <= delta_tolerance en croisière
-I2  ltv_spot <= target_ltv + 0.02 en croisière ; jamais HF <= seuil coussin plus de 5 min sans défense P3 ou P4 dans ces 5 min
-I3  margin_ratio >= 0.07 en croisière ; jamais <= margin_ratio_reduce plus de 10 s sans défense P2 ou P1 dans ces 10 s
+I2  ltv_spot <= target_ltv + 0.04 en croisière ; jamais HF <= seuil coussin plus de 5 min sans défense P3 ou P4 dans ces 5 min
+I3  margin_ratio >= 0.055 en croisière ; jamais <= margin_ratio_reduce plus de 10 s sans défense P2 ou P1 dans ces 10 s
 I4  cushion_usd >= cushion_floor_pct * capital courant (sinon reconstitution prioritaire au prochain écrémage)
 I5  gas_eth >= gas_min_eth (sinon blocage des opérations non critiques + alerte)
 I6  aucun transfert en transit > 15 min sans alerte ; > 60 min : CRITICAL (§9.3)
@@ -357,7 +357,7 @@ I8  après chaque écrémage-recomposition : dette/spot et margin_ratio de retou
 I9  paramètres de risque des places relus à chaque snapshot : bandes Aave cohérentes avec le LT lu, margin_ratio_reduce au moins margin_ratio_reduce_min_gap au-dessus de la maintenance margin HL lue, celle-ci égale à maintenance_margin, et le re-centrage bas avant la pompe
 ```
 
-Les chiffres ci-dessus sont les valeurs par défaut de `invariants.*`. La croisière est l'état RUNNING sans opération ni urgence en cours. La LTV de I2 et de I8 est la LTV spot, celle du solveur : celle qu'Aave affiche est plus basse, le coussin comptant comme collatéral.
+Les chiffres ci-dessus sont les valeurs par défaut de `invariants.*`. Les planchers de croisière d'I2 et I3 se placent juste au-delà des bandes de re-centrage (vers −6 % et +4,3 %) : à l'intérieur, ils alertaient en croisière normale. La croisière est l'état RUNNING sans opération ni urgence en cours. La LTV de I2 et de I8 est la LTV spot, celle du solveur : celle qu'Aave affiche est plus basse, le coussin comptant comme collatéral.
 
 Escalade :
 - I1, la partie « en croisière » de I2 et I3, I4, I6 sous une heure, I8 : WARN.
@@ -492,6 +492,14 @@ Décisions figées (ne pas rouvrir pendant l'implémentation) :
 4. Politique d'écrémage v1 : recomposition quand la porte est OUVERTE, désendettement sinon. Le bot ne verse jamais de dividende de sa propre initiative.
 5. Le bot ne modifie jamais ses propres seuils ; tout changement de config exige un redémarrage explicite.
 6. Clés sur le serveur du bot, capital plafonné en conséquence.
+
+Choix de méthode écrits dans le code, non réglables parce qu'ils ne règlent pas un comportement mais fixent une règle (revue finance m30). Les seuils d'alerte, eux, sont en config (`reconcile.*`, `invariants.*`) :
+- la marge la plus serrée sous le LT laisse au moins 0,01 de LTV (`MIN_LTV_MARGIN_TO_LT`) : en deçà, une priorité ne peut pas agir avant Aave ;
+- la maintenance margin lue est comparée à la config avec une tolérance de 1e-6 : un vrai changement de `maxLeverage` la déplace de bien plus ;
+- P5 recharge la marge isolée jusqu'à `target_margin_ratio`, ni plus ni moins ;
+- en BLIND partiel côté Aave, une seule tranche de coussin par cycle ;
+- les seuils en points de base se comparent après division par 10 000, jamais multipliés par 1e-4 (300 × 1e-4 n'égale pas 0,03 en virgule flottante) ;
+- dans le backtest, la préemption est désactivable (`preempt`) pour mesurer ce qu'elle apporte ; toute campagne de référence la garde active (F4).
 
 Non-objectifs v1 : multi-venue (y compris Lighter, réévalué seulement en cas de campagne de points confirmée), routage de funding, LRT en collatéral, interface web, commandes par Telegram (les urgences n'attendent pas un humain, et SSH couvre l'intervention à distance), optimisation fiscale, toute forme de prise de position directionnelle.
 

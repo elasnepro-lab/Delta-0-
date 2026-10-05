@@ -2,7 +2,7 @@
 
 Uses the Info endpoint of the official SDK. No orders, no withdrawals.
 Provides:
-- `read_mark_price(coin)`: current mark price for a perp.
+- `read_mark_price(coin)`: current MARK price for a perp — the price HL liquidates on.
 - `read_position(coin)`: signed position size, entry, isolated margin.
 - `read_funding_avg_30d(coin)`: annualized 30-day mean hourly funding.
 - `read_maintenance_margin(coin)`: for coherence check vs config at boot.
@@ -77,7 +77,7 @@ class HyperliquidReader:
     # (hour index, annualized mean): funding settles hourly, so the 30-day
     # mean cannot move inside an hour and paging 720 rows every 5 s cycle
     # would only spend the API's rate limit.
-    _funding_30d_cache: tuple[int, float] | None = None
+    _funding_30d_cache: dict[tuple[str, int], float] | None = None
     """Read-only Hyperliquid client. Bound to one user address."""
 
     def __init__(self, api_url: str, user_address: str) -> None:
@@ -91,28 +91,46 @@ class HyperliquidReader:
             raise HLReadError(f"lecture Hyperliquid {what} en échec : {result['error']}")
         return result
 
-    async def read_mark_price(self, coin: str) -> float:
-        mids = await self._run("prix mark", self._info.all_mids)
+    async def _asset(self, coin: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        """The perp's universe entry and its live context, from one call.
+
+        `metaAndAssetCtxs` carries `markPx` — the price Hyperliquid liquidates
+        on — and `maxLeverage`. The bot used to read `allMids`, the order book's
+        mid, and call it the mark: ≤ 1.3 bp at rest, more in stress, on the one
+        flank that liquidates (revue finance 2026-10-02, m6).
+        """
+        answer = await self._run("méta et contexte du marché", self._info.meta_and_asset_ctxs)
         try:
-            return float(mids[coin])
+            meta, contexts = answer[0], answer[1]
+            universe: list[dict[str, Any]] = meta["universe"]
+            index = next(i for i, e in enumerate(universe) if e.get("name") == coin)
+        except StopIteration as e:
+            raise HLReadError(f"{coin!r} absent de l'univers Hyperliquid") from e
+        except _SHAPE_ERRORS as e:
+            raise HLReadError(f"méta Hyperliquid illisible pour {coin!r}") from e
+        try:
+            return universe[index], contexts[index]
+        except _SHAPE_ERRORS as e:
+            raise HLReadError(f"contexte Hyperliquid illisible pour {coin!r}") from e
+
+    async def read_mark_price(self, coin: str) -> float:
+        _, context = await self._asset(coin)
+        try:
+            return float(context["markPx"])
         except _SHAPE_ERRORS as e:
             raise HLReadError(f"prix mark de {coin!r} absent ou illisible") from e
 
     async def read_market_meta(self, coin: str) -> HLMarketMeta:
-        meta = await self._run("méta du marché", self._info.meta)
+        entry, context = await self._asset(coin)
         try:
-            universe: list[dict[str, Any]] = meta.get("universe", [])
-            entry = next((e for e in universe if e.get("name") == coin), None)
-            if entry is None:
-                raise HLReadError(f"{coin!r} absent de l'univers Hyperliquid")
-            # maxLeverage e.g. 50 -> maintenance ratio is HL-specific.
-            # Hyperliquid publishes maintenance leverage; we approximate mm = 1/(2 * maxLev)
-            # per public docs and re-verify against `clearinghouseState` at boot.
+            # The maintenance margin is 1 / (2 x maxLeverage): measured on our own
+            # account on 2026-10-05, the published liquidation price reproduces
+            # exactly with it (memory/hl_findings.md §17).
             max_lev = float(entry.get("maxLeverage", 0)) or 1.0
+            mark = float(context["markPx"])
         except _SHAPE_ERRORS as e:
             raise HLReadError(f"méta Hyperliquid illisible pour {coin!r}") from e
         mm = 1.0 / (2.0 * max_lev)
-        mark = await self.read_mark_price(coin)
         return HLMarketMeta(coin=coin, mark_price=mark, maintenance_margin_ratio=mm)
 
     async def read_position(self, coin: str) -> HLPosition | None:
@@ -155,9 +173,13 @@ class HyperliquidReader:
         """
         now_ms = self._now_ms()
         hour = now_ms // _HOUR_MS
-        cached = self._funding_30d_cache
-        if cached is not None and cached[0] == hour:
-            return cached[1]
+        # Keyed by pair AND hour: one key per hour served any coin asked
+        # afterwards the first coin's mean (revue finance 2026-10-05, m27).
+        if self._funding_30d_cache is None:
+            self._funding_30d_cache = {}
+        cached = self._funding_30d_cache.get((coin, hour))
+        if cached is not None:
+            return cached
 
         rates: list[float] = []
         cursor = now_ms - _WINDOW_30D_MS
@@ -180,7 +202,7 @@ class HyperliquidReader:
         if not rates:
             return 0.0
         mean = sum(rates) / len(rates) * _HOURS_PER_YEAR
-        self._funding_30d_cache = (hour, mean)
+        self._funding_30d_cache = {(coin, hour): mean}
         return mean
 
     async def read_last_hour_funding(self, coin: str) -> float:
@@ -221,6 +243,12 @@ class HyperliquidReader:
         were really there. Measured on our own account on 2026-09-09: opening
         a position with 1.24 of margin left `total` at 29.79 for 29.80 before
         (hl_findings §16). Revue finance 2026-10-02, F1.
+
+        Measured again on 2026-10-05 with a position open: `hold` equals
+        `marginUsed` to the micro-dollar (hl_findings §17). `hold` also carries
+        the margin of RESTING orders, so while a maker order waits (P8, a
+        re-centre) the free reserve reads low — the safe side, accepted
+        (revue finance 2026-10-05, m25).
 
         This is what the fast up-flank defence spends: adding isolated margin
         from here is one local request, no bridge.

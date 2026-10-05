@@ -28,11 +28,9 @@ from delta0.types import Snapshot
 
 log = get_logger(__name__)
 
-# An anchor drift above this magnitude at boot is worth a human look
-# (typical daily moves are well under it).
-_ANCHOR_DRIFT_ALERT = 0.15
-# HF below this is worth surfacing as CRITICAL — 1.10 leaves ~5 pt to LT.
-_HF_ALERT_FLOOR = 1.10
+# The alert thresholds live in `config.reconcile` (m11, m30). At LT 0.79 the
+# default HF floor of 1.10 is an Aave LTV of 0.718: 7.2 points under the LT, an
+# 8.4 % fall from there to liquidation (the old comment said "~5 pt").
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +81,7 @@ async def reconcile_at_boot(
         message=(
             f"bandes dérivées du LT {bands.lt:.4f} : pompe {bands.ltv_pump:.4f} "
             f"(-{100 * bands.price_drop_to(bands.ltv_pump, config.target_ltv):.2f} %), "
-            f"coussin puis désendettement {bands.ltv_cushion:.4f} "
+            f"coussin puis désendettement {bands.ltv_cushion:.4f}, coussin plein "
             f"(-{100 * bands.price_drop_to(bands.ltv_cushion, config.target_ltv):.2f} %)"
         ),
         lt=bands.lt,
@@ -104,7 +102,7 @@ async def reconcile_at_boot(
             "reconcile_no_anchor",
             message="aucune ancre journalisée — premier boot ou état non initialisé",
         )
-    elif drift is not None and abs(drift) > _ANCHOR_DRIFT_ALERT:
+    elif drift is not None and abs(drift) > config.reconcile.anchor_drift_alert:
         w = (
             f"dérive d'ancre significative : {drift:+.2%} depuis le dernier "
             f"re-centrage (ancre={anchor}, mark={snapshot.mark_price})"
@@ -117,7 +115,8 @@ async def reconcile_at_boot(
     debt_last: float | None = float(debt_str) if debt_str else None
     if debt_last is not None:
         gap = snapshot.debt_usd - debt_last
-        if abs(gap) > max(50.0, 0.05 * max(debt_last, 1.0)):
+        rules = config.reconcile
+        if abs(gap) > max(rules.debt_drift_usd, rules.debt_drift_pct * max(debt_last, 1.0)):
             w = (
                 f"dette on-chain ({snapshot.debt_usd:.0f} $) diverge du dernier "
                 f"snapshot journalisé ({debt_last:.0f} $) — gap {gap:+.0f} $"
@@ -126,8 +125,9 @@ async def reconcile_at_boot(
             log.warning("reconcile_debt_drift", message=w, gap=gap)
 
     # --- HF sanity ------------------------------------------------------------
-    if snapshot.hf < _HF_ALERT_FLOOR and snapshot.debt_usd > 0:
-        w = f"HF observé {snapshot.hf:.4f} sous {_HF_ALERT_FLOOR} — position à surveiller"
+    floor = config.reconcile.hf_alert_floor
+    if snapshot.hf < floor and snapshot.debt_usd > 0:
+        w = f"HF observé {snapshot.hf:.4f} sous {floor} — position à surveiller"
         warnings.append(w)
         log.critical("reconcile_hf_low", message=w, hf=snapshot.hf)
 

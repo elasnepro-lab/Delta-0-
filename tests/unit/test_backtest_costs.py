@@ -41,17 +41,19 @@ AMOUNT = 40_000.0
 def test_les_parametres_supposes_sont_nommes() -> None:
     """Le barème par défaut ne prétend pas être mesuré : il dit ce qui ne l'est pas."""
     manquants = DEFAULT.unverified()
-    assert "hl_taker_fee" in manquants
     assert "swap_slippage" in manquants
     assert "bridge_fee" in manquants
-    # Le seul chiffre vraiment mesuré à ce jour : le gaz du cycle Aave, sur fork.
-    assert DEFAULT.aave_gas.verified
-    assert "aave_gas" not in manquants
+    # Mesurés : le gaz du cycle Aave sur fork, et les frais Hyperliquid lus par
+    # l'API userFees du compte maître le 2026-10-05 (revue finance m16).
+    for lu in ("aave_gas", "hl_taker_fee", "hl_maker_fee"):
+        assert getattr(DEFAULT, lu).verified
+        assert lu not in manquants
 
 
 def test_un_parametre_non_verifie_le_dit_a_l_affichage() -> None:
-    assert "NON VÉRIFIÉ" in str(DEFAULT.hl_taker_fee)
+    assert "NON VÉRIFIÉ" in str(DEFAULT.swap_slippage)
     assert "NON VÉRIFIÉ" not in str(DEFAULT.aave_gas)
+    assert "NON VÉRIFIÉ" not in str(DEFAULT.hl_taker_fee)
 
 
 def test_remplacer_un_parametre_par_une_lecture() -> None:

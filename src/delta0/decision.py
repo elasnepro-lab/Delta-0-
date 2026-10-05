@@ -295,6 +295,11 @@ def bands_incoherence(lt: float, config: Config) -> str | None:
     which point P6 fires again the moment it lands — or, under the target
     itself, a pump of nothing on every cycle that starves P7 to P10.
     Revue finance 2026-10-02, F8.
+
+    The comparison mixes bases on purpose: the pump is an Aave LTV (cushion
+    counted), the repay level a spot LTV. Aave's view of the repaid book sits
+    lower, so this refuses a little early — between LT 0.709 and 0.725 at the
+    0.675 target, without strict need. The safe side, kept (m29).
     """
     if lt <= 0.0:
         return "liquidation threshold read as 0 — Aave data unavailable or asset unlisted"
@@ -330,6 +335,25 @@ def hl_margin_incoherence(maintenance_margin: float, config: Config) -> str | No
             f"maintenance margin {maintenance_margin:.4f} read from Hyperliquid: P2 would "
             "fire too close to the liquidation, or after it. Raise the emergency margin "
             "ratios or lower short_leverage."
+        )
+    return None
+
+
+def ltv_max_warning(ltv_max: float, lt: float, config: Config) -> str | None:
+    """Warn when Aave's max LTV falls under the pump threshold.
+
+    The max LTV caps what can be BORROWED; P5 borrows on Aave to feed the HL
+    margin, so a governance cut under the pump level would make P5 fail at
+    execution, unannounced. It was read every cycle and used by nothing (m12).
+    At LT 0.79 the pump sits at 0.75, exactly the max LTV today.
+    """
+    if ltv_max <= 0.0 or lt <= 0.0:
+        return None
+    pump = derive_bands(lt, config).ltv_pump
+    if ltv_max < pump:
+        return (
+            f"LTV max {ltv_max:.4f} under the pump threshold {pump:.4f}: "
+            "P5 could not borrow what it needs"
         )
     return None
 
@@ -438,6 +462,10 @@ def _p2_emergency_reduce(snapshot: Snapshot, config: Config) -> Action | None:
     moving the price at which it happens. It carries an alert for that reason.
     """
     reduce_at = config.emergency.margin_ratio_reduce
+    if snapshot.short_size_eth <= 0.0:
+        # No short, or a LONG left by a wrong fill: feeding its margin would keep
+        # alive a position P8 must close (revue finance 2026-10-05, m23).
+        return None
     if snapshot.margin_ratio > reduce_at:
         return None
 
@@ -526,6 +554,8 @@ def _p4_stepwise_deleverage(snapshot: Snapshot, config: Config) -> Action | None
 
 
 def _p5_pump_up(snapshot: Snapshot, config: Config) -> Action | None:
+    if snapshot.short_size_eth <= 0.0:
+        return None  # same as P2: a long is P8's to close, not ours to fund (m23)
     if snapshot.margin_ratio > config.emergency.margin_ratio_pump:
         return None
     # Refill the margin to target level.
@@ -626,10 +656,24 @@ def _p8_delta_retrue(snapshot: Snapshot, config: Config) -> Action | None:
 
 
 def _p9_skim(snapshot: Snapshot, config: Config, ctx: OperationalContext) -> Action | None:
-    # Excess margin above target.
-    target_margin = snapshot.notional_usd * config.target_margin_ratio
+    """Skim the margin above the SOLVER's target, strictly above `skim_min_usd`.
+
+    It measured against notional x ratio, fired on ">=" where README §7 says
+    ">", and fired at once when nothing had been skimmed yet (revue finance
+    m10). The target is the margin the recompose will land on, at the
+    commanded exposure level; the first slot waits for the loop's baseline.
+    """
+    try:
+        target_margin = target_state(
+            snapshot.equity,
+            config,
+            cushion_usd=snapshot.cushion_usd,
+            exposure_mult=ctx.current_exposure_mult,
+        ).margin_target_usd
+    except ValueError:
+        return None  # nothing deployable: nothing to skim either
     excess = snapshot.isolated_margin_usd - target_margin
-    if excess < config.skim_min_usd:
+    if excess <= config.skim_min_usd:
         return None
     # Skim schedule check: fire only if the last skim is older than the most recent
     # scheduled slot. The cron string parser lives with the tracer loop; here we
@@ -760,7 +804,9 @@ def _skim_slot_open(
         slot_candidate = slot_candidate - timedelta(days=7)
 
     if last_skim_at is None:
-        return True
+        # No baseline yet: the loop poses one at BUILD. Opening at once fired a
+        # recompose on the first cycle of a montage just built (m10).
+        return False
     return bool(last_skim_at < slot_candidate)
 
 

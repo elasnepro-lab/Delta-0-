@@ -39,6 +39,7 @@ from delta0.decision import (
     bands_order_warning,
     derive_bands,
     hl_margin_incoherence,
+    ltv_max_warning,
 )
 
 if TYPE_CHECKING:
@@ -294,6 +295,9 @@ def _i9_governance(
     order = bands_order_warning(snapshot.aave_lt_wsteth, config)
     if order is not None:
         yield Violation("I9", Severity.WARN, f"ordre des défenses inversé : {order}")
+    ceiling = ltv_max_warning(snapshot.aave_ltv_max_wsteth, snapshot.aave_lt_wsteth, config)
+    if ceiling is not None:
+        yield Violation("I9", Severity.WARN, f"LTV max abaissée : {ceiling}")
     observed = snapshot.hl_maintenance_margin
     if observed > 0.0 and abs(observed - config.maintenance_margin) > _MM_TOLERANCE:
         yield Violation(

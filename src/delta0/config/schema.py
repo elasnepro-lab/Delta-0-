@@ -5,8 +5,9 @@ Cross-field validators enforce the invariants that the classeur Model C guarante
 - exposure_mult == 1 / (1 - target_ltv + 1 / short_leverage)
 - Upper flank ordering (reduce < pump); the recenter bands are not compared to
   the emergency thresholds (see `_check_recenter_bands`).
-- Down-flank margins strictly ordered (pump > cushion > deleverage); the bands
-  they give are checked against the on-chain LT at boot, not here.
+- Down-flank margins strictly ordered (pump > cushion; P3 and P4 share the
+  cushion threshold); the bands they give are checked against the on-chain LT
+  at boot and by I9 on every snapshot, not here.
 
 If any invariant fails, the bot refuses to boot — that is by design.
 """
@@ -144,6 +145,20 @@ class WatchdogConfig(BaseModel):
     latency_budget_factor: Annotated[float, Field(gt=1.0)]
 
 
+class ReconcileConfig(BaseModel):
+    """What the boot reconciliation flags — README §13. Alert thresholds, so config.
+
+    They were constants in `reconcile.py`, one with a wrong comment (m11, m30).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    hf_alert_floor: _PositiveFloat = 1.10  # HF under this at boot: CRITICAL
+    anchor_drift_alert: _Ratio = 0.15  # anchor drift above this at boot: WARN
+    debt_drift_usd: _PositiveFloat = 50.0  # debt gap vs journal above max(this,
+    debt_drift_pct: _Ratio = 0.05  # ... this x last debt): WARN
+
+
 class InvariantsConfig(BaseModel):
     """Thresholds of invariants I1-I8 — README section 11.
 
@@ -153,8 +168,10 @@ class InvariantsConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    cruise_ltv_headroom: _Ratio = 0.02  # I2: LTV at most target_ltv + this, at rest
-    cruise_margin_floor: _Ratio = 0.07  # I3: margin ratio at least this, at rest
+    # Both cruise floors sit just OUTSIDE the re-centre bands: inside them they
+    # warned in normal cruise, at -2.9 % and +2.8 % (revue finance m5, m24).
+    cruise_ltv_headroom: _Ratio = 0.04  # I2: spot LTV at most target_ltv + this, at rest
+    cruise_margin_floor: _Ratio = 0.055  # I3: margin ratio at least this, at rest
     # I2: cushion threshold held this long without a P3 or P4 inside the window.
     p3_grace_s: _PositiveFloat = 300.0
     # I3: P2's budget is 2 s and the loop cycles every 5 s — one full cycle plus
@@ -335,6 +352,7 @@ class Config(BaseModel):
     emergency: EmergencyConfig
     watchdog: WatchdogConfig
     invariants: InvariantsConfig = Field(default_factory=InvariantsConfig)
+    reconcile: ReconcileConfig = Field(default_factory=ReconcileConfig)
 
     # M1 TRACER safeties. Defaults are safe: dry_run=True, small cap, low rate.
     tracer: TracerConfig = Field(default_factory=TracerConfig)
@@ -404,9 +422,9 @@ class Config(BaseModel):
         # The thresholds themselves depend on the on-chain LT, so they cannot be
         # checked here — `derive_bands` builds them, and `bands_incoherence`, run
         # by `reconcile_at_boot`, refuses the boot in every mode when they
-        # collapse onto the target or the LT reads 0. Two gaps remain: in
-        # observation mode a failed boot snapshot skips the reconciliation, and
-        # nothing re-checks the LT during a run. What IS checkable without the
+        # collapse onto the target or the LT reads 0, and I9 re-checks it on
+        # every snapshot. One gap remains: in observation mode a failed boot
+        # snapshot skips the reconciliation. What IS checkable without the
         # chain: the widest margin must still leave the pump above the target,
         # whatever plausible LT we face. With LT >= target + widest margin the
         # pump sits above target by construction; below that the config can

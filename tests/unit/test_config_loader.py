@@ -70,6 +70,30 @@ def test_reject_a_safety_margin_above_the_full_band(
         load_config(bad)
 
 
+def test_reject_a_half_exposure_not_below_the_full_one(
+    example_config_path: Path, tmp_path: Path
+) -> None:
+    """Revue finance 2026-10-02, m21: the validator had no test."""
+    raw = yaml.safe_load(example_config_path.read_text())
+    raw["exposure_mult_half"] = raw["exposure_mult"]
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValidationError, match="exposure_mult_half"):
+        load_config(bad)
+
+
+def test_reject_a_pump_margin_no_lt_could_place_above_the_target(
+    example_config_path: Path, tmp_path: Path
+) -> None:
+    """m21: with LT at most 1, a pump margin of 1 - target leaves the pump at the target."""
+    raw = yaml.safe_load(example_config_path.read_text())
+    raw["emergency"]["ltv_margin_pump"] = round(1.0 - raw["target_ltv"], 6)
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValidationError, match="ltv_margin_pump is so wide"):
+        load_config(bad)
+
+
 def test_reject_ltv_margin_order(example_config_path: Path, tmp_path: Path) -> None:
     raw = yaml.safe_load(example_config_path.read_text())
     # A pump margin narrower than the cushion's would make the pump fire last.

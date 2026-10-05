@@ -194,6 +194,9 @@ class AaveTraceExecutor:
         self._config = config
         self._store = store
         self._guard = guard
+        # wstETH as the Aave oracle priced it on the last snapshot; None until
+        # the loop says (see `observe_wsteth_price`).
+        self._wsteth_price_usd: float | None = None
         self._master: ChecksumAddress = AsyncWeb3.to_checksum_address(master_address)
         self._chain_id = chain_id
         self._pool_address: ChecksumAddress = AsyncWeb3.to_checksum_address(
@@ -578,11 +581,23 @@ class AaveTraceExecutor:
             )
         return self._private_key
 
+    def observe_wsteth_price(self, price_usd: float) -> None:
+        """The loop hands over the oracle price of each snapshot, for the safety cap."""
+        self._wsteth_price_usd = price_usd
+
     def _estimate_notional(self, asset: str, amount_native: float) -> float:
-        # Stables assumed at 1 $. Volatile tokens (wstETH) at a conservative 3 000 $.
-        # This is ONLY used for the safety cap; a rough over-estimate is fine.
+        """The notional the safety cap compares to its ceiling. Stables at 1 $.
+
+        wstETH was priced at a "conservative" 3 000 $ while it traded near
+        3 400 $: 11 % UNDER, the opposite of conservative for a ceiling (revue
+        finance 2026-10-02, m14). It is now the oracle price the loop observed;
+        without one the estimate is infinite, so the cap refuses rather than
+        guesses.
+        """
         if asset.lower() == self._config.venues.wsteth_address.lower():
-            return amount_native * 3_000.0
+            if self._wsteth_price_usd is None or self._wsteth_price_usd <= 0.0:
+                return float("inf")
+            return amount_native * self._wsteth_price_usd
         return amount_native
 
     async def _insert_pending_intent(
