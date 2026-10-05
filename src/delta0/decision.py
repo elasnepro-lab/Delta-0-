@@ -45,8 +45,13 @@ class OperationalContext:
     - `last_skim_at`: timestamp of last successful skim (None if never).
     - `desired_exposure_mult`: regime-gate output, computed by the regime
       evaluator from 30-day funding history + hysteresis. The pure engine
-      only compares it to the current exposition.
-    - `current_exposure_mult`: currently held exposition (spot / equity).
+      only compares it to the commanded level below.
+    - `current_exposure_mult`: the exposure level the montage is COMMANDED to
+      hold — the last tranche P10 posted, or the regime's target once reached.
+      Not a measurement: spot / equity drifts with every price move, and that
+      drift belongs to P7, which re-sizes back to this level. Comparing the
+      gate to the measured figure made P10 chase price noise every hour
+      (8 101 tranches for 7 regime changes, A/B of 2026-10-05).
     - `blind_state`: watchdog verdict.
     - `liquidation_event`: True if the watcher observed a LiquidationCall
       (Aave) or a liquidation user event (HL) for our address.
@@ -534,6 +539,20 @@ def _p6_pump_down(snapshot: Snapshot, config: Config) -> Action | None:
     )
 
 
+def _commanded_level(ctx: OperationalContext) -> dict[str, float | int | str]:
+    """The exposure a full re-size must converge to: the regime's, not the config's.
+
+    A re-centre or a skim used to re-size to `config.exposure_mult` whatever
+    the gate held — so halfway through a regime the next re-centre rebuilt full
+    exposure, the gate cut it again, and a PARKED montage was rebuilt by the
+    first price move. With no gate running, the key is absent and the config
+    applies.
+    """
+    if ctx.current_exposure_mult is None:
+        return {}
+    return {"target_exposure_mult": ctx.current_exposure_mult}
+
+
 def _p7_recenter(snapshot: Snapshot, config: Config, ctx: OperationalContext) -> Action | None:
     if ctx.anchor_price is None or ctx.anchor_price <= 0.0:
         return None
@@ -546,7 +565,7 @@ def _p7_recenter(snapshot: Snapshot, config: Config, ctx: OperationalContext) ->
                 f"prix +{price_move:.4f} >= seuil re-centrage haut {config.recenter_up} "
                 "— re-centrage complet (borrow + bridge + agrandir short)"
             ),
-            params={"price_move": price_move},
+            params={"price_move": price_move, **_commanded_level(ctx)},
         )
     if price_move <= -config.recenter_down:
         return Action(
@@ -556,7 +575,7 @@ def _p7_recenter(snapshot: Snapshot, config: Config, ctx: OperationalContext) ->
                 f"prix {price_move:.4f} <= seuil re-centrage bas -{config.recenter_down} "
                 "— re-centrage complet (withdraw HL + bridge + repay + réduire short)"
             ),
-            params={"price_move": price_move},
+            params={"price_move": price_move, **_commanded_level(ctx)},
         )
     return None
 
@@ -596,7 +615,7 @@ def _p9_skim(snapshot: Snapshot, config: Config, ctx: OperationalContext) -> Act
                 f"écrémage: excédent marge {excess:.0f} $ > {config.skim_min_usd:.0f} $ "
                 f"et créneau {config.skim_cron} ouvert"
             ),
-            params={"excess_margin_usdc": excess},
+            params={"excess_margin_usdc": excess, **_commanded_level(ctx)},
         )
     return None
 

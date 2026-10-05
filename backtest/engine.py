@@ -61,7 +61,6 @@ from delta0.decision import (
     OperationalContext,
     Regime,
     decide,
-    exposure_mult_of,
     regime_candidate,
     regime_spread,
     regime_step,
@@ -251,6 +250,7 @@ class Engine:
     _regime_day: int | None = None
     _regime_step_ms: int | None = None
     _regime_origin: float | None = None
+    _level: float | None = None  # l'exposition que la porte commande, par tranches
     _rates: Rates30d = field(default_factory=Rates30d)
 
     def run(self, timeline: Timeline, book: Book, start: Month, end: Month) -> Journal:
@@ -304,6 +304,7 @@ class Engine:
             self._pending.append((minute.ts_ms + self._delay_ms(action), action))
             if action.kind == "REGIME_STEP":
                 self._regime_step_ms = minute.ts_ms
+                self._level = float(action.params["step_target_exposure_mult"])
             decided = True
 
     def _settle(self, minute: Minute, book: Book) -> None:
@@ -359,6 +360,14 @@ class Engine:
         )
 
     def _context(self, minute: Minute, observed: Snapshot) -> OperationalContext:
+        if self.regime:
+            # Une transition commence dès que la cible s'écarte du niveau tenu,
+            # et finit quand il l'a rejointe : son origine fixe la taille des
+            # tranches, et l'effacer ensuite évite qu'elle serve à la suivante.
+            if self._held() == self._wanted():
+                self._regime_origin = None
+            elif self._regime_origin is None:
+                self._regime_origin = self._held()
         return OperationalContext(
             now_utc=observed.ts,
             # Le rejeu long ne coupe jamais le lien : le chaos est le travail
@@ -369,11 +378,11 @@ class Engine:
             # s'ouvre alors normalement. Poser « maintenant » fermerait P9 pour
             # toute la campagne sans que rien ne le dise.
             last_skim_at=self._last_skim,
-            # Porte OUVERTE : l'exposition tenue se mesure en inversant le
-            # solveur, la voulue sort de l'évaluateur. Porte FERMÉE : les deux
-            # sont égales, donc P10 se tait — c'est le côté « OFF » de l'A/B.
-            current_exposure_mult=self._held(observed),
-            desired_exposure_mult=self._wanted(observed),
+            # Porte OUVERTE : le niveau commandé (la dernière tranche), et la
+            # cible de l'évaluateur. Porte FERMÉE : ni l'un ni l'autre, P10 se
+            # tait et les re-dimensionnements visent la config — le côté « OFF ».
+            current_exposure_mult=self._held() if self.regime else None,
+            desired_exposure_mult=self._wanted() if self.regime else None,
             last_regime_step_at=(
                 None
                 if self._regime_step_ms is None
@@ -382,15 +391,15 @@ class Engine:
             regime_origin_exposure_mult=self._regime_origin,
         )
 
-    def _held(self, observed: Snapshot) -> float:
-        if not self.regime:
-            return self.config.exposure_mult
-        return exposure_mult_of(
-            observed.spot_usd, observed.equity, observed.cushion_usd, self.config
-        )
+    def _held(self) -> float:
+        """Le niveau commandé, pas l'exposition mesurée : celle-ci bouge à chaque
+        prix, et la poursuivre faisait tirer P10 toutes les heures."""
+        if self._level is None:
+            self._level = self.config.exposure_mult
+        return self._level
 
-    def _wanted(self, observed: Snapshot) -> float:
-        if not self.regime or self._regime is None:
+    def _wanted(self) -> float:
+        if self._regime is None:
             return self.config.exposure_mult
         return self._regime.target
 
@@ -426,8 +435,9 @@ class Engine:
         self._regime = regime_step(self._regime, spread, self.config)
         if self._regime.target != before:
             self.journal.regime_changes.append((minute.ts_ms, self._regime.target))
-            # The tranches of this transition are 25 % of the gap from here.
-            self._regime_origin = before
+            # Les tranches de cette transition valent 25 % de l'écart depuis le
+            # niveau tenu à cet instant — pas depuis la cible précédente (m26).
+            self._regime_origin = self._held()
 
     def _count_held(self, action: Action) -> None:
         """Compter ce que les garde-fous de P10 ont retenu.

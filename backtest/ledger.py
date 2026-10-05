@@ -512,7 +512,9 @@ def _rebalance(book: Book, action: Action, world: World) -> Applied:
     # re-dimensionnements visent celle de la config. Jusqu'ici ce paramètre
     # était produit par `decide` et lu par personne : la porte de régime ne
     # pouvait pas fonctionner même une fois branchée.
-    step = action.params.get("step_target_exposure_mult")
+    # P10 porte sa tranche ; P7 et P9 portent le niveau que la porte commande,
+    # pour ne pas reconstruire une exposition qu'elle vient de réduire.
+    step = action.params.get("step_target_exposure_mult", action.params.get("target_exposure_mult"))
     mult = None if step is None else float(step)
     try:
         first = _legs(book, world, equity, mult)
