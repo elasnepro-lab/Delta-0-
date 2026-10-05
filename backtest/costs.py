@@ -114,16 +114,18 @@ DEFAULT = Costs(
         " — a mesurer par un devis de routeur, pas a deduire du plafond du config.yaml",
     ),
     hl_taker_fee=Param(
-        4.5,
+        4.32,
         "bps",
-        "bareme public Hyperliquid, palier de base, de memoire"
-        " — a lire par l'API (type userFees) avec l'adresse maitre",
+        "lu par l'API userFees du compte maitre le 2026-10-05 : 4,5 bps taker, moins"
+        " la remise de parrainage de 4 % (revue finance m16)",
+        verified=True,
     ),
     hl_maker_fee=Param(
-        1.5,
+        1.44,
         "bps",
-        "bareme public Hyperliquid, palier de base, de memoire"
-        " — a lire par l'API (type userFees) avec l'adresse maitre",
+        "lu par l'API userFees du compte maitre le 2026-10-05 : 1,5 bps maker, moins"
+        " la remise de parrainage de 4 % (revue finance m16)",
+        verified=True,
     ),
     bridge_fee=Param(
         4.0,

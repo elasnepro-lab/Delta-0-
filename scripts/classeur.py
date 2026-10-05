@@ -9,9 +9,15 @@ divergence becomes impossible rather than merely unlikely.
     uv run python scripts/classeur.py --compare       # candidate target LTVs
     uv run python scripts/classeur.py --lt 0.75       # a governance cut
 
-The bands are printed twice on purpose. The nominal one assumes the cushion is
-intact; the second assumes P3 has spent it, which is the situation that holds
-immediately after the cushion did its job. The second is the one to plan on.
+The down-flank bands are printed three ways on purpose. With the cushion
+intact; with the cushion GONE but the debt unchanged — the worst reading, kept
+because it bounds a cushion lost rather than spent; and after P3, the cushion
+spent on the debt, which is what the table actually does. The middle one used
+to be labelled "coussin vide" as if it were the third (revue finance m2).
+
+The up flank is printed too (m8): the price rises at which the cruise floor,
+the pump, P2 and the liquidation fire, from the target margin ratio, and the
+liquidation once P2 has poured the reserve in.
 """
 
 from __future__ import annotations
@@ -154,7 +160,9 @@ class Chassis:
 
     @property
     def exposure(self) -> float:
-        return self.collateral / self.capital
+        """Spot over equity, as README §4 defines it — not collateral over capital,
+        which counted the cushion and read 2.14x for a built 2.09x (m3)."""
+        return self.spot / self.capital
 
     def band(self, *, cushion_intact: bool = True) -> float:
         """Price fall that takes this sheet to the liquidation threshold."""
@@ -246,20 +254,43 @@ def print_sheet(chassis: Chassis, config: Config) -> None:
     print(f"  {'dette USDC':<28}{chassis.debt:>12,.0f} $")
     print(f"  {'marge isolée HL':<28}{chassis.margin:>12,.0f} $")
     print(f"  {'réserve libre HL':<28}{chassis.reserve:>12,.0f} $")
-    print(f"\n  {'exposition':<28}{chassis.exposure:>12.2f} x")
+    print(f"\n  {'exposition (spot / équité)':<28}{chassis.exposure:>12.2f} x")
     print(f"  {'LTV observé':<28}{chassis.observed_ltv:>12.4f}")
     print("     (sous la cible : le coussin compte comme collatéral)")
 
-    print("\n  --- bandes de sécurité ---")
-    print(f"  {'':<28}{'coussin plein':>16}{'coussin vide':>16}")
+    print("\n  --- flanc bas : baisse de prix depuis la cible ---")
+    print(f"  {'':<22}{'coussin plein':>15}{'parti, dette ±0':>17}{'après P3':>12}")
     for name, threshold in (
         ("P6 pompe", bands.ltv_pump),
         ("P3 / P4 coussin", bands.ltv_cushion),
-        ("LIQUIDATION", chassis.lt),
     ):
         full = 1 - (chassis.debt / threshold - chassis.cushion) / chassis.spot
-        empty = 1 - (chassis.debt / threshold) / chassis.spot
-        print(f"  {name:<28}{-100 * full:>15.2f}%{-100 * empty:>15.2f}%")
+        gone = 1 - (chassis.debt / threshold) / chassis.spot
+        spent = 1 - ((chassis.debt - chassis.cushion) / threshold) / chassis.spot
+        print(f"  {name:<22}{-100 * full:>14.2f}%{-100 * gone:>16.2f}%{-100 * spent:>11.2f}%")
+    # The liquidation weighs each collateral at its own threshold (m1).
+    liq_full = chassis.band()
+    liq_gone = chassis.band(cushion_intact=False)
+    liq_spent = max(0.0, 1.0 - (chassis.debt - chassis.cushion) / (chassis.lt * chassis.spot))
+    print(
+        f"  {'LIQUIDATION':<22}{-100 * liq_full:>14.2f}%{-100 * liq_gone:>16.2f}%"
+        f"{-100 * liq_spent:>11.2f}%"
+    )
+
+    print("\n  --- flanc haut : hausse de prix depuis la cible ---")
+    m0 = config.target_margin_ratio
+    reserve_ratio = chassis.reserve / chassis.spot
+    for name, ratio in (
+        ("I3 plancher de croisière", config.invariants.cruise_margin_floor),
+        ("P5 pompe montante", config.emergency.margin_ratio_pump),
+        ("P2 marge d'urgence", config.emergency.margin_ratio_reduce),
+        ("LIQUIDATION", config.maintenance_margin),
+    ):
+        # A short at margin ratio m0 reaches ratio r at P/P0 = (1 + m0) / (1 + r).
+        print(f"  {name:<28}{100 * ((1 + m0) / (1 + ratio) - 1):>11.2f}%")
+    after = (1 + m0 + reserve_ratio) / (1 + config.maintenance_margin) - 1
+    print(f"  {'LIQUIDATION après P2':<28}{100 * after:>11.2f}%   (réserve versée en marge)")
+    print(f"  {'re-centrage haut':<28}{100 * config.recenter_up:>11.2f}%")
 
     print("\n  --- carry annuel (scénario, pas espérance) ---")
     funding = FUNDING_APR * chassis.spot
@@ -318,8 +349,8 @@ def print_comparison(config: Config, lt: float) -> None:
             f"{-100 * c.band(cushion_intact=False):>14.2f}%"
             f"{c.carry_gross:>10,.0f}{c.carry_gross - base:>9,.0f}"
         )
-    print("\n  La bande « coussin vide » est celle qui vaut juste après que P3")
-    print("  a fait son travail. C'est sur elle qu'il faut décider.")
+    print("\n  La colonne « coussin vide » suppose le coussin parti sans que la dette")
+    print("  baisse : c'est la lecture la plus prudente, celle sur laquelle décider.")
 
 
 def main() -> None:
