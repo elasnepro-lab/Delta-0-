@@ -8,6 +8,15 @@ compte unifié, `hold` vaut-il bien la marge engagée ?
 
     uv run python scripts/hl_probe_position.py              # lecture seule : état du compte
     uv run python scripts/hl_probe_position.py --execute    # ouvre, mesure, referme
+    uv run python scripts/hl_probe_position.py --execute --hold 120   # garde 2 min
+
+`--hold` tranche ce qu'un relevé unique ne peut pas : à l'ouverture le PnL latent
+vaut 0, et les deux lectures de `marginUsed` coïncident (mesure du 2026-10-05).
+Il faut que le prix bouge. Chaque relevé compare `marginUsed` à l'équité isolée
+PnL compris, `rawUsd - positionValue`, et à la marge initiale sans PnL,
+`rawUsd - |szi| x entryPx` ; dès que le PnL latent n'est plus nul, une seule des
+deux peut tenir. L'exposition supplémentaire est celle de la durée choisie, sur
+≈ 13 $ de notionnel.
 
 Avec `--execute` : short ETH isolé 10x de 0,005 ETH (≈ 13 $ de notionnel, au-dessus
 du minimum de 10 $), relevé de `marginUsed`, `hold`, `total`, du PnL latent et de
@@ -46,6 +55,8 @@ LEVERAGE = 10
 SLIPPAGE = 0.01
 MAINTENANCE = 0.02  # 1 / (2 x 25), relue ci-dessous sur la méta de la place
 SETTLE_S = 2.0
+MATCH_USD = 1e-4  # un centième de cent : les champs HL ont six décimales
+MOVED_USD = 1e-3  # en dessous, le PnL latent ne départage pas les deux lectures
 
 
 def spot_usdc(info: Any, user: str) -> dict[str, float]:
@@ -71,14 +82,90 @@ def max_leverage(info: Any) -> int:
     raise SystemExit(f"{COIN} absent de l'univers Hyperliquid")
 
 
+def sample(position: dict[str, Any]) -> dict[str, float]:
+    """Un relevé : marginUsed contre ses deux lectures possibles."""
+    size = abs(float(position["szi"]))
+    raw = float(position["leverage"]["rawUsd"])
+    margin_used = float(position["marginUsed"])
+    with_pnl = raw - float(position["positionValue"])  # équité isolée, PnL compris
+    without_pnl = raw - size * float(position["entryPx"])  # marge initiale, sans PnL
+    return {
+        "ts": time.time(),
+        "unrealized_pnl": float(position["unrealizedPnl"]),
+        "margin_used": margin_used,
+        "if_includes_pnl": with_pnl,
+        "if_excludes_pnl": without_pnl,
+        "liquidation_px": float(position["liquidationPx"]),
+    }
+
+
+def verdict(samples: list[dict[str, float]]) -> str:
+    moved = [s for s in samples if abs(s["unrealized_pnl"]) > MOVED_USD]
+    if not moved:
+        return "NON TRANCHÉ : le PnL latent n'a jamais quitté zéro, prolonger --hold"
+    includes = all(abs(s["margin_used"] - s["if_includes_pnl"]) < MATCH_USD for s in moved)
+    excludes = all(abs(s["margin_used"] - s["if_excludes_pnl"]) < MATCH_USD for s in moved)
+    if includes and not excludes:
+        return f"marginUsed INCLUT le PnL latent ({len(moved)} relevés avec PnL non nul)"
+    if excludes and not includes:
+        return f"marginUsed EXCLUT le PnL latent ({len(moved)} relevés avec PnL non nul)"
+    return "INCOHÉRENT : aucune des deux lectures ne tient sur tous les relevés, voir le JSON"
+
+
 def implied_liquidation(margin: float, size: float, mark: float, mm: float) -> float:
     """Prix où l'équité isolée d'un short tombe à MM x notionnel."""
     return (margin + size * mark) / (size * (1.0 + mm))
 
 
+def opening_checks(
+    position: dict[str, Any], during: dict[str, float], mark: float, mm: float
+) -> dict[str, float]:
+    """Le relevé d'ouverture : prix de liquidation, hold, réserve libre."""
+    size = abs(float(position["szi"]))
+    margin_used = float(position["marginUsed"])
+    upnl = float(position["unrealizedPnl"])
+    published = float(position["liquidationPx"])
+    with_pnl = implied_liquidation(margin_used, size, mark, mm)
+    without_pnl = implied_liquidation(margin_used + upnl, size, mark, mm)
+    return {
+        "liquidation_published": published,
+        "liquidation_if_marginUsed_includes_pnl": with_pnl,
+        "liquidation_if_marginUsed_excludes_pnl": without_pnl,
+        "gap_with_pnl_pct": 100 * (with_pnl / published - 1),
+        "gap_without_pnl_pct": 100 * (without_pnl / published - 1),
+        "hold_minus_marginUsed": during["hold"] - margin_used,
+        "free_reserve_total_minus_hold": during["total"] - during["hold"],
+    }
+
+
+def hold_and_sample(
+    info: Any, user: str, position: dict[str, Any], hold_s: float, every_s: float
+) -> list[dict[str, float]]:
+    """Garder la position `hold_s` secondes et relever marginUsed à chaque pas."""
+    samples = [sample(position)]
+    deadline = time.monotonic() + hold_s
+    while time.monotonic() < deadline:
+        time.sleep(min(every_s, max(0.0, deadline - time.monotonic())))
+        current = eth_position(info, user)
+        if current is None:
+            print("position disparue pendant la garde : relevés arrêtés")
+            break
+        samples.append(sample(current))
+        last = samples[-1]
+        print(
+            f"  PnL {last['unrealized_pnl']:+.6f}  marginUsed {last['margin_used']:.6f}  "
+            f"avec PnL {last['if_includes_pnl']:.6f}  sans PnL {last['if_excludes_pnl']:.6f}"
+        )
+    return samples
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--execute", action="store_true", help="ouvre puis referme la position")
+    parser.add_argument(
+        "--hold", type=float, default=0.0, help="secondes de position gardée avant fermeture"
+    )
+    parser.add_argument("--every", type=float, default=10.0, help="secondes entre deux relevés")
     args = parser.parse_args()
 
     settings = load_settings()
@@ -116,23 +203,13 @@ def main() -> int:
         if position is None:
             print("aucune position relevée : l'ouverture a été refusée, voir ci-dessus")
             return 1
-        size = abs(float(position["szi"]))
-        margin_used = float(position["marginUsed"])
-        upnl = float(position["unrealizedPnl"])
-        published = float(position["liquidationPx"])
-        with_pnl = implied_liquidation(margin_used, size, mark, mm)
-        without_pnl = implied_liquidation(margin_used + upnl, size, mark, mm)
-        record["checks"] = {
-            "liquidation_published": published,
-            "liquidation_if_marginUsed_includes_pnl": with_pnl,
-            "liquidation_if_marginUsed_excludes_pnl": without_pnl,
-            "gap_with_pnl_pct": 100 * (with_pnl / published - 1),
-            "gap_without_pnl_pct": 100 * (without_pnl / published - 1),
-            "hold_minus_marginUsed": during["hold"] - margin_used,
-            "free_reserve_total_minus_hold": during["total"] - during["hold"],
-        }
+        record["checks"] = opening_checks(position, during, mark, mm)
         for name, value in record["checks"].items():
             print(f"  {name:<42} {value:.6f}")
+        samples = hold_and_sample(info, user, position, args.hold, args.every)
+        record["samples"] = samples
+        record["verdict"] = verdict(samples)
+        print(f"verdict : {record['verdict']}")
     finally:
         record["close"] = exchange.market_close(COIN, None, None, SLIPPAGE)
         print("fermeture :", json.dumps(record["close"])[:300])

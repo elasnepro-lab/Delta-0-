@@ -443,3 +443,33 @@ Reserve honnete : la position testee etait minuscule (12 USD de notionnel, 1,24
 de marge, pour 29,80 de solde). Une contrainte pourrait apparaitre quand la
 position est grande devant le compte. Ce qui est acquis, c'est qu'il n'existe pas
 de barrage systematique.
+
+## 17. D2 TRANCHE sur notre compte : `marginUsed` inclut le PnL latent, `hold` = la marge
+
+Mesure du 2026-10-05, `scripts/hl_probe_position.py`, cle maitre : short ETH isole
+10x de 0,005 ETH (~13,7 USD), garde 120 s, releve toutes les 10 s, referme.
+Seconde revue finance du meme jour, desaccord D2 : la semantique avait ete
+reproduite sur dix positions de comptes TIERS, jamais sur le notre.
+
+```
+ouverture       rawUsd 15,012   marginUsed 1,359651   hold 1,359651   total 26,771
+PnL -0,004      marginUsed 1,355651   (avec PnL 1,355651 / sans PnL 1,359651)
+PnL -0,0105     marginUsed 1,349151   (avec PnL 1,349151 / sans PnL 1,359651)
+PnL -0,011      marginUsed 1,348651   (avec PnL 1,348651 / sans PnL 1,359651)
+... 9 releves a PnL non nul, tous a l'identique au millionieme
+liquidationPx publie = rawUsd / (|szi| x 1,02)   au centime pres
+```
+
+**Trois acquis :**
+
+1. **`marginUsed` est l'equite isolee, PnL latent compris** : `rawUsd - positionValue`.
+   P2, P5 et I3 lisent donc bien le ratio qui decide de la liquidation. Le point A7
+   (§8, §12), reste non concluant faute de PnL a l'epoque, est clos : la premiere
+   mesure du jour avait le meme defaut (PnL nul a l'ouverture), d'ou la garde.
+2. **La maintenance margin vaut 2 % = 1 / (2 x 25)** sur notre compte : le prix de
+   liquidation publie se reproduit exactement avec elle.
+3. **`hold` vaut exactement `marginUsed`** et `total` inclut la marge engagee : la
+   reserve libre est `total - hold` (correctif F1 du 2026-10-02), pas `total`.
+
+Cout des deux mesures : 0,0123 puis 0,0188 USDC, frais taker et ecart de prix
+compris.
