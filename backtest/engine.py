@@ -61,8 +61,8 @@ from delta0.decision import (
     OperationalContext,
     Regime,
     decide,
-    exposure_mult_of,
     regime_candidate,
+    regime_spread,
     regime_step,
 )
 from delta0.types import Action, ActionKind, Snapshot
@@ -168,6 +168,39 @@ class Journal:
 
 
 @dataclass(slots=True)
+class Rates30d:
+    """L'emprunt et le staking moyens sur trente jours, que la porte compare au funding.
+
+    Ni l'un ni l'autre ne se moyenne depuis un taux affiché : ils se LISENT. La
+    dette croît comme le `variableBorrowIndex` d'Aave, le collatéral comme le
+    ratio Lido ; le rapport de deux relevés espacés de trente jours donne ce que
+    chacun a vraiment rapporté ou coûté. Même fenêtre que le funding, parce que
+    comparer une moyenne de trente jours à un taux instantané mesure deux
+    époques (revue finance 2026-10-05, N1).
+
+    Un relevé par jour suffit. Un changement de réserve (USDC.e puis USDC natif)
+    change d'index : la fenêtre repart de zéro, et tant qu'elle n'a pas un jour
+    d'épaisseur la porte retombe sur l'APR affiché et le ratio gelé.
+    """
+
+    window: deque[tuple[int, int, float, str]] = field(default_factory=deque)
+
+    def annualized(self, minute: Minute) -> tuple[float, float]:
+        if self.window and self.window[-1][3] != minute.reserve:
+            self.window.clear()
+        self.window.append((minute.ts_ms, minute.borrow_index, minute.ratio, minute.reserve))
+        while self.window and self.window[0][0] < minute.ts_ms - FUNDING_WINDOW_MS:
+            self.window.popleft()
+        first_ms, first_index, first_ratio, _ = self.window[0]
+        span_years = (minute.ts_ms - first_ms) / (DAY_MS * 365)
+        if span_years < 1 / 365 or first_index <= 0 or first_ratio <= 0.0:
+            return minute.borrow_apr, 0.0
+        borrow = (minute.borrow_index / first_index - 1.0) / span_years
+        staking = (minute.ratio / first_ratio - 1.0) / span_years
+        return borrow, staking
+
+
+@dataclass(slots=True)
 class Funding30d:
     """La moyenne de funding sur trente jours, celle que la porte de régime lit.
 
@@ -217,6 +250,8 @@ class Engine:
     _regime_day: int | None = None
     _regime_step_ms: int | None = None
     _regime_origin: float | None = None
+    _level: float | None = None  # l'exposition que la porte commande, par tranches
+    _rates: Rates30d = field(default_factory=Rates30d)
 
     def run(self, timeline: Timeline, book: Book, start: Month, end: Month) -> Journal:
         for minute in timeline.walk(start, end):
@@ -269,6 +304,7 @@ class Engine:
             self._pending.append((minute.ts_ms + self._delay_ms(action), action))
             if action.kind == "REGIME_STEP":
                 self._regime_step_ms = minute.ts_ms
+                self._level = float(action.params["step_target_exposure_mult"])
             decided = True
 
     def _settle(self, minute: Minute, book: Book) -> None:
@@ -324,6 +360,14 @@ class Engine:
         )
 
     def _context(self, minute: Minute, observed: Snapshot) -> OperationalContext:
+        if self.regime:
+            # Une transition commence dès que la cible s'écarte du niveau tenu,
+            # et finit quand il l'a rejointe : son origine fixe la taille des
+            # tranches, et l'effacer ensuite évite qu'elle serve à la suivante.
+            if self._held() == self._wanted():
+                self._regime_origin = None
+            elif self._regime_origin is None:
+                self._regime_origin = self._held()
         return OperationalContext(
             now_utc=observed.ts,
             # Le rejeu long ne coupe jamais le lien : le chaos est le travail
@@ -334,11 +378,11 @@ class Engine:
             # s'ouvre alors normalement. Poser « maintenant » fermerait P9 pour
             # toute la campagne sans que rien ne le dise.
             last_skim_at=self._last_skim,
-            # Porte OUVERTE : l'exposition tenue se mesure en inversant le
-            # solveur, la voulue sort de l'évaluateur. Porte FERMÉE : les deux
-            # sont égales, donc P10 se tait — c'est le côté « OFF » de l'A/B.
-            current_exposure_mult=self._held(observed),
-            desired_exposure_mult=self._wanted(observed),
+            # Porte OUVERTE : le niveau commandé (la dernière tranche), et la
+            # cible de l'évaluateur. Porte FERMÉE : ni l'un ni l'autre, P10 se
+            # tait et les re-dimensionnements visent la config — le côté « OFF ».
+            current_exposure_mult=self._held() if self.regime else None,
+            desired_exposure_mult=self._wanted() if self.regime else None,
             last_regime_step_at=(
                 None
                 if self._regime_step_ms is None
@@ -347,15 +391,15 @@ class Engine:
             regime_origin_exposure_mult=self._regime_origin,
         )
 
-    def _held(self, observed: Snapshot) -> float:
-        if not self.regime:
-            return self.config.exposure_mult
-        return exposure_mult_of(
-            observed.spot_usd, observed.equity, observed.cushion_usd, self.config
-        )
+    def _held(self) -> float:
+        """Le niveau commandé, pas l'exposition mesurée : celle-ci bouge à chaque
+        prix, et la poursuivre faisait tirer P10 toutes les heures."""
+        if self._level is None:
+            self._level = self.config.exposure_mult
+        return self._level
 
-    def _wanted(self, observed: Snapshot) -> float:
-        if not self.regime or self._regime is None:
+    def _wanted(self) -> float:
+        if self._regime is None:
             return self.config.exposure_mult
         return self._regime.target
 
@@ -373,7 +417,10 @@ class Engine:
         if day == self._regime_day:
             return
         self._regime_day = day
-        spread = self._funding.annualized(minute.ts_ms) - minute.borrow_apr
+        borrow_30d, staking_30d = self._rates.annualized(minute)
+        spread = regime_spread(
+            self._funding.annualized(minute.ts_ms), borrow_30d, staking_30d, self.config
+        )
         if self._regime is None:
             # Au premier jour la porte tient ce que le montage tient déjà : elle
             # arbitre la suite, elle ne re-dimensionne pas au démarrage sur une
@@ -388,8 +435,9 @@ class Engine:
         self._regime = regime_step(self._regime, spread, self.config)
         if self._regime.target != before:
             self.journal.regime_changes.append((minute.ts_ms, self._regime.target))
-            # The tranches of this transition are 25 % of the gap from here.
-            self._regime_origin = before
+            # Les tranches de cette transition valent 25 % de l'écart depuis le
+            # niveau tenu à cet instant — pas depuis la cible précédente (m26).
+            self._regime_origin = self._held()
 
     def _count_held(self, action: Action) -> None:
         """Compter ce que les garde-fous de P10 ont retenu.

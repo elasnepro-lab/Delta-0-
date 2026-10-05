@@ -21,6 +21,7 @@ Quatre choses comptent :
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
+from dataclasses import replace
 from itertools import pairwise
 from pathlib import Path
 
@@ -28,11 +29,11 @@ import pytest
 
 from backtest.binance import MINUTE_MS, Candle
 from backtest.costs import DEFAULT
-from backtest.engine import LATENCY_S, Engine, Funding30d, Venue
+from backtest.engine import DAY_MS, LATENCY_S, Engine, Funding30d, Rates30d, Venue
 from backtest.ledger import LT_TODAY, Book, Moment, prices
 from backtest.timeline import FundingEvent, Minute, Segment
 from delta0.config import load_config
-from delta0.decision import target_state
+from delta0.decision import Regime, target_state
 
 CONFIG = load_config(Path(__file__).resolve().parents[2] / "config.yaml.example")
 RATIO = 1.25
@@ -324,6 +325,38 @@ def monte(pas: float, minutes: int) -> list[Minute]:
     return frise([flat(2_500.0 + index * pas) for index in range(minutes)], funding=verse)
 
 
+def test_l_emprunt_et_le_staking_se_lisent_aux_index_sur_trente_jours() -> None:
+    """Revue finance 2026-10-05, N1 : la porte comparait au taux d'emprunt instantané.
+
+    Sur trente jours l'index de dette croît de 0,33 % et le ratio Lido de
+    0,18 % : 4,0 % d'emprunt et 2,2 % de staking annualisés, lus et non supposés.
+    """
+    debut = frise([flat(2_500.0)])[0]
+    fin = replace(
+        debut,
+        ts_ms=debut.ts_ms + 30 * DAY_MS,
+        borrow_index=int(debut.borrow_index * 1.0033),
+        ratio=debut.ratio * 1.0018,
+        borrow_apr=0.99,  # l'APR affiché ne doit plus entrer dans le calcul
+    )
+    taux = Rates30d()
+    taux.annualized(debut)
+    emprunt, staking = taux.annualized(fin)
+    assert emprunt == pytest.approx(0.0033 * 365 / 30, rel=1e-3)
+    assert staking == pytest.approx(0.0018 * 365 / 30, rel=1e-6)
+
+
+def test_un_changement_de_reserve_repart_d_une_fenetre_vide() -> None:
+    """USDC.e puis USDC natif : deux index qui ne se comparent pas."""
+    debut = frise([flat(2_500.0)])[0]
+    taux = Rates30d()
+    taux.annualized(replace(debut, reserve="usdce-arbitrum"))
+    bascule = replace(debut, ts_ms=debut.ts_ms + 10 * DAY_MS, borrow_index=debut.borrow_index * 7)
+    emprunt, staking = taux.annualized(bascule)
+    assert emprunt == bascule.borrow_apr  # pas un jour d'épaisseur : l'APR affiché
+    assert staking == 0.0
+
+
 def test_porte_fermee_la_table_ne_parle_jamais_de_regime() -> None:
     engine = campaign(monte(0.0, 200), book(), regime=False)
     assert engine.journal.count("REGIME_STEP") == 0
@@ -369,30 +402,46 @@ def book_at_target(*, drift: float = 1.0) -> Book:
     )
 
 
-def test_un_bilan_au_repos_ne_reste_jamais_sur_le_point_fixe() -> None:
-    """Et c'est tout le sujet de la zone morte.
+def test_la_derive_de_l_exposition_mesuree_ne_fait_pas_tirer_la_porte() -> None:
+    """La porte pilote un niveau commandé ; la dérive mesurée relève du re-centrage.
 
-    Posé EXACTEMENT sur le point fixe du solveur, le bilan en sort dès l'heure
-    suivante : le funding tombe, l'intérêt court, l'équité bouge, et l'exposition
-    tenue n'est plus celle qui est voulue. `_EXPOSURE_EPS` vaut 1e-6 dans le
-    moteur du bot, soit deux centimes de spot sur 20 000 $ : sans zone morte, P10
-    tire sur cette dérive-là. Mesuré sur le segment FIDÈLE : 19 913 pas en quatre
-    mois, 20 384 $ de frais sur 20 000 $ de capital.
+    Posé sur le point fixe du solveur, le bilan en sort dès l'heure suivante :
+    le funding tombe, l'intérêt court, l'équité bouge. Comparer la porte à
+    l'exposition MESURÉE la faisait tirer sur ce bruit : 19 913 pas en quatre
+    mois sans zone morte, puis 8 101 tranches pour 7 changements de régime avec
+    elle (A/B du 2026-10-05). Sans transition de régime, aucune tranche.
     """
     engine = campaign(monte(0.0, 300), book_at_target(), regime=True)
-    assert engine.journal.regime_suppressed > 0, "la dérive existe bel et bien"
-    assert engine.journal.count("REGIME_STEP") == 0, "et aucun pas n'est posé pour autant"
+    assert engine.journal.count("REGIME_STEP") == 0
 
 
-def test_un_vrai_ecart_de_regime_passe_la_zone_morte() -> None:
-    """La zone morte étouffe le bruit, pas un régime à rejoindre."""
-    engine = campaign(monte(0.0, 300), book(), regime=True)
-    assert engine.journal.count("REGIME_STEP") >= 1
+def _en_transition_vers_la_moitie() -> dict[str, object]:
+    """Une porte déjà décidée pour la demi-exposition, le montage encore plein."""
+    moitie = CONFIG.exposure_mult_half
+    return {"regime": True, "_regime": Regime(target=moitie, candidate=moitie, days=30)}
+
+
+def test_une_transition_de_regime_se_fait_en_quatre_tranches_puis_s_arrete() -> None:
+    """README §8.9 : 25 % de l'écart initial par tranche, quatre la terminent."""
+    engine = campaign(monte(0.0, 600), book_at_target(), **_en_transition_vers_la_moitie())
+    assert engine.journal.count("REGIME_STEP") == 4
 
 
 def test_la_cadence_d_une_tranche_par_heure_est_tenue() -> None:
     """README §8.9, écrit noir sur blanc et implémenté nulle part jusqu'ici."""
-    engine = campaign(monte(0.0, 300), book(), regime=True)
+    engine = campaign(monte(0.0, 600), book_at_target(), **_en_transition_vers_la_moitie())
     poses = [e for e in engine.journal.done if e.kind == "REGIME_STEP"]
+    assert len(poses) >= 2
     for avant, apres in pairwise(poses):
         assert apres.decided_ms - avant.decided_ms >= 3_600_000
+
+
+def test_un_recentrage_en_cours_de_regime_garde_le_niveau_commande() -> None:
+    """Un re-centrage visait toujours l'exposition pleine de la config.
+
+    À mi-régime, il reconstruisait ce que la porte venait de réduire ; en
+    PARKED, le premier mouvement de prix reconstruisait tout le montage.
+    """
+    engine = campaign(monte(2.0, 600), book_at_target(), **_en_transition_vers_la_moitie())
+    assert engine.journal.count("RECENTER_UP") >= 1
+    assert engine._level == pytest.approx(CONFIG.exposure_mult_half)

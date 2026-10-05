@@ -45,8 +45,13 @@ class OperationalContext:
     - `last_skim_at`: timestamp of last successful skim (None if never).
     - `desired_exposure_mult`: regime-gate output, computed by the regime
       evaluator from 30-day funding history + hysteresis. The pure engine
-      only compares it to the current exposition.
-    - `current_exposure_mult`: currently held exposition (spot / equity).
+      only compares it to the commanded level below.
+    - `current_exposure_mult`: the exposure level the montage is COMMANDED to
+      hold — the last tranche P10 posted, or the regime's target once reached.
+      Not a measurement: spot / equity drifts with every price move, and that
+      drift belongs to P7, which re-sizes back to this level. Comparing the
+      gate to the measured figure made P10 chase price noise every hour
+      (8 101 tranches for 7 regime changes, A/B of 2026-10-05).
     - `blind_state`: watchdog verdict.
     - `liquidation_event`: True if the watcher observed a LiquidationCall
       (Aave) or a liquidation user event (HL) for our address.
@@ -186,16 +191,32 @@ class Regime:
         return self.target == 0.0
 
 
-def regime_candidate(carry_spread: float, config: Config) -> float:
-    """The exposition this carry calls for, before any hysteresis. README §8.9."""
-    if carry_spread >= config.regime.spread_full_bps * 1e-4:
+def regime_spread(
+    funding_30d: float, borrow_30d: float, staking_30d: float, config: Config
+) -> float:
+    """Funding above its break-even, README §8.9. All three: 30-day means, annualized.
+
+    Per dollar of spot the montage earns the funding on the short and the
+    staking on the wstETH, and pays the borrow rate on `target_ltv` dollars of
+    debt: break-even is f* = target_ltv x borrow - staking. The gate used to
+    compare the funding to the FULL borrow rate, an instantaneous one at that,
+    and parked a montage that was still earning (revue finance 2026-10-02, O2;
+    2026-10-05, N1).
+    """
+    f_star = config.target_ltv * borrow_30d - staking_30d
+    return funding_30d - f_star
+
+
+def regime_candidate(spread: float, config: Config) -> float:
+    """The exposition this spread calls for, before any hysteresis. README §8.9."""
+    if spread >= config.regime.spread_full_bps * 1e-4:
         return config.exposure_mult
-    if carry_spread >= 0.0:
+    if spread >= config.regime.safety_margin_bps * 1e-4:
         return config.exposure_mult_half
     return 0.0
 
 
-def regime_step(state: Regime, carry_spread: float, config: Config) -> Regime:
+def regime_step(state: Regime, spread: float, config: Config) -> Regime:
     """One daily evaluation. Pure: same state and same spread, same answer.
 
     A candidate that repeats gains a day; a candidate that changes resets the
@@ -204,7 +225,7 @@ def regime_step(state: Regime, carry_spread: float, config: Config) -> Regime:
     keeps running rather than resetting, so a regime that stays put does not
     re-trigger anything.
     """
-    candidate = regime_candidate(carry_spread, config)
+    candidate = regime_candidate(spread, config)
     days = state.days + 1 if candidate == state.candidate else 1
     target = candidate if days >= config.regime.hysteresis_days else state.target
     return Regime(target=target, candidate=candidate, days=days)
@@ -518,6 +539,20 @@ def _p6_pump_down(snapshot: Snapshot, config: Config) -> Action | None:
     )
 
 
+def _commanded_level(ctx: OperationalContext) -> dict[str, float | int | str]:
+    """The exposure a full re-size must converge to: the regime's, not the config's.
+
+    A re-centre or a skim used to re-size to `config.exposure_mult` whatever
+    the gate held — so halfway through a regime the next re-centre rebuilt full
+    exposure, the gate cut it again, and a PARKED montage was rebuilt by the
+    first price move. With no gate running, the key is absent and the config
+    applies.
+    """
+    if ctx.current_exposure_mult is None:
+        return {}
+    return {"target_exposure_mult": ctx.current_exposure_mult}
+
+
 def _p7_recenter(snapshot: Snapshot, config: Config, ctx: OperationalContext) -> Action | None:
     if ctx.anchor_price is None or ctx.anchor_price <= 0.0:
         return None
@@ -530,7 +565,7 @@ def _p7_recenter(snapshot: Snapshot, config: Config, ctx: OperationalContext) ->
                 f"prix +{price_move:.4f} >= seuil re-centrage haut {config.recenter_up} "
                 "— re-centrage complet (borrow + bridge + agrandir short)"
             ),
-            params={"price_move": price_move},
+            params={"price_move": price_move, **_commanded_level(ctx)},
         )
     if price_move <= -config.recenter_down:
         return Action(
@@ -540,7 +575,7 @@ def _p7_recenter(snapshot: Snapshot, config: Config, ctx: OperationalContext) ->
                 f"prix {price_move:.4f} <= seuil re-centrage bas -{config.recenter_down} "
                 "— re-centrage complet (withdraw HL + bridge + repay + réduire short)"
             ),
-            params={"price_move": price_move},
+            params={"price_move": price_move, **_commanded_level(ctx)},
         )
     return None
 
@@ -580,7 +615,7 @@ def _p9_skim(snapshot: Snapshot, config: Config, ctx: OperationalContext) -> Act
                 f"écrémage: excédent marge {excess:.0f} $ > {config.skim_min_usd:.0f} $ "
                 f"et créneau {config.skim_cron} ouvert"
             ),
-            params={"excess_margin_usdc": excess},
+            params={"excess_margin_usdc": excess, **_commanded_level(ctx)},
         )
     return None
 
@@ -607,7 +642,13 @@ def _p10_regime_step(snapshot: Snapshot, config: Config, ctx: OperationalContext
     origin = ctx.regime_origin_exposure_mult
     full_gap = abs(ctx.desired_exposure_mult - (current if origin is None else origin))
     tranche = min(abs(delta), _REGIME_TRANCHE * max(full_gap, abs(delta)))
-    step_target = current + (tranche if delta > 0 else -tranche)
+    # The last tranche lands ON the target: four quarters summed in floating
+    # point left a parked montage at 1e-16 of exposure, a dust short whose
+    # margin ratio fired pumps and a bogus liquidation in the A/B of 2026-10-05.
+    if abs(delta) - tranche <= _EXPOSURE_EPS:
+        step_target = ctx.desired_exposure_mult
+    else:
+        step_target = current + (tranche if delta > 0 else -tranche)
 
     # Dead zone first: a step worth nothing must not use up the hourly slot of
     # one that would. The threshold is the one the project already uses for
