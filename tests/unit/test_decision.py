@@ -218,8 +218,8 @@ def test_p7_up_band_edge_below(
     config: Config,
     nominal_ctx: OperationalContext,
 ) -> None:
-    # price move +4.4 % — below +4.5 % band.
-    snap = replace(stable_snapshot, mark_price=2_500.0 * 1.044)
+    # price move +3.9 % — below the +4.0 % band (m7, 2026-10-05).
+    snap = replace(stable_snapshot, mark_price=2_500.0 * 1.039)
     action = decide(snap, config, nominal_ctx)
     assert action.priority is not Priority.P7_RECENTER
 
@@ -322,6 +322,26 @@ def test_a_long_is_left_to_p8_not_fed_by_p2_or_p5(
     assert action.priority is Priority.P8_DELTA_RETRUE
 
 
+def test_skim_waits_for_a_baseline_and_needs_strictly_more_than_the_minimum(
+    stable_snapshot: Snapshot,
+    config: Config,
+    nominal_ctx: OperationalContext,
+) -> None:
+    """Revue finance 2026-10-02, m10: first skim at once, ">=", wrong base.
+
+    Without a baseline the slot stays shut; the excess is measured against the
+    solver's margin target, and must exceed `skim_min_usd`, not equal it.
+    """
+    level = nominal_ctx.current_exposure_mult
+    fat = _with_excess(stable_snapshot, config, level, config.skim_min_usd + 500.0)
+    never = replace(nominal_ctx, last_skim_at=None)
+    assert decide(fat, config, never).kind != "SKIM_RECOMPOSE"
+    old = replace(nominal_ctx, last_skim_at=nominal_ctx.now_utc - timedelta(days=30))
+    assert decide(fat, config, old).kind == "SKIM_RECOMPOSE"
+    exactly = _with_excess(stable_snapshot, config, level, config.skim_min_usd)
+    assert decide(exactly, config, old).kind != "SKIM_RECOMPOSE"
+
+
 def test_p8_ignores_a_pure_price_move(
     stable_snapshot: Snapshot,
     config: Config,
@@ -342,15 +362,34 @@ def test_p8_ignores_a_pure_price_move(
 # --- P9: skim ----------------------------------------------------------------
 
 
+def _with_excess(snap: Snapshot, config: Config, exposure: float | None, excess: float) -> Snapshot:
+    """The snapshot whose margin sits exactly `excess` over the solver's target.
+
+    Margin is part of the equity the target is solved on, so adding margin
+    raises the target too. The excess is linear in the margin: two points fix it.
+    """
+
+    def over(margin: float) -> float:
+        moved = replace(snap, isolated_margin_usd=margin)
+        target = target_state(
+            moved.equity, config, cushion_usd=moved.cushion_usd, exposure_mult=exposure
+        ).margin_target_usd
+        return margin - target
+
+    a, b = 1_000.0, 9_000.0
+    margin = a + (excess - over(a)) * (b - a) / (over(b) - over(a))
+    return replace(snap, isolated_margin_usd=margin)
+
+
 def test_p9_fires_when_slot_open_and_excess_over_min(
     stable_snapshot: Snapshot,
     config: Config,
     nominal_ctx: OperationalContext,
 ) -> None:
-    # Sunday 12:30 UTC, never skimmed, big margin excess.
+    # Sunday 12:30 UTC, last skim a week ago, 1 000 $ over the solver's target.
     now_sun = datetime(2026, 8, 30, 12, 30, tzinfo=UTC)
-    ctx = replace(nominal_ctx, now_utc=now_sun, last_skim_at=None)
-    snap = replace(stable_snapshot, isolated_margin_usd=6_000.0)  # 1000 $ excess
+    ctx = replace(nominal_ctx, now_utc=now_sun, last_skim_at=now_sun - timedelta(days=7))
+    snap = _with_excess(stable_snapshot, config, ctx.current_exposure_mult, 1_000.0)
     action = decide(snap, config, ctx)
     assert action.priority is Priority.P9_SKIM
     assert action.params["excess_margin_usdc"] == pytest.approx(1_000.0)

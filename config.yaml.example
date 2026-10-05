@@ -13,7 +13,7 @@ exposure_mult_half: 1.3421052632  # meme proportion de l'exposition pleine que 1
 maintenance_margin: 0.02     # attendue de la place ; I9 alerte si la valeur lue (1 / (2 x maxLeverage)) en diffère
 cushion_pct: 0.05            # 5% of capital held as USDC supply on Aave = 1000$
 cushion_floor_pct: 0.025     # invariant I4 (évalué dès la phase 3) ; reconstitution à l'écrémage en 8.5
-recenter_up: 0.045           # flanc haut étroit (levier du short) : re-centrer tôt
+recenter_up: 0.04            # flanc haut étroit : re-centrer tôt, 0,76 pt avant P5 (+4,76 %) — m7, 2026-10-05
 recenter_down: 0.06          # flanc bas large (bandes : scripts/classeur.py) : re-centrer plus tard
 delta_tolerance: 0.02        # |delta| / spot max before short retrue
 skim_cron: "SUN 12:00 UTC"
@@ -62,13 +62,21 @@ watchdog:
 # Évalués par delta0/invariants.py ; appelés à chaque cycle une fois la boucle
 # de la phase 3 écrite — d'ici là, ils ne protègent encore de rien.
 invariants:
-  cruise_ltv_headroom: 0.02     # I2 : LTV au plus target_ltv + 0,02 en croisière
-  cruise_margin_floor: 0.07     # I3 : margin ratio au moins 0,07 en croisière
+  cruise_ltv_headroom: 0.04     # I2 : LTV spot au plus target_ltv + 0,04 en croisière (alerte vers -6 %, hors re-centrage)
+  cruise_margin_floor: 0.055    # I3 : margin ratio au moins 0,055 en croisière (alerte vers +4,3 %, après re-centrage, avant P5)
   p3_grace_s: 300               # I2 : seuil du coussin tenu 5 min sans P3 ni P4 dans ces 5 min -> CRITICAL et dégonflage
   p2_grace_s: 10                # I3 : seuil de marge tenu 10 s sans P2 ni P1 dans ces 10 s -> CRITICAL et dégonflage
   transfer_warn_s: 900          # I6 : traversée de plus de 15 min -> WARN
   transfer_critical_s: 3600     # I6 : plus d'une heure -> CRITICAL, opérations non critiques gelées
   recompose_tolerance: 0.005    # I8 : ratios à ±0,5 pt des cibles après recomposition
+
+# Ce que la réconciliation de démarrage signale (README §13). Seuils d'alerte,
+# donc en config : ils étaient en dur dans reconcile.py (revue finance m11, m30).
+reconcile:
+  hf_alert_floor: 1.10          # HF sous ce seuil au démarrage : CRITICAL (LTV 0,718 à LT 0,79)
+  anchor_drift_alert: 0.15      # dérive d'ancre au-delà : WARN
+  debt_drift_usd: 50            # écart de dette au journal au-delà de max(50 $,
+  debt_drift_pct: 0.05          # 5 % de la dernière dette) : WARN
 
 # M1 TRACER micro-operation safeties (README §14).
 # Defaults are conservative: dry_run True, small caps, first-use confirmation.

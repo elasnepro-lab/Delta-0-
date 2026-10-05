@@ -145,6 +145,20 @@ class WatchdogConfig(BaseModel):
     latency_budget_factor: Annotated[float, Field(gt=1.0)]
 
 
+class ReconcileConfig(BaseModel):
+    """What the boot reconciliation flags — README §13. Alert thresholds, so config.
+
+    They were constants in `reconcile.py`, one with a wrong comment (m11, m30).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    hf_alert_floor: _PositiveFloat = 1.10  # HF under this at boot: CRITICAL
+    anchor_drift_alert: _Ratio = 0.15  # anchor drift above this at boot: WARN
+    debt_drift_usd: _PositiveFloat = 50.0  # debt gap vs journal above max(this,
+    debt_drift_pct: _Ratio = 0.05  # ... this x last debt): WARN
+
+
 class InvariantsConfig(BaseModel):
     """Thresholds of invariants I1-I8 — README section 11.
 
@@ -154,8 +168,10 @@ class InvariantsConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    cruise_ltv_headroom: _Ratio = 0.02  # I2: LTV at most target_ltv + this, at rest
-    cruise_margin_floor: _Ratio = 0.07  # I3: margin ratio at least this, at rest
+    # Both cruise floors sit just OUTSIDE the re-centre bands: inside them they
+    # warned in normal cruise, at -2.9 % and +2.8 % (revue finance m5, m24).
+    cruise_ltv_headroom: _Ratio = 0.04  # I2: spot LTV at most target_ltv + this, at rest
+    cruise_margin_floor: _Ratio = 0.055  # I3: margin ratio at least this, at rest
     # I2: cushion threshold held this long without a P3 or P4 inside the window.
     p3_grace_s: _PositiveFloat = 300.0
     # I3: P2's budget is 2 s and the loop cycles every 5 s — one full cycle plus
@@ -336,6 +352,7 @@ class Config(BaseModel):
     emergency: EmergencyConfig
     watchdog: WatchdogConfig
     invariants: InvariantsConfig = Field(default_factory=InvariantsConfig)
+    reconcile: ReconcileConfig = Field(default_factory=ReconcileConfig)
 
     # M1 TRACER safeties. Defaults are safe: dry_run=True, small cap, low rate.
     tracer: TracerConfig = Field(default_factory=TracerConfig)

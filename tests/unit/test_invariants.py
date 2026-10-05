@@ -161,7 +161,7 @@ def test_a_position_without_debt_cannot_breach_the_cushion(
 def test_i3_warns_when_margin_dips_under_its_cruise_floor(
     stable_snapshot: Snapshot, config: Config, now: datetime
 ) -> None:
-    thinner = replace(stable_snapshot, isolated_margin_usd=3_000.0)  # 0.06 of 50 000
+    thinner = replace(stable_snapshot, isolated_margin_usd=2_600.0)  # 0.052, under 0.055
     assert _codes(check_invariants(thinner, config, _at_rest(now))) == [("I3", Severity.WARN)]
 
 
@@ -298,6 +298,22 @@ def test_i9_requires_a_one_point_gap_above_the_maintenance_margin(
     assert _codes(check_invariants(at_20x, config, _at_rest(now))) == [("I9", Severity.WARN)]
 
 
+def test_i9_warns_when_aave_lowers_the_max_ltv_under_the_pump(
+    stable_snapshot: Snapshot, config: Config, now: datetime
+) -> None:
+    """Revue finance 2026-10-02, m12: the max LTV was read and used by nothing.
+
+    Under the pump threshold (0.75 at LT 0.79), P5 could not borrow its refill.
+    """
+    assert ("I9", Severity.WARN) not in _codes(
+        check_invariants(stable_snapshot, config, _at_rest(now))
+    )
+    cut = replace(stable_snapshot, aave_ltv_max_wsteth=0.70)
+    violations = [v for v in check_invariants(cut, config, _at_rest(now)) if v.code == "I9"]
+    assert [v.severity for v in violations] == [Severity.WARN]
+    assert "LTV max" in violations[0].message
+
+
 def test_i9_warns_when_the_pump_would_fire_before_the_recentre(
     stable_snapshot: Snapshot, config: Config, now: datetime
 ) -> None:
@@ -337,10 +353,10 @@ def test_i2_in_cruise_reads_the_spot_ltv_not_aave_s(
 ) -> None:
     """Revue finance 2026-10-02, m4: Aave's LTV counts the cushion and reads low.
 
-    Debt/spot 0.65 is past the 0.645 ceiling, while Aave's view of the same book
-    (0.637, cushion included) sits under it and used to keep I2 quiet.
+    Debt/spot 0.67 is past the 0.665 ceiling, while Aave's view of the same book
+    (0.657, cushion included) sits under it and used to keep I2 quiet.
     """
-    high = replace(stable_snapshot, usdc_variable_debt_balance=32_500.0)
+    high = replace(stable_snapshot, usdc_variable_debt_balance=33_500.0)
     assert high.ltv < config.target_ltv + config.invariants.cruise_ltv_headroom
     assert _codes(check_invariants(high, config, _at_rest(now))) == [("I2", Severity.WARN)]
 
@@ -388,8 +404,8 @@ def test_each_invariant_raises_its_own_alert_event(
 
 def test_invariant_defaults_are_the_readme_numbers(config: Config) -> None:
     rules = config.invariants
-    assert rules.cruise_ltv_headroom == pytest.approx(0.02)
-    assert rules.cruise_margin_floor == pytest.approx(0.07)
+    assert rules.cruise_ltv_headroom == pytest.approx(0.04)
+    assert rules.cruise_margin_floor == pytest.approx(0.055)
     assert rules.p3_grace_s == pytest.approx(300.0)
     assert rules.transfer_warn_s == pytest.approx(900.0)
     assert rules.transfer_critical_s == pytest.approx(3_600.0)

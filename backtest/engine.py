@@ -374,10 +374,11 @@ class Engine:
             # du §15.4, et un mode dégradé permanent mesurerait le watchdog.
             blind_state=BlindState.NOMINAL,
             anchor_price=self.anchor_price,
-            # None tant que rien n'a été écrémé : le premier créneau hebdomadaire
-            # s'ouvre alors normalement. Poser « maintenant » fermerait P9 pour
-            # toute la campagne sans que rien ne le dise.
-            last_skim_at=self._last_skim,
+            # La référence part de la première minute, comme le BUILD la pose en
+            # production : le premier créneau s'ouvre une semaine plus tard, pas
+            # au premier cycle (m10). Sans référence, P9 resterait fermé.
+            last_skim_at=self._last_skim
+            or datetime.fromtimestamp((self.journal.first_ms or minute.ts_ms) / 1000, UTC),
             # Porte OUVERTE : le niveau commandé (la dernière tranche), et la
             # cible de l'évaluateur. Porte FERMÉE : ni l'un ni l'autre, P10 se
             # tait et les re-dimensionnements visent la config — le côté « OFF ».
